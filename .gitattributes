@@ -1,0 +1,23 @@
+# 统一按 LF 检出，避免跨平台换行符把整个文件标成已修改
+* text=auto eol=lf
+
+# 二进制资源：不要做换行符转换，也不要尝试 diff
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.ttf   binary
+*.otf   binary
+*.woff  binary
+*.woff2 binary
+*.zip   binary
+
+# 文本类显式声明，方便 GitHub 识别语言
+*.js    text eol=lf
+*.json  text eol=lf
+*.html  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+LICENSE text eol=lf

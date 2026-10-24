@@ -1,0 +1,36 @@
+{
+  "name": "jzclient-for-node",
+  "version": "0.1.0",
+  "description": "用 Node 重构的电话手表家长客户端，提供 CLI 与 WebUI 两种界面，并带有自动同意好友申请等增强功能",
+  "type": "commonjs",
+  "main": "bin/jzclient.js",
+  "bin": {
+    "jzclient": "bin/jzclient.js"
+  },
+  "scripts": {
+    "start": "node bin/jzclient.js"
+  },
+  "keywords": [
+    "smartwatch",
+    "kids-watch",
+    "parent-control",
+    "cli",
+    "webui",
+    "onebot",
+    "nodejs",
+    "zero-dependency"
+  ],
+  "author": "laolibuhuifei",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/laolibuhuifei/JZclient-for-node.git"
+  },
+  "homepage": "https://github.com/laolibuhuifei/JZclient-for-node#readme",
+  "bugs": {
+    "url": "https://github.com/laolibuhuifei/JZclient-for-node/issues"
+  },
+  "license": "GPL-3.0",
+  "engines": {
+    "node": ">=18"
+  }
+}

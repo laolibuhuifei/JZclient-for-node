@@ -1,0 +1,168 @@
+{
+  "name": "emoji_new",
+  "url": "",
+  "deviceFormat": 3,
+  "watchFormat": 3,
+  "emojis": [
+    {
+      "code": "second_021",
+      "desc": "真棒",
+      "descEn": "Teriffic"
+    },
+    {
+      "code": "second_022",
+      "desc": "暗中观察",
+      "descEn": "Observe"
+    },
+    {
+      "code": "second_023",
+      "desc": "加油",
+      "descEn": "Go for it"
+    },
+    {
+      "code": "second_024",
+      "desc": "爱你",
+      "descEn": "Love you"
+    },
+    {
+      "code": "second_025",
+      "desc": "摸摸头",
+      "descEn": "Good kid"
+    },
+    {
+      "code": "second_026",
+      "desc": "哭笑不得",
+      "descEn": "Helpless"
+    },
+    {
+      "code": "second_027",
+      "desc": "惊呆了",
+      "descEn": "Stunned"
+    },
+    {
+      "code": "second_028",
+      "desc": "发怒",
+      "descEn": "Angry"
+    },
+    {
+      "code": "second_029",
+      "desc": "知道了",
+      "descEn": "Got it"
+    },
+    {
+      "code": "second_030",
+      "desc": "在忙",
+      "descEn": "Busy"
+    },
+    {
+      "code": "second_031",
+      "desc": "下课了吗？",
+      "descEn": "Off class"
+    },
+    {
+      "code": "second_032",
+      "desc": "你在哪？",
+      "descEn": "Where r u"
+    },
+    {
+      "code": "second_001",
+      "desc": "快回电话",
+      "descEn": "Call back"
+    },
+    {
+      "code": "second_002",
+      "desc": "马上到",
+      "descEn": "Right away"
+    },
+    {
+      "code": "second_003",
+      "desc": "到校了吗？",
+      "descEn": "At school"
+    },
+    {
+      "code": "second_004",
+      "desc": "快回家",
+      "descEn": "Back home"
+    },
+    {
+      "code": "second_005",
+      "desc": "早点睡",
+      "descEn": "Good night"
+    },
+    {
+      "code": "second_006",
+      "desc": "多喝水",
+      "descEn": "Drink"
+    },
+    {
+      "code": "second_007",
+      "desc": "吃饭啦",
+      "descEn": "Meal time"
+    },
+    {
+      "code": "second_008",
+      "desc": "专心点",
+      "descEn": "Focus"
+    },
+    {
+      "code": "second_009",
+      "desc": "礼物",
+      "descEn": "Gift"
+    },
+    {
+      "code": "second_010",
+      "desc": "拥抱",
+      "descEn": "Hug"
+    },
+    {
+      "code": "second_011",
+      "desc": "好喜欢",
+      "descEn": "Like it"
+    },
+    {
+      "code": "second_012",
+      "desc": "想你了",
+      "descEn": "Miss you"
+    },
+    {
+      "code": "second_013",
+      "desc": "捏捏脸",
+      "descEn": "Pinch"
+    },
+    {
+      "code": "second_014",
+      "desc": "爱心攻击",
+      "descEn": "Love"
+    },
+    {
+      "code": "second_015",
+      "desc": "叹气",
+      "descEn": "Sigh"
+    },
+    {
+      "code": "second_016",
+      "desc": "笑到流泪",
+      "descEn": "LOL"
+    },
+    {
+      "code": "second_017",
+      "desc": "666",
+      "descEn": "Terrific"
+    },
+    {
+      "code": "second_018",
+      "desc": "我到了",
+      "descEn": "Reached"
+    },
+    {
+      "code": "second_019",
+      "desc": "盯着看",
+      "descEn": "Stare"
+    },
+    {
+      "code": "second_020",
+      "desc": "拒绝",
+      "descEn": "Refuse"
+    }
+  ]
+}

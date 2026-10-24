@@ -1,0 +1,32 @@
+# 依赖
+node_modules/
+
+# 运行期配置与日志
+# config.json 里有登录票据、设备指纹和访问令牌，绝对不能提交
+config.json
+*.log
+npm-debug.log*
+yarn-error.log*
+.env
+.env.*
+
+# 用户上传的背景图等大体积资源
+*.local.*
+
+# 临时文件与产物
+tmp/
+dist/
+build/
+screenshots/
+.preview/
+*.bak
+*.orig
+*.tgz
+
+# 编辑器与系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

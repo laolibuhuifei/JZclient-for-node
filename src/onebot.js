@@ -126,13 +126,21 @@ async function startOneBot({ cfg, ctx }) {
     }
   );
 
-  // 令牌为空时生成并写回配置, 避免"裸奔"的服务
+  // 令牌为空时生成并写回配置, 避免"裸奔"的服务。
+  // ⚠️ 不能直接 device.save(cfg): 调用方传进来的 cfg 可能只是片段(测试脚本、CLI 局部调用),
+  // 那样会把磁盘上完整的登录票据 / 设备指纹 / 手表状态整份覆盖掉。所以先读完整配置再只改 onebot 这一段。
   let dirty = false;
   if (!conf.http.token) { conf.http.token = genToken(); dirty = true; }
   if (!conf.ws.token) { conf.ws.token = genToken(); dirty = true; }
   if (dirty) {
     cfg.onebot = conf;
-    try { device.save(cfg); } catch (e) { log.warn('onebot', '令牌保存失败(每次启动会变): ' + e.message); }
+    try {
+      const full = device.load();
+      full.onebot = conf;
+      device.save(full);
+    } catch (e) {
+      log.warn('onebot', '令牌保存失败(每次启动会变): ' + e.message);
+    }
   }
 
   const sockets = new Set();   // 已连上的 WS 客户端

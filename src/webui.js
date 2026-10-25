@@ -1948,9 +1948,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     // ===== 概览 =====
     if (action === 'overview') {
       const account = ensure(await api.getWatchAccount(id));
-      const members = await safe(() => api.getWatchMembers(id));
-      const classModes = await safe(() => api.getClassModes(id));
-      const guard = await safe(() => api.getGuardStatus(id));
+      // 这三个互不依赖, 串行 await 最坏要等 3 个平台超时(各 15 秒), 并发就只等最慢的那个
+      const [members, classModes, guard] = await Promise.all([
+        safe(() => api.getWatchMembers(id)),
+        safe(() => api.getClassModes(id)),
+        safe(() => api.getGuardStatus(id)),
+      ]);
       const status = (cfg.watchStatus && cfg.watchStatus[id]) || {};
       const avatarUrl = await getAvatarUrl(id, account);
       return ok(res, { account, members, classModes, guard, status, avatarUrl });

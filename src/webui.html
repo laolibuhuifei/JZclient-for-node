@@ -1184,6 +1184,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     <div class="header-actions">
       <span class="header-account" id="accountName"></span>
       <button class="icon-btn theme-btn" id="themeBtn" type="button" aria-label="切换主题"></button>
+      <button class="icon-btn" id="logBtn" type="button" title="实时日志">日志</button>
       <button class="icon-btn" id="refreshBtn">刷新</button>
       <button class="nav-toggle" id="navToggle" aria-label="菜单" aria-expanded="false"><span></span><span></span><span></span></button>
     </div>
@@ -1401,9 +1402,28 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     toast._timer = setTimeout(function(){ t.className = 'toast'; }, 2600);
   }
 
+  // 单个接口最长等 30 秒。平台接口偶尔会长时间不返回(网络抖动 / 服务端排队),
+  // 没有超时的话页面就一直停在「加载中…」。要更久的调用自己传 timeout(毫秒), 传 0 表示不限。
+  var API_TIMEOUT = 30000;
   async function api(path, opts){
-    var r = await fetch(path, opts);
-    var j = await r.json();
+    opts = opts || {};
+    var ms = opts.timeout === undefined ? API_TIMEOUT : Number(opts.timeout);
+    var ac = null, timer = null, o = opts;
+    if (ms > 0 && typeof AbortController !== 'undefined' && !opts.signal) {
+      ac = new AbortController();
+      o = Object.assign({}, opts, { signal: ac.signal });
+      timer = setTimeout(function(){ try { ac.abort(); } catch(e){} }, ms);
+    }
+    var r, j;
+    try {
+      r = await fetch(path, o);
+      j = await r.json();
+    } catch(e){
+      if (ac && ac.signal.aborted) throw new Error('请求超时（' + Math.round(ms / 1000) + ' 秒没响应）');
+      throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     if (r.status === 401 || j.unauthorized) {
       showGate('登录状态已失效，请重新输入访问令牌');
       throw new Error('需要访问令牌');
@@ -1669,7 +1689,22 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     navToggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
   };
 
-  function setLoading(){ $('#content').innerHTML = '<div class="loading">加载中…</div>'; }
+  // 加载兜底: 12 秒还没渲染出内容就给个「重试」按钮, 不让页面永远停在「加载中…」
+  var loadWatchdog = 0;
+  function setLoading(){
+    $('#content').innerHTML = '<div class="loading">加载中…</div>';
+    if (loadWatchdog) { clearTimeout(loadWatchdog); loadWatchdog = 0; }
+    loadWatchdog = setTimeout(function(){
+      loadWatchdog = 0;
+      var c = $('#content');
+      if (!c || !c.querySelector('.loading')) return;   // 已经渲染出来了
+      c.innerHTML = '<div class="empty">加载超时了，服务端没有响应。<br>' +
+        '（网络或平台接口卡住时会出现这个，点下面重试即可）<br>' +
+        '<button class="btn small tonal" id="retryLoad" style="margin-top:12px">重试</button></div>';
+      var b = $('#retryLoad');
+      if (b) b.onclick = function(){ load(); };
+    }, 12000);
+  }
 
   async function tryApi(path, opts){
     try { return await api(path, opts); } catch (e) { return null; }
@@ -1727,8 +1762,16 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       }
       else if (state.tab === 'me') {
         var acc = (await tryApi('/api/account')) || {};
-        var ov = state.id ? await tryApi('/api/watch/' + id + '/overview') : null;
-        if (seq === loadSeq) renderMe(acc, ov);
+        // 手表信息失败要说一声, 否则页面会像"没绑定手表"一样空着, 用户不知道是接口挂了
+        var ov = null, ovErr = '';
+        if (state.id) {
+          try { ov = await api('/api/watch/' + id + '/overview'); }
+          catch(e){ ovErr = e.message; }
+        }
+        if (seq === loadSeq) {
+          renderMe(acc, ov);
+          if (ovErr) toast('手表信息加载失败：' + ovErr, true);
+        }
       }
       else if (state.tab === 'overview') await run(api('/api/watch/' + id + '/overview'), renderOverview);
       else if (state.tab === 'health') await run(api('/api/watch/' + id + '/health'), renderHealth);
@@ -1752,6 +1795,9 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     } catch(e){
       if (seq !== loadSeq) return;
       $('#content').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+    } finally {
+      // 只有最新那次 load 才能清掉看门狗, 否则快速切页时会把新页面的兜底计时器干掉
+      if (seq === loadSeq && loadWatchdog) { clearTimeout(loadWatchdog); loadWatchdog = 0; }
     }
   }
 
@@ -4827,13 +4873,22 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     }
   }
 
+  // 顶栏「日志」: 任何时候都能一键进实时日志页, 返回时回到来的那一页
+  var logBtn = $('#logBtn');
+  if (logBtn) logBtn.onclick = function(){
+    if (state.tab === 'logs') return;
+    state.backTo = SUB_TABS.indexOf(state.tab) >= 0 ? (state.backTo || 'more') : state.tab;
+    state.tab = 'logs';
+    renderNav(); updateTitle(); load();
+  };
+
   $('#refreshBtn').onclick = async function(){
     try {
       var d = await api('/api/watches?refresh=1');
       state.watches = d.watches || [];
       if (!state.watches.length) {
         state.id = null;
-        if (['chat', 'location', 'more', 'me', 'account', 'bind'].indexOf(state.tab) < 0) state.tab = 'me';
+        if (['chat', 'location', 'more', 'me', 'account', 'bind', 'logs'].indexOf(state.tab) < 0) state.tab = 'me';
         renderStrip(); renderNav(); updateTitle(); load(); toast('已刷新');
         return;
       }

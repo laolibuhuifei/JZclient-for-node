@@ -39,4 +39,10 @@ module.exports = {
     // 表情资源 CDN 前缀
     emojiBaseUrl: 'http://smartwatch.qiniucdn.com/emoji%2F',
   },
+  notice: {
+    // 项目官方公告服务, 客户端只读
+    // 这是作者发布更新通知的地方, 不对用户开放配置
+    baseUrl: 'https://app.laolibuhuifei.com',
+    cacheMinutes: 10,
+  },
 };

@@ -14,6 +14,7 @@ const { parseMessage, describe, mediaUrl, buildText, buildEmoji, buildLocation, 
 const { loadImageSource, uploadImage, uploadVoice, uploadVideo, directVideo } = require('./upload');
 const { startOneBot } = require('./onebot');
 const log = require('./logger');
+const SITE = require('./site.config');
 
 const HTML_FILE = path.join(__dirname, 'webui.html');
 let htmlCache = null;
@@ -626,25 +627,19 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     return yiyanCache;
   }
 
-  // ===== 公告: 拉取独立部署的私有公告服务(客户端只负责渲染) =====
+  // ===== 公告: 拉取项目官方公告服务(客户端只负责渲染) =====
+  // 地址写死在 site.config.js, 不开放给用户配置 —— 这是作者发布通知的地方
   let noticeCache = { at: 0, list: [] };
-
-  function noticeBase() {
-    const c = cfg.noticeApi || {};
-    return String(c.baseUrl || '').trim().replace(/\/+$/, '');
-  }
+  const NOTICE_BASE = String((SITE.notice && SITE.notice.baseUrl) || '').replace(/\/+$/, '');
+  const NOTICE_TTL = Math.max(1, Number((SITE.notice && SITE.notice.cacheMinutes) || 10)) * 60000;
 
   async function fetchNotices(force) {
-    const c = cfg.noticeApi || {};
-    if (!c.enabled) return { enabled: false, configured: false, notices: [], fetchedAt: 0 };
-    const base = noticeBase();
-    if (!base) return { enabled: true, configured: false, notices: [], fetchedAt: 0 };
-    const ttl = Math.max(1, Number(c.cacheMinutes) || 10) * 60000;
-    if (!force && noticeCache.at && Date.now() - noticeCache.at < ttl) {
+    if (!NOTICE_BASE) return { enabled: false, configured: false, notices: [], fetchedAt: 0 };
+    if (!force && noticeCache.at && Date.now() - noticeCache.at < NOTICE_TTL) {
       return { enabled: true, configured: true, notices: noticeCache.list, fetchedAt: noticeCache.at, cached: true };
     }
     try {
-      const j = await httpJson(base + '/api/notices', { timeout: 6000 });
+      const j = await httpJson(NOTICE_BASE + '/api/notices', { timeout: 6000 });
       const list = j && j.data && Array.isArray(j.data.notices) ? j.data.notices : [];
       noticeCache = { at: Date.now(), list };
       return { enabled: true, configured: true, notices: list, fetchedAt: noticeCache.at };
@@ -664,8 +659,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
   }
 
   async function fetchNotice(id) {
-    const base = noticeBase();
-    if (!base) throw new Error('未配置公告服务地址');
+    const base = NOTICE_BASE;
+    if (!base) throw new Error('公告服务地址未配置');
     const j = await httpJson(base + '/api/notices/' + encodeURIComponent(id), { timeout: 6000 });
     const n = j && j.data && j.data.notice;
     if (!n) throw new Error('公告不存在或已被删除');
@@ -1304,41 +1299,10 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
       throw new Error('接口不存在');
     }
 
-    // ===== 公告: 代理独立部署的私有公告服务(客户端只拉取 + 渲染) =====
+    // ===== 公告: 代理项目官方公告服务(客户端只拉取 + 渲染) =====
     if (parts[1] === 'announcements') {
       if (!parts[2]) return ok(res, await fetchNotices(query.get('refresh') === '1'));
       return ok(res, { notice: await fetchNotice(parts[2]) });
-    }
-
-    // 公告服务配置(我的 → 公告服务)
-    if (parts[1] === 'notice-api') {
-      const state = () => {
-        const c = cfg.noticeApi || {};
-        return {
-          enabled: !!c.enabled,
-          baseUrl: c.baseUrl || '',
-          cacheMinutes: c.cacheMinutes != null ? c.cacheMinutes : 10,
-        };
-      };
-      if (!parts[2] && req.method === 'GET') return ok(res, state());
-
-      if (parts[2] === 'config' && req.method === 'POST') {
-        const b = await readBody(req);
-        cfg.noticeApi = Object.assign({ enabled: true, baseUrl: '', cacheMinutes: 10 }, cfg.noticeApi || {});
-        if (b.enabled != null) cfg.noticeApi.enabled = !!b.enabled;
-        if (b.baseUrl != null) {
-          const u = String(b.baseUrl).trim().replace(/\/+$/, '');
-          if (u && !/^https?:\/\//i.test(u)) throw new Error('公告服务地址必须以 http:// 或 https:// 开头');
-          cfg.noticeApi.baseUrl = u;
-        }
-        if (b.cacheMinutes != null) cfg.noticeApi.cacheMinutes = clampInt(b.cacheMinutes, 1, 1440, 10);
-        device.save(cfg);
-        noticeCache = { at: 0, list: [] }; // 改地址/开关后立刻重新拉
-        log.info('notice', '公告服务配置已更新: ' + (cfg.noticeApi.enabled ? (cfg.noticeApi.baseUrl || '(未填地址)') : '已关闭'));
-        return ok(res, state());
-      }
-
-      throw new Error('接口不存在');
     }
 
     // ===== 账号 / 配置 =====

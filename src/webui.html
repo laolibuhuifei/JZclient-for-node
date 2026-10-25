@@ -1755,7 +1755,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     var list = (d && d.notices) || [];
     if (!list.length) {
       $('#content').innerHTML = '<div class="card"><div class="empty">' +
-        (d && d.configured === false ? '还没有配置公告服务地址，可以在「我的 → 公告服务」里填写。' : '暂无公告') +
+        (d && d.error ? '公告服务暂时不可用，请稍后再试。' : '暂无公告') +
         '</div></div>';
       return;
     }
@@ -2383,64 +2383,6 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     };
   }
 
-  // 公告服务配置卡(公告内容来自独立部署的私有服务, 这里只填地址)
-  async function loadNoticeApiCard(){
-    var box = $('#noticeApiCard');
-    if (!box) return;
-    var st;
-    try { st = await api('/api/notice-api'); } catch(e){ box.innerHTML = ''; return; }
-    var on = !!(st && st.enabled);
-    var base = (st && st.baseUrl) || '';
-    var ttl = st && st.cacheMinutes != null ? st.cacheMinutes : 10;
-
-    var html = '<div class="card"><div class="card-title">公告服务</div>' +
-      '<div class="row"><span>状态</span><span class="value">' +
-        (on ? '<span style="color:var(--success)">已启用</span>' : '已关闭') +
-        (on && !base ? ' · 未填写地址' : '') + '</span></div>' +
-      '<label class="field"><span>服务地址</span>' +
-        '<input id="naBase" placeholder="https://app.laolibuhuifei.com" value="' + esc(base) + '"></label>' +
-      '<label class="field"><span>本地缓存（分钟）</span>' +
-        '<input id="naTtl" type="number" min="1" max="1440" value="' + esc(ttl) + '"></label>' +
-      '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:4px">' +
-        '<button class="btn small" id="naSave">保存</button>' +
-        '<button class="btn small tonal" id="naRefresh">刷新缓存</button>' +
-        '<button class="btn small tonal" id="naOpen">查看公告</button>' +
-        '<button class="btn small ' + (on ? 'danger' : '') + '" id="naToggle">' + (on ? '关闭' : '启用') + '</button>' +
-      '</div>' +
-      '<div class="muted" style="font-size:12px;line-height:1.75;margin-top:10px">' +
-        '公告由独立部署的公告服务提供，这里只做拉取与渲染。<br>' +
-        '留空表示未配置，主页不会显示公告卡；服务不可用时会继续用上一次的缓存。' +
-      '</div></div>';
-    box.innerHTML = html;
-
-    function save(body, okText){
-      return api('/api/notice-api/config', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-      }).then(function(){ toast(okText || '已保存'); return loadNoticeApiCard(); })
-        .catch(function(e){ toast(e.message || '保存失败', true); });
-    }
-
-    $('#naSave').onclick = function(){
-      var url = ($('#naBase').value || '').trim();
-      var n = parseInt($('#naTtl').value, 10);
-      if (isNaN(n)) n = 10;
-      save({ baseUrl: url, cacheMinutes: Math.max(1, Math.min(1440, n)), enabled: true }, '公告服务已保存');
-    };
-    $('#naRefresh').onclick = async function(){
-      var btn = this;
-      btn.disabled = true; btn.textContent = '刷新中…';
-      try {
-        var r = await api('/api/announcements?refresh=1');
-        var cnt = ((r && r.notices) || []).length;
-        if (r && r.error) toast('服务不可用：' + r.error, true);
-        else toast('已刷新，共 ' + cnt + ' 条公告');
-      } catch(e){ toast(e.message || '刷新失败', true); }
-      btn.disabled = false; btn.textContent = '刷新缓存';
-    };
-    $('#naOpen').onclick = function(){ goAnnouncements(null); };
-    $('#naToggle').onclick = function(){ save({ enabled: !on }, on ? '公告服务已关闭' : '公告服务已启用'); };
-  }
-
   function renderMe(d, ov){
     var a = (ov && ov.account) || {};
     var st = (ov && ov.status) || {};
@@ -2487,9 +2429,6 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     // 对外 API: 加好友口令(异步填充, 见下方 loadGeniusApiCard)
     html += '<div id="geniusApiCard" style="margin-top:12px"></div>';
 
-    // 公告服务配置(异步填充, 见下方 loadNoticeApiCard)
-    html += '<div id="noticeApiCard" style="margin-top:12px"></div>';
-
     // 外观: 自定义背景
     html += '<div class="card" style="margin-top:12px"><div class="card-title">外观</div>' +
       '<div class="row"><span>自定义背景</span><span class="value" id="bgState">未设置</span></div>' +
@@ -2502,7 +2441,6 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     $('#content').innerHTML = html;
     loadOneBotCard();
     loadGeniusApiCard();
-    loadNoticeApiCard();
 
     var sw = $('#classSwitch');
     if (sw) sw.onchange = async function(){

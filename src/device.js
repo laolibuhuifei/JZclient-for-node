@@ -63,12 +63,7 @@ const DEFAULTS = {
     enabled: false,      // 关闭时对外接口一律 403
     token: '',           // 为空时首次启用自动生成并写回
   },
-  // 公告服务(客户端只做拉取与渲染, 地址可换成自建服务)
-  noticeApi: {
-    enabled: true,
-    baseUrl: 'https://app.laolibuhuifei.com', // 官方公告服务地址, 可改成自己的
-    cacheMinutes: 10,                 // 客户端本地缓存时长
-  },
+  // 公告服务地址写死在 src/site.config.js 的 notice.baseUrl, 不放进用户配置
 };
 
 function load() {
@@ -82,7 +77,6 @@ function load() {
       cfg.onebot.ws = Object.assign({}, DEFAULTS.onebot.ws, (cfg.onebot || {}).ws || {});
       cfg.onebot.wsClient = Object.assign({}, DEFAULTS.onebot.wsClient, (cfg.onebot || {}).wsClient || {});
       cfg.geniusApi = Object.assign({}, DEFAULTS.geniusApi, cfg.geniusApi || {});
-      cfg.noticeApi = Object.assign({}, DEFAULTS.noticeApi, cfg.noticeApi || {});
       if (!Array.isArray(cfg.ai.sessions)) cfg.ai.sessions = [];
       if (!Array.isArray(cfg.ai.keywords)) cfg.ai.keywords = [];
       return cfg;
@@ -99,7 +93,6 @@ function load() {
     },
     ai: Object.assign({}, DEFAULTS.ai),
     geniusApi: Object.assign({}, DEFAULTS.geniusApi),
-    noticeApi: Object.assign({}, DEFAULTS.noticeApi),
   });
 }
 

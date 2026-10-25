@@ -11,7 +11,7 @@ const sso = require('./sso');
 const { ImClient } = require('./im');
 const { chat: aiChat } = require('./ai');
 const { parseMessage, describe, mediaUrl, buildText, buildEmoji, buildLocation, buildLink, buildPhoto, buildVideo, buildVoice, buildKaomoji, EMOJI_PRESET } = require('./message');
-const { loadImageSource, uploadImage, uploadVoice, uploadVideo, directVideo } = require('./upload');
+const { loadImageSource, uploadImage, uploadVoice, uploadVideo, directVideo, probeDuration, splitAudio, cleanupSplit, downloadToTmp } = require('./upload');
 const { startOneBot } = require('./onebot');
 const log = require('./logger');
 const SITE = require('./site.config');
@@ -221,11 +221,21 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
 
   // 启用状态下确保令牌存在(为空则生成并写回配置)
   function ensureGeniusToken() {
+    let dirty = false;
     cfg.geniusApi = Object.assign({ enabled: false, token: '' }, cfg.geniusApi || {});
-    if (!cfg.geniusApi.enabled) return cfg.geniusApi.token;
-    if (cfg.geniusApi.token) return cfg.geniusApi.token;
-    cfg.geniusApi.token = newGeniusToken();
-    try { device.save(cfg); } catch (e) { log.warn('geniusapi', '令牌保存失败(每次启动会变): ' + e.message); }
+    if (cfg.geniusApi.enabled && !cfg.geniusApi.token) {
+      cfg.geniusApi.token = newGeniusToken();
+      dirty = true;
+    }
+    // 按手表的令牌也要保证存在, 否则用户打开开关后拿不到能用的令牌
+    cfg.extApi = device.normalizeExtApi(cfg.extApi);
+    Object.keys(cfg.extApi).forEach((wid) => {
+      const e = cfg.extApi[wid];
+      if (e && e.enabled && !e.token) { e.token = newGeniusToken(); dirty = true; }
+    });
+    if (dirty) {
+      try { device.save(cfg); } catch (e) { log.warn('geniusapi', '令牌保存失败(每次启动会变): ' + e.message); }
+    }
     return cfg.geniusApi.token;
   }
 
@@ -334,35 +344,167 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
   let imConnecting = null;
   let chatTargets = null;
   const chatLog = new Map();
-  let onebot = null; // OneBot v11 桥接, 见 src/onebot.js
+  let onebot = null;                  // 全局实例(历史行为: 一套端口收全部会话)
+  let onebots = new Map();            // watchId -> 实例, 按手表分开
+  let onebotKeys = new Map();         // watchId -> [会话 key], 该实例只推这些会话
+  let watchNames = null;              // [{watchId, name}], 手表名 <-> 会话名 靠它对
 
-  // OneBot 运行时上下文(重启时复用同一份, 保证行为一致)
-  function onebotCtx() {
+  // 单实例的运行时上下文。watchId + scopeKeys 都为空 = 全局实例, 不过滤
+  function onebotCtx(watchId, scopeKeys) {
+    const keys = scopeKeys || null;
+    const scoped = !!(watchId && keys && keys.length);
     return {
-      selfId: () => (im ? im.imAccountId : (cfg.imAccountId || 0)),
+      // 按手表的实例: self_id 用那块表自己的 IM 账号, 插件才分得清"哪块表在说话"
+      selfId: () => {
+        if (scoped) {
+          const s = keys.find((k) => k.indexOf('s:') === 0);
+          const n = s ? Number(s.slice(2)) : 0;
+          if (n) return n;
+        }
+        return im ? im.imAccountId : (cfg.imAccountId || 0);
+      },
       nickname: () => cfg.userName || 'JZClientForNode',
       online: () => !!(im && im.connected),
-      targets: () => loadChatTargets(),
+      targets: async () => {
+        const all = (await loadChatTargets()) || [];
+        return scoped ? all.filter((t) => keys.indexOf(t.key) >= 0) : all;
+      },
       send: (key, body) => sendChat(Object.assign({ key }, body)),
     };
   }
 
-  // 启动/重启 OneBot。端口在 listen 时绑定, 改端口只能整体关掉再起
+  // 手表名缓存: 平台没给 watchId 与 imAccountId 的对应关系, 只能靠名字把两边对上
+  async function ensureWatchNames(force) {
+    if (watchNames && !force) return watchNames;
+    // 注意: 这里不能用 safe(), safe 是给 {code,data} 形态的接口响应用的,
+    // watchList 返回的是普通数组, 过 ensure() 会直接抛错然后被吞成 null。
+    let list = [];
+    try { list = (await watchList(force)) || []; } catch (e) { list = []; }
+    watchNames = list.map((w) => ({ watchId: String(w.watchId), name: w.name || '' }));
+    return watchNames;
+  }
+
+  // 自动给某块手表挑会话: 单聊按手表名匹配, 家庭群看 peers 里有没有同一个 imAccountId。
+  // 对不上就返回空数组, 让用户在设置里手选 —— 绝不瞎猜, 免得把别人的消息推错机器人。
+  function autoKeysFor(watchId) {
+    const list = chatTargets || [];
+    const w = (watchNames || []).find((x) => x.watchId === String(watchId));
+    const singles = list.filter((t) => t.type === 'single');
+    let hit = null;
+    if (w && w.name) hit = singles.find((t) => t.name === w.name) || null;
+    if (!hit && singles.length === 1) hit = singles[0]; // 只有一块表, 不用猜
+    if (!hit) return [];
+    const out = [hit.key];
+    const im = String(hit.receiverId);
+    list.forEach((t) => {
+      if (t.type === 'group' && (t.peers || []).some((a) => String(a.imAccountId) === im)) out.push(t.key);
+    });
+    return out;
+  }
+
+  async function refreshOnebotScope() {
+    onebotKeys = new Map();
+    const wids = Object.keys(cfg.onebotWatches || {});
+    if (!wids.length) return;
+    await ensureWatchNames(false);
+    // 会话列表要在这里主动拉一次: 重启 OneBot 往往发生在用户还没打开「微聊」页的时候,
+    // 那时 chatTargets 还是 null, autoKeysFor 会一律返回空 → 实例退化成接收全部会话。
+    try { await loadChatTargets(); } catch (e) { /* 拉不到就让用户去设置里手选 */ }
+    wids.forEach((wid) => {
+      const wc = cfg.onebotWatches[wid] || {};
+      const manual = (wc.targets || []).filter(Boolean);
+      onebotKeys.set(String(wid), manual.length ? manual.slice() : autoKeysFor(wid));
+    });
+  }
+
+  // 端口自动分配: 全局实例通常占 5700/5701, 每块表从 5710 起往后错开 10
+  function usedPorts(exceptWatchId) {
+    const used = new Set();
+    const add = (c) => {
+      if (!c) return;
+      if (c.http && c.http.port) used.add(Number(c.http.port));
+      if (c.ws && c.ws.port) used.add(Number(c.ws.port));
+    };
+    add(cfg.onebot);
+    Object.keys(cfg.onebotWatches || {}).forEach((k) => {
+      if (String(k) !== String(exceptWatchId)) add(cfg.onebotWatches[k]);
+    });
+    return used;
+  }
+
+  function pickPorts(watchId) {
+    const used = usedPorts(watchId);
+    for (let base = 5710; base < 65000; base += 10) {
+      if (!used.has(base) && !used.has(base + 1)) return { http: base, ws: base + 1 };
+    }
+    return { http: 5710, ws: 5711 };
+  }
+
+  // 启动/重启 OneBot: 先关掉全部旧实例(端口在 listen 时绑定, 改端口只能整体重来)
   async function restartOneBot() {
     if (onebot) {
       try { await onebot.close(); } catch (e) { /* ignore */ }
       onebot = null;
     }
-    if (!(cfg.onebot && cfg.onebot.enabled)) {
-      log.info('onebot', '已停用');
-      return null;
+    for (const inst of onebots.values()) {
+      try { await inst.close(); } catch (e) { /* ignore */ }
     }
-    try {
-      onebot = await startOneBot({ cfg, ctx: onebotCtx() });
-      log.info('onebot', '服务已重新加载');
-    } catch (e) {
-      log.error('onebot', '启动失败: ' + (e && e.message ? e.message : e));
-      onebot = null;
+    onebots = new Map();
+
+    const wids = Object.keys(cfg.onebotWatches || {});
+    const anyWatchOn = wids.some((k) => cfg.onebotWatches[k] && cfg.onebotWatches[k].enabled);
+    if (anyWatchOn && cfg.onebot && cfg.onebot.enabled) {
+      log.warn('onebot', '全局实例和按手表的实例同时开着，同一条消息会被推送两次，建议只留一种');
+    }
+
+    if (cfg.onebot && cfg.onebot.enabled) {
+      try {
+        onebot = await startOneBot({ cfg, ctx: onebotCtx() });
+        log.info('onebot', '服务已重新加载');
+      } catch (e) {
+        log.error('onebot', '启动失败: ' + (e && e.message ? e.message : e));
+        onebot = null;
+      }
+    } else {
+      log.info('onebot', '已停用');
+    }
+
+    await refreshOnebotScope();
+
+    for (const wid of wids) {
+      const wc = cfg.onebotWatches[wid];
+      if (!wc || !wc.enabled) continue;
+      const keys = onebotKeys.get(String(wid)) || [];
+      if (!keys.length) {
+        log.warn('onebot', `手表 ${wid} 没匹配到会话，暂时接收全部会话；请在「我的 → OneBot v11 接入 → 按手表分开」里手动指定`);
+      }
+      const conf = Object.assign({}, cfg.onebot || {}, wc, {
+        // 心跳和 QQ 兼容跟全局走, 不用每块表配一遍
+        heartbeat: (cfg.onebot && cfg.onebot.heartbeat) != null ? cfg.onebot.heartbeat : 30,
+        qqCompat: !(cfg.onebot && cfg.onebot.qqCompat === false),
+        http: Object.assign({}, wc.http),
+        ws: Object.assign({}, wc.ws),
+        wsClient: Object.assign({}, wc.wsClient),
+      });
+      try {
+        const inst = await startOneBot({
+          cfg,
+          ctx: onebotCtx(String(wid), keys),
+          conf,
+          // 令牌自动生成后只写回这一块表的配置, 绝不碰全局那段
+          onSave: (saved) => {
+            const cur = device.normalizeOnebotWatch(cfg.onebotWatches[wid] || {});
+            cur.http = Object.assign({}, cur.http, { token: saved.http.token });
+            cur.ws = Object.assign({}, cur.ws, { token: saved.ws.token });
+            cfg.onebotWatches[String(wid)] = cur;
+            device.save(cfg);
+          },
+        });
+        onebots.set(String(wid), inst);
+        log.info('onebot', `手表 ${wid} 的实例已启动 http:${inst.http.port} ws:${inst.ws.port}`);
+      } catch (e) {
+        log.error('onebot', `手表 ${wid} 启动失败: ` + (e && e.message ? e.message : e));
+      }
     }
     return onebot;
   }
@@ -404,6 +546,52 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
       ws: pick(onebot && onebot.ws, c.ws),
       wsClient: wc,
     };
+  }
+
+  // 按手表分开的实例状态
+  async function onebotWatchesState() {
+    const wids = Object.keys(cfg.onebotWatches || {});
+    if (!wids.length) return [];
+    await ensureWatchNames(false);
+    const nameOf = (wid) => ((watchNames || []).find((x) => x.watchId === String(wid)) || {}).name || '';
+    const sub = (live, saved, defPort) => {
+      const s = saved || {};
+      if (live) {
+        return { enabled: !!live.enabled, running: !!live.running, host: live.host, port: live.port, token: live.token || '' };
+      }
+      return { enabled: s.enabled !== false, running: false, host: s.host, port: s.port || defPort, token: s.token || '' };
+    };
+    return wids.map((wid) => {
+      const wc = cfg.onebotWatches[wid] || {};
+      const inst = onebots.get(String(wid)) || null;
+      const keys = onebotKeys.get(String(wid)) || [];
+      const rcSaved = wc.wsClient || {};
+      const rcLive = inst ? inst.wsClient : null;
+      return {
+        watchId: wid,
+        name: nameOf(wid),
+        enabled: !!wc.enabled,
+        running: !!inst,
+        clients: inst ? inst.clients() : 0,
+        keys,
+        auto: !(wc.targets || []).length,
+        http: sub(inst && inst.http, wc.http, 0),
+        ws: sub(inst && inst.ws, wc.ws, 0),
+        wsClient: Object.assign({ enabled: false, url: '', token: '', reconnect: 5, connected: false, state: 'idle' },
+          rcSaved,
+          rcLive ? { enabled: rcLive.enabled, url: rcLive.url, token: rcLive.token, connected: rcLive.connected, state: rcLive.state } : null),
+      };
+    });
+  }
+
+  async function onebotStateAll() {
+    // 顺带把可用会话带出去, 前端「按手表分开」要拿它做多选
+    let targets = [];
+    try { targets = (await loadChatTargets()) || []; } catch (e) { targets = []; }
+    return Object.assign({}, onebotState(), {
+      watches: await onebotWatchesState(),
+      targets: targets.map((t) => ({ key: t.key, name: t.name, type: t.type })),
+    });
   }
 
   // ===== 主页仪表盘: 系统/进程资源 =====
@@ -873,24 +1061,31 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     }
     pushChat(key, { self: false, text, kind: parsed.kind, url: messageUrl(parsed), time: m.createTime || Date.now() });
 
-    // 转发给 OneBot(第三方框架从这里收事件)
-    if (onebot) {
+    // 转发给 OneBot(第三方框架从这里收事件)。按手表的实例只收自己范围内的会话
+    if (onebot || onebots.size) {
       const target = (chatTargets || []).find((x) => x.key === key);
       if (target) {
         const peer = (target.peers || []).find((a) => String(a.imAccountId) === String(m.imAccountId));
-        try {
-          onebot.pushMessage({
-            type: target.type,
-            userId: m.imAccountId,
-            groupId: target.dialogId,
-            senderName: (peer && peer.name) || target.name || '',
-            parsed,
-            text,
-            time: m.createTime || Date.now(),
-          });
-        } catch (e) {
-          log.warn('onebot', '事件推送失败: ' + (e && e.message ? e.message : e));
+        const payload = {
+          type: target.type,
+          userId: m.imAccountId,
+          groupId: target.dialogId,
+          senderName: (peer && peer.name) || target.name || '',
+          parsed,
+          text,
+          time: m.createTime || Date.now(),
+        };
+        if (onebot) {
+          try { onebot.pushMessage(payload); } catch (e) { log.warn('onebot', '事件推送失败: ' + (e && e.message ? e.message : e)); }
         }
+        onebots.forEach((inst, wid) => {
+          const keys = onebotKeys.get(String(wid)) || [];
+          // 没匹配到会话(keys 为空)时退化成"收全部", 否则机器人看起来是死的, 更难排查
+          if (keys.length && keys.indexOf(key) < 0) return;
+          try { inst.pushMessage(payload); } catch (e) {
+            log.warn('onebot', `手表 ${wid} 事件推送失败: ` + (e && e.message ? e.message : e));
+          }
+        });
       }
     }
 
@@ -986,6 +1181,56 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     return targets;
   }
 
+  // 微聊单条语音上限 60 秒, 超过就切开逐条发(阈值和 OneBot 那边保持一致)
+  const VOICE_MAX_SEC = 58;
+  const VOICE_MAX_SEG = 20;
+
+  // 发一条语音, 超过 58 秒自动切段。file 可以是本地路径或 http(s) 地址, 返回实际发出的条数
+  async function sendVoiceParts(c, t, file) {
+    let dl = '';
+    let split = null;
+    let sent = 0;
+    let src = String(file || '');
+    const sendOne = async (p, i, total) => {
+      const v = await uploadVoice(cfg, { src: p });
+      const voice = buildVoice(v);
+      const r = t.type === 'single'
+        ? await c.sendSingleVoice(t.receiverId, voice)
+        : await c.sendGroupVoice(t.dialogId, c.imAccountId, voice);
+      if (!r.ok) throw new Error(r.desc || r.code || '发送失败');
+      sent++;
+      const label = total > 1
+        ? '[语音 ' + (i + 1) + '/' + total + '] ' + v.duration + '秒'
+        : '[语音 ' + v.duration + '秒]';
+      pushChat(t.key, { self: true, text: label, kind: 'voice', url: v.downloadUrl, time: Date.now() });
+      return v;
+    };
+    try {
+      if (/^https?:\/\//i.test(src)) { dl = await downloadToTmp(src, 'voice'); src = dl; }
+      const dur = probeDuration(src);
+      if (!dur || dur <= VOICE_MAX_SEC) { await sendOne(src, 0, 1); return 1; }
+      split = splitAudio(src, VOICE_MAX_SEC);
+      if (!split.files.length) throw new Error('音频切分失败(需要 ffmpeg)');
+      if (split.files.length > VOICE_MAX_SEG) {
+        throw new Error(`语音 ${Math.round(dur)} 秒, 切分后 ${split.files.length} 段超过上限 ${VOICE_MAX_SEG} 段`);
+      }
+      log.info('webui', `语音 ${Math.round(dur)} 秒超过 ${VOICE_MAX_SEC} 秒上限, 切成 ${split.files.length} 段发送`);
+      for (let i = 0; i < split.files.length; i++) {
+        // 连发太快平台会吞消息
+        if (i) await new Promise((r) => setTimeout(r, 350));
+        await sendOne(split.files[i], i, split.files.length);
+      }
+      return split.files.length;
+    } catch (e) {
+      // 记下已经发出去几条, 调用方据此判断能不能退回直链兜底(别重复发)
+      e.sent = sent;
+      throw e;
+    } finally {
+      if (split) cleanupSplit(split);
+      if (dl) { try { fs.unlinkSync(dl); } catch (e) {} }
+    }
+  }
+
   async function sendChat(body) {
     const key = String(body.key || '');
     const targets = await loadChatTargets();
@@ -1045,17 +1290,19 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     } else if (kind === 'voice') {
       const src = String(body.src || '').trim();
       if (!src) throw new Error('音频地址不能为空');
-      let v;
+      // 正常路径自己发完(可能切成多条), 直接返回; 下载不下来才走下面的直链兜底
       try {
-        v = await uploadVoice(cfg, { src });
+        const parts = await sendVoiceParts(c, t, src);
+        return { url: '', parts };
       } catch (e) {
-        if (!/^https?:\/\//i.test(src)) throw e;
-        v = { key: '', downloadUrl: src, duration: Number(body.duration) || 0, audioType: 1, deadline: 0 };
+        // 已经发出去几条就不能再补发整条, 否则重复
+        if (!/^https?:\/\//i.test(src) || e.sent) throw e;
+        const v = { key: '', downloadUrl: src, duration: Number(body.duration) || 0, audioType: 1, deadline: 0 };
+        obj = buildVoice(v);
+        msgType = 2;
+        label = '[语音 ' + v.duration + '秒]';
+        url = v.downloadUrl;
       }
-      obj = buildVoice(v);
-      msgType = 2;
-      label = '[语音 ' + v.duration + '秒]';
-      url = v.downloadUrl;
     } else if (kind === 'video') {
       const src = String(body.src || '').trim();
       if (!src) throw new Error('视频地址不能为空');
@@ -1127,6 +1374,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     avatarCache.clear();
     chatTargets = null;
     chatLog.clear();
+    watchNames = null;   // 换账号后手表名要重新取, 否则按手表分开的会话匹配会串
     if (im) { try { im.close(); } catch (e) { /* ignore */ } im = null; }
 
     const init = await safe(() => api.getMobileInit());
@@ -1135,6 +1383,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     if (acc.authId) cfg.authId = acc.authId;
     device.save(cfg);
     startImBackground();
+    // 登录后手表列表/会话才拿得到, 按手表分开的实例要按新数据重新算一次会话范围
+    refreshOnebotScope().catch(() => {});
   }
 
   // ===== 对外 API: 加好友口令 + 好友管理 =====
@@ -1267,13 +1517,24 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     if (sub !== 'genius' && sub !== 'friends') {
       return sendJson(res, 404, { ok: false, error: '接口不存在' });
     }
-    const c = cfg.geniusApi || {};
-    if (!c.enabled) {
+    // 令牌分两种:
+    //   1) 按手表的令牌(cfg.extApi[watchId]) —— 令牌即身份, 只能操作对应的那块表
+    //   2) 全局令牌(cfg.geniusApi) —— 历史配置, 一块令牌能看所有手表
+    const perWatch = cfg.extApi || {};
+    const g = cfg.geniusApi || {};
+    const watchTokens = Object.keys(perWatch).filter((wid) => perWatch[wid] && perWatch[wid].enabled && perWatch[wid].token);
+    const anyEnabled = !!(g.enabled && g.token) || watchTokens.length > 0;
+    if (!anyEnabled) {
       return sendJson(res, 403, { ok: false, error: '该接口未启用，请在 WebUI「我的 → 对外 API」里打开' });
     }
     const m = /^Bearer\s+(\S+)\s*$/i.exec(String(req.headers.authorization || ''));
     const tk = String(query.get('token') || (m ? m[1] : '')).trim();
-    if (!c.token || !safeEqual(tk, c.token)) {
+    let scopeWatch = '';
+    for (const wid of watchTokens) {
+      if (safeEqual(tk, perWatch[wid].token)) { scopeWatch = String(wid); break; }
+    }
+    const globalOk = !!(g.enabled && g.token && safeEqual(tk, g.token));
+    if (!scopeWatch && !globalOk) {
       log.warn('geniusapi', `令牌不正确 ip=${clientIp(req)}`);
       return sendJson(res, 401, { ok: false, error: '令牌不正确' });
     }
@@ -1294,8 +1555,14 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     }
     if (!list.length) return sendJson(res, 200, { ok: false, error: '当前账号没有绑定手表' });
 
-    // watchId 可选, 不传则用第一台
-    const wid = String(query.get('watchId') || '').trim();
+    // 按手表的令牌锁死目标; 全局令牌才允许用 watchId 选(不传则第一台)
+    let wid = String(query.get('watchId') || '').trim();
+    if (scopeWatch) {
+      if (wid && wid !== scopeWatch) {
+        return sendJson(res, 403, { ok: false, error: '这个令牌只对应手表 ' + scopeWatch + '，不能操作 ' + wid });
+      }
+      wid = scopeWatch;
+    }
     let target = list[0];
     if (wid) {
       target = list.find((w) => String(w.watchId) === wid);
@@ -1433,7 +1700,75 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
         cfg.onebot = o;
         device.save(cfg);
         await restartOneBot();
-        return ok(res, onebotState());
+        return ok(res, await onebotStateAll());
+      }
+
+      // 按手表分开的实例: 保存某块表的端口 / 令牌 / 会话范围
+      if (parts[2] === 'watch' && parts[3] === 'token' && req.method === 'POST') {
+        const b = await readBody(req);
+        const wid = String(b.watchId || '').trim();
+        const which = String(b.which || '');
+        if (!wid) throw new Error('缺少 watchId');
+        if (which !== 'http' && which !== 'ws') throw new Error('which 只能是 http 或 ws');
+        const wc = device.normalizeOnebotWatch((cfg.onebotWatches || {})[wid] || {});
+        wc[which] = Object.assign({}, wc[which], { token: '' });
+        cfg.onebotWatches = cfg.onebotWatches || {};
+        cfg.onebotWatches[wid] = wc;
+        device.save(cfg);
+        await restartOneBot();
+        return ok(res, await onebotStateAll());
+      }
+
+      if (parts[2] === 'watch' && req.method === 'POST') {
+        const b = await readBody(req);
+        const wid = String(b.watchId || '').trim();
+        if (!wid) throw new Error('缺少 watchId');
+        const wc = device.normalizeOnebotWatch((cfg.onebotWatches || {})[wid] || {});
+
+        if (b.enabled != null) wc.enabled = !!b.enabled;
+        if (b.http) {
+          if (b.http.enabled != null) wc.http.enabled = !!b.http.enabled;
+          if (b.http.host != null && String(b.http.host).trim()) wc.http.host = String(b.http.host).trim();
+          if (b.http.port != null) wc.http.port = clampInt(b.http.port, 0, 65535, 0);
+        }
+        if (b.ws) {
+          if (b.ws.enabled != null) wc.ws.enabled = !!b.ws.enabled;
+          if (b.ws.host != null && String(b.ws.host).trim()) wc.ws.host = String(b.ws.host).trim();
+          if (b.ws.port != null) wc.ws.port = clampInt(b.ws.port, 0, 65535, 0);
+        }
+        if (b.wsClient) {
+          if (b.wsClient.enabled != null) wc.wsClient.enabled = !!b.wsClient.enabled;
+          if (b.wsClient.url != null) wc.wsClient.url = String(b.wsClient.url).trim();
+          if (b.wsClient.token != null) wc.wsClient.token = String(b.wsClient.token).trim();
+          if (b.wsClient.reconnect != null) wc.wsClient.reconnect = clampInt(b.wsClient.reconnect, 1, 3600, 5);
+        }
+        if (wc.wsClient.enabled && !/^wss?:\/\//i.test(wc.wsClient.url)) {
+          throw new Error('反向 WS 地址必须以 ws:// 或 wss:// 开头');
+        }
+        // targets: 空数组 = 按手表自动匹配; 传了就只认这些会话
+        if (b.targets != null) {
+          const arr = Array.isArray(b.targets) ? b.targets : [];
+          wc.targets = arr.map((x) => String(x)).filter((x) => /^[sg]:.+/.test(x));
+        }
+        // 端口没填就自动分配, 避免和全局实例 / 别的手表撞车
+        if (!wc.http.port || !wc.ws.port) {
+          const p = pickPorts(wid);
+          if (!wc.http.port) wc.http.port = p.http;
+          if (!wc.ws.port) wc.ws.port = p.ws;
+        }
+        if (wc.http.enabled && wc.ws.enabled && Number(wc.http.port) === Number(wc.ws.port)) {
+          throw new Error('HTTP 与 WS 不能使用同一个端口');
+        }
+        const used = usedPorts(wid);
+        if (wc.http.enabled && used.has(Number(wc.http.port))) throw new Error(`HTTP 端口 ${wc.http.port} 已经被别的实例占用`);
+        if (wc.ws.enabled && used.has(Number(wc.ws.port))) throw new Error(`WS 端口 ${wc.ws.port} 已经被别的实例占用`);
+
+        cfg.onebotWatches = cfg.onebotWatches || {};
+        cfg.onebotWatches[wid] = wc;
+        device.save(cfg);
+        log.info('onebot', `手表 ${wid} 的配置已保存（${wc.enabled ? '启用' : '停用'}）`);
+        await restartOneBot();
+        return ok(res, await onebotStateAll());
       }
 
       // 重置令牌: 清空后 startOneBot 会自动生成新的并写回配置
@@ -1445,38 +1780,69 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
         cfg.onebot[which] = Object.assign({}, cfg.onebot[which], { token: '' });
         device.save(cfg);
         await restartOneBot();
-        return ok(res, onebotState());
+        return ok(res, await onebotStateAll());
       }
 
-      if (!parts[2] && req.method === 'GET') return ok(res, onebotState());
+      if (!parts[2] && req.method === 'GET') return ok(res, await onebotStateAll());
       throw new Error('接口不存在');
     }
 
     // ===== 对外 API: 加好友口令(开关 + 独立令牌) =====
+    // 令牌分两种: 全局(geniusApi, 一块令牌看所有表) + 按手表(extApi[watchId], 令牌即身份)
     if (parts[1] === 'genius-api') {
-      const state = () => {
+      const state = async () => {
         const c = cfg.geniusApi || {};
-        return { enabled: !!c.enabled, token: c.token || '' };
+        const per = cfg.extApi || {};
+        await ensureWatchNames(false);
+        const watches = (watchNames || []).map((w) => {
+          const e = per[w.watchId] || {};
+          return { watchId: w.watchId, name: w.name, enabled: !!e.enabled, token: e.token || '' };
+        });
+        // 顶层保留 enabled/token 给旧前端用, 新前端读 watches
+        return { enabled: !!c.enabled, token: c.token || '', watches };
       };
-      if (!parts[2] && req.method === 'GET') return ok(res, state());
+      if (!parts[2] && req.method === 'GET') return ok(res, await state());
 
       if (parts[2] === 'config' && req.method === 'POST') {
         const b = await readBody(req);
+        const wid = String(b.watchId || '').trim();
+        if (wid) {
+          // 按手表: 令牌即身份, 一块表一个
+          cfg.extApi = cfg.extApi || {};
+          const e = Object.assign({ enabled: false, token: '' }, cfg.extApi[wid] || {});
+          if (b.enabled != null) e.enabled = !!b.enabled;
+          if (e.enabled && !e.token) e.token = newGeniusToken();
+          cfg.extApi[wid] = e;
+          device.save(cfg);
+          log.info('geniusapi', `手表 ${wid} 的对外接口已` + (e.enabled ? '启用' : '关闭'));
+          return ok(res, await state());
+        }
         cfg.geniusApi = Object.assign({ enabled: false, token: '' }, cfg.geniusApi || {});
         if (b.enabled != null) cfg.geniusApi.enabled = !!b.enabled;
         // 开启时若还没令牌, 立刻生成一个, 用户马上就能复制去用
         if (cfg.geniusApi.enabled && !cfg.geniusApi.token) cfg.geniusApi.token = newGeniusToken();
         device.save(cfg);
-        log.info('geniusapi', '对外接口已' + (cfg.geniusApi.enabled ? '启用' : '关闭'));
-        return ok(res, state());
+        log.info('geniusapi', '全局对外接口已' + (cfg.geniusApi.enabled ? '启用' : '关闭'));
+        return ok(res, await state());
       }
 
       if (parts[2] === 'token' && req.method === 'POST') {
+        const b = await readBody(req);
+        const wid = String(b.watchId || '').trim();
+        if (wid) {
+          cfg.extApi = cfg.extApi || {};
+          const e = Object.assign({ enabled: false, token: '' }, cfg.extApi[wid] || {});
+          e.token = newGeniusToken();
+          cfg.extApi[wid] = e;
+          device.save(cfg);
+          log.info('geniusapi', `手表 ${wid} 的对外接口令牌已重置`);
+          return ok(res, await state());
+        }
         cfg.geniusApi = Object.assign({ enabled: false, token: '' }, cfg.geniusApi || {});
         cfg.geniusApi.token = newGeniusToken();
         device.save(cfg);
-        log.info('geniusapi', '对外接口令牌已重置');
-        return ok(res, state());
+        log.info('geniusapi', '全局对外接口令牌已重置');
+        return ok(res, await state());
       }
 
       throw new Error('接口不存在');
@@ -1708,7 +2074,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
       }
       if (parts[2] === 'send' && req.method === 'POST') {
         const r = await sendChat(await readBody(req));
-        return ok(res, { result: true, url: r && r.url });
+        return ok(res, { result: true, url: r && r.url, parts: r && r.parts });
       }
       if (parts[2] === 'voice' && req.method === 'POST') {
         const b = await readBody(req);
@@ -1723,14 +2089,15 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
         if (buf.length > 10 * 1024 * 1024) throw new Error('录音超过 10MB');
         const ext = /mp4|m4a/i.test(String(b.mime || '')) ? '.m4a' : '.webm';
         const c = await ensureIM();
-        const v = await uploadVoice(cfg, { buf, filename: 'voice' + ext });
-        const voice = buildVoice(v);
-        const r = t.type === 'single'
-          ? await c.sendSingleVoice(t.receiverId, voice)
-          : await c.sendGroupVoice(t.dialogId, c.imAccountId, voice);
-        if (!r.ok) throw new Error(r.desc || r.code || '发送失败');
-        pushChat(key, { self: true, text: '[语音 ' + v.duration + '秒]', kind: 'voice', url: v.downloadUrl, time: Date.now() });
-        return ok(res, { result: true, url: v.downloadUrl, duration: v.duration });
+        // 浏览器录音没有时长上限, 超过 60 秒同样要切开; 落临时文件才能交给 ffmpeg
+        const tmp = path.join(os.tmpdir(), 'watch_rec_' + crypto.randomBytes(6).toString('hex') + ext);
+        fs.writeFileSync(tmp, buf);
+        try {
+          const n = await sendVoiceParts(c, t, tmp);
+          return ok(res, { result: true, parts: n });
+        } finally {
+          try { fs.unlinkSync(tmp); } catch (e) {}
+        }
       }
       if (parts[2] === 'media' && req.method === 'POST') {
         const key = String(query.get('key') || '');
@@ -2830,9 +3197,15 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     token: AUTH_TOKEN,
     url: `http://${host}:${port}`,
     onebot,
+    // 按手表分开的实例(可能为空 Map), 测试与 CLI 都要能拿到
+    onebots,
     close: () => new Promise((resolve) => {
       server.close(async () => {
         if (onebot) { try { await onebot.close(); } catch (e) { /* ignore */ } onebot = null; }
+        for (const inst of onebots.values()) {
+          try { await inst.close(); } catch (e) { /* ignore */ }
+        }
+        onebots = new Map();
         // 关闭后恢复原级别, 避免日志行串到 CLI 菜单里
         log.setLevel(prevLevel);
         resolve();

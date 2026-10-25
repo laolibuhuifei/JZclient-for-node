@@ -292,6 +292,21 @@ main{max-width:1120px;margin:0 auto;padding:0 20px 48px}
 .ob-sec-body{display:none;padding:2px 13px 13px;border-top:1px solid var(--outline-variant)}
 .ob-sec.open .ob-sec-body{display:block}
 .ob-sec-body .field:first-child{margin-top:12px}
+/* 按手表分开的 OneBot 实例: 每块表一个小方块, 里面两列放端口 */
+.ob-w{border:1px solid var(--outline-variant);border-radius:var(--radius-md);padding:11px 12px;margin-bottom:10px;background:var(--surface)}
+.ob-w:last-child{margin-bottom:0}
+.ob-w-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+.ob-w-tok{display:flex;align-items:center;gap:6px;margin-top:8px;min-width:0}
+.ob-w-tok code{
+  flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:11.5px;padding:4px 8px;border-radius:6px;background:var(--surface-variant);color:var(--on-surface-variant);
+}
+.ob-w select{
+  width:100%;padding:8px 10px;border-radius:var(--radius-md);border:1px solid var(--outline);
+  background:var(--surface);color:var(--on-surface);font-family:inherit;font-size:12.5px;outline:none;
+}
+.ob-w select option{padding:3px 4px}
+@media (max-width:600px){.ob-w-grid{grid-template-columns:1fr}}
 .field{display:flex;flex-direction:column;gap:6px;margin-bottom:12px;font-size:13px;color:var(--on-surface-variant)}
 .field input{
   height:44px;padding:0 14px;border-radius:var(--radius-md);
@@ -2320,11 +2335,60 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       '<label class="field"><span>令牌</span><input id="obRevToken" value="' + esc(rc.token || '') + '" placeholder="对方设置的 access_token"></label>' +
       '<label class="field"><span>重连间隔（秒）</span><input id="obRevReconnect" type="number" min="1" max="3600" value="' + esc(String(rc.reconnect || 5)) + '"></label>';
 
+    // ===== 按手表分开的实例 =====
+    // 每块表一套自己的端口 + 令牌, 只推自己那块表的会话。全局实例和它是并列关系
+    var watches = ob.watches || [];
+    var tgts = ob.targets || [];
+    var onCount = watches.filter(function(w){ return w.enabled; }).length;
+    var wsec = '';
+    if (!watches.length) {
+      wsec = '<div class="muted" style="font-size:12px;line-height:1.65">' +
+        '还没读到手表（未登录 / 平台接口不通）。登录后刷新这一页就能看到。' +
+        '只有一块手表时用上面的全局设置就够了，不需要按手表分开。</div>';
+    } else {
+      watches.forEach(function(w, i){
+        var hp2 = (w.http && w.http.port) || '';
+        var wp2 = (w.ws && w.ws.port) || '';
+        var keys = w.keys || [];
+        var opts = tgts.map(function(t){
+          var label = (t.type === 'group' ? '家庭群 · ' : '单聊 · ') + (t.name || t.key) + '（' + t.key + '）';
+          return '<option value="' + esc(t.key) + '"' + (keys.indexOf(t.key) >= 0 ? ' selected' : '') + '>' + esc(label) + '</option>';
+        }).join('');
+        var stat = w.running ? '<span style="color:var(--success)">运行中</span>'
+          : (w.enabled ? '<span style="color:var(--danger,#d9534f)">未运行</span>' : '已关闭');
+        wsec += '<div class="ob-w" data-wid="' + esc(w.watchId) + '">' +
+          '<div class="row" style="align-items:center"><span><b>' + esc(w.name || w.watchId) + '</b>' +
+            '<span class="muted" style="font-size:11.5px"> · ' + stat +
+            (w.clients ? ' · ' + w.clients + ' 个客户端' : '') + '</span></span>' +
+            '<label class="switch"><input id="obw' + i + 'On" type="checkbox"' + (w.enabled ? ' checked' : '') + '><span></span></label></div>' +
+          '<div class="ob-w-grid">' +
+            '<label class="field" style="margin-bottom:0"><span>HTTP 端口</span>' +
+              '<input id="obw' + i + 'Hp" type="number" min="1" max="65535" value="' + esc(String(hp2)) + '" placeholder="留空自动分配"></label>' +
+            '<label class="field" style="margin-bottom:0"><span>WS 端口</span>' +
+              '<input id="obw' + i + 'Wp" type="number" min="1" max="65535" value="' + esc(String(wp2)) + '" placeholder="留空自动分配"></label>' +
+          '</div>' +
+          '<label class="field" style="margin:10px 0 0"><span>只收这些会话（一个都不选 = 按手表自动匹配）</span>' +
+            '<select id="obw' + i + 'Keys" multiple size="' + Math.min(6, Math.max(2, tgts.length)) + '">' + opts + '</select></label>' +
+          '<div class="ob-w-tok"><code>HTTP ' + esc((w.http && w.http.token) || '（未生成）') + '</code>' +
+            '<button class="btn small tonal js-copy" data-copy="' + esc((w.http && w.http.token) || '') + '">复制</button>' +
+            '<button class="btn small tonal" id="obw' + i + 'Hr">重置</button></div>' +
+          '<div class="ob-w-tok"><code>WS ' + esc((w.ws && w.ws.token) || '（未生成）') + '</code>' +
+            '<button class="btn small tonal js-copy" data-copy="' + esc((w.ws && w.ws.token) || '') + '">复制</button>' +
+            '<button class="btn small tonal" id="obw' + i + 'Wr">重置</button></div>' +
+          '<div class="muted" style="font-size:11.5px;margin-top:8px;line-height:1.6">' +
+            (w.auto ? '会话范围：自动匹配' : '会话范围：手动指定') + ' → ' +
+            (keys.length ? esc(keys.join('、')) : '没匹配到，暂时接收全部会话') + '</div>' +
+          '<button class="btn small" id="obw' + i + 'Save" style="margin-top:10px">保存这块表</button>' +
+          '</div>';
+      });
+    }
+
     html += '<div id="obForm" class="hidden" style="border-top:1px solid var(--outline-variant);margin-top:14px;padding-top:14px">' +
       sec('基础设置', '心跳 ' + hb + 's · QQ 兼容' + (ob.qqCompat !== false ? '开' : '关'), secBasic, true) +
       sec('HTTP API', onOff(httpC.enabled) + ' · :' + hp, secHttp, false) +
       sec('正向 WebSocket', onOff(wsC.enabled) + ' · :' + wp, secWs, false) +
       sec('反向 WebSocket', revSub, secRev, false) +
+      sec('按手表分开', watches.length + ' 块 · ' + onCount + ' 块已启用', wsec, false) +
       '<div style="display:flex;gap:8px;margin-top:14px">' +
         '<button class="btn" id="obSave">保存并重启</button>' +
         '<button class="btn tonal" id="obCancel">取消</button></div>' +
@@ -2377,6 +2441,58 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     if ($('#obHttpReset')) $('#obHttpReset').onclick = function(){ doReset('http', this); };
     if ($('#obWsReset')) $('#obWsReset').onclick = function(){ doReset('ws', this); };
 
+    // 每块手表自己的保存 / 重置令牌
+    watches.forEach(function(w, i){
+      var wid = w.watchId;
+      var reset = function(which, id){
+        var b = $('#' + id);
+        if (!b) return;
+        b.onclick = function(){
+          b.disabled = true;
+          api('/api/onebot/watch/token', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ watchId: wid, which: which }),
+          }).then(function(){
+            toast('令牌已重置，旧令牌立即失效');
+            return loadOneBotCard();
+          }).catch(function(e){
+            toast(e.message || '重置失败', true);
+            b.disabled = false;
+          });
+        };
+      };
+      reset('http', 'obw' + i + 'Hr');
+      reset('ws', 'obw' + i + 'Wr');
+
+      var sv = $('#obw' + i + 'Save');
+      if (sv) sv.onclick = async function(){
+        var sel = $('#obw' + i + 'Keys');
+        var picked = [];
+        if (sel) Array.prototype.forEach.call(sel.options, function(o){ if (o.selected) picked.push(o.value); });
+        var payload = {
+          watchId: wid,
+          enabled: $('#obw' + i + 'On').checked,
+          http: { port: Number($('#obw' + i + 'Hp').value) || 0 },
+          ws: { port: Number($('#obw' + i + 'Wp').value) || 0 },
+          targets: picked,
+        };
+        sv.disabled = true;
+        sv.textContent = '保存中…';
+        try {
+          var st = await api('/api/onebot/watch', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+          });
+          var bad = (st.watches || []).filter(function(x){ return String(x.watchId) === String(wid) && x.enabled && !x.running; });
+          toast(bad.length ? '已保存，但这个实例没起来（端口可能被占用）' : '已保存并重启', bad.length > 0);
+          await loadOneBotCard();
+        } catch(e){
+          toast(e.message || '保存失败', true);
+          sv.disabled = false;
+          sv.textContent = '保存这块表';
+        }
+      };
+    });
+
     if ($('#obSave')) $('#obSave').onclick = async function(){
       var btn = this;
       var payload = {
@@ -2419,6 +2535,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     try { st = await api('/api/genius-api'); } catch(e){ box.innerHTML = ''; return; }
     var on = !!(st && st.enabled);
     var token = (st && st.token) || '';
+    var watches = (st && st.watches) || [];
     var base = location.origin + '/api/ext';
     var q = '?token=' + encodeURIComponent(token);
 
@@ -2429,7 +2546,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     };
 
     var html = '<div class="card"><div class="card-title">对外 API</div>' +
-      '<div class="row"><span>状态</span><span class="value">' +
+      '<div class="row"><span>全局令牌（所有手表共用一个）</span><span class="value">' +
         (on ? '<span style="color:var(--success)">已启用</span>' : '未启用') + '</span></div>';
     if (on && token) {
       html += row('好友列表', base + '/friends' + q);
@@ -2437,22 +2554,84 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       html += row('令牌', token);
     }
     html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">' +
-      '<button class="btn small ' + (on ? 'danger' : '') + '" id="gaToggle">' + (on ? '关闭接口' : '启用接口') + '</button>' +
-      (on ? '<button class="btn small tonal" id="gaReset">重置令牌</button>' : '') +
+      '<button class="btn small ' + (on ? 'danger' : '') + '" id="gaToggle">' + (on ? '关闭全局令牌' : '启用全局令牌') + '</button>' +
+      (on ? '<button class="btn small tonal" id="gaReset">重置全局令牌</button>' : '') +
       '</div>';
-    html += '<div class="muted" style="font-size:12px;line-height:1.75;margin-top:10px">' +
-      '给第三方脚本 / 机器人用，走自己的令牌，不需要 WebUI 访问令牌。以下四个接口共用这一个令牌，' +
-      '<code>watchId</code> 都可省略（默认第一台手表）：<br>' +
+
+    // ===== 按手表分开的令牌: 令牌即身份, 一块表一个, 只能操作自己那块 =====
+    if (watches.length) {
+      html += '<div class="card-title" style="margin-top:18px">按手表分开</div>' +
+        '<div class="muted" style="font-size:12px;line-height:1.6;margin-bottom:10px">' +
+        '每块手表一个令牌，拿到令牌就只能读写那一块表，<code>watchId</code> 传别的手表会被拒绝（403）。' +
+        '同时开了全局令牌的话，全局那个仍然能看所有手表。</div>';
+      watches.forEach(function(w, i){
+        var e = w.enabled;
+        var wt = w.token || '';
+        var wq = '?token=' + encodeURIComponent(wt);
+        html += '<div class="ob-w" data-wid="' + esc(w.watchId) + '">' +
+          '<div class="row" style="align-items:center"><span><b>' + esc(w.name || w.watchId) + '</b>' +
+            '<span class="muted" style="font-size:11.5px"> · ' + (e ? '<span style="color:var(--success)">已启用</span>' : '未启用') + '</span></span>' +
+            '<button class="btn small ' + (e ? 'danger' : '') + '" id="gaw' + i + 'On">' + (e ? '关闭' : '启用') + '</button></div>' +
+          (e && wt ? '<div class="ob-w-tok"><code>' + esc(wt) + '</code>' +
+            '<button class="btn small tonal js-copy" data-copy="' + esc(wt) + '">复制</button>' +
+            '<button class="btn small tonal" id="gaw' + i + 'R">重置</button></div>' +
+            '<div class="muted" style="font-size:11.5px;margin-top:6px;line-height:1.7">' +
+              '<code>' + esc(base + '/friends' + wq) + '</code><br>' +
+              '<code>' + esc(base + '/genius' + wq) + '</code></div>'
+            : '') +
+          '</div>';
+      });
+    }
+
+    html += '<div class="muted" style="font-size:12px;line-height:1.75;margin-top:12px">' +
+      '给第三方脚本 / 机器人用，走自己的令牌，不需要 WebUI 访问令牌。以下四个接口共用同一个令牌：<br>' +
       '<code>GET /api/ext/friends</code> 好友列表<br>' +
       '<code>GET /api/ext/friends/&lt;好友id&gt;</code> 好友详情（id 也可用 friendId / IM 账号 / 号码）<br>' +
       '<code>DELETE /api/ext/friends/&lt;好友id&gt;?confirm=&lt;好友id&gt;</code> 删除好友<br>' +
       '<code>GET /api/ext/genius</code> 加好友口令<br>' +
+      '用按手表的令牌时 <code>watchId</code> 可以省略（默认就是那块表）；用全局令牌时省略则默认第一台。' +
       '删除是破坏性操作，<code>confirm</code> 必须和好友记录 id 完全一致，否则返回 400。' +
       '</div></div>';
     box.innerHTML = html;
 
     box.querySelectorAll('.js-copy').forEach(function(b){
       b.onclick = function(){ copyText(b.getAttribute('data-copy'), b); };
+    });
+
+    // 按手表: 开关 + 重置令牌
+    watches.forEach(function(w, i){
+      var btn = $('#gaw' + i + 'On');
+      if (btn) btn.onclick = async function(){
+        btn.disabled = true;
+        try {
+          await api('/api/genius-api/config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ watchId: w.watchId, enabled: !w.enabled }),
+          });
+          toast(w.enabled ? '已关闭这块表的接口' : '已启用，令牌已生成');
+          await loadGeniusApiCard();
+        } catch(e){
+          toast(e.message || '操作失败', true);
+          btn.disabled = false;
+        }
+      };
+      var rb = $('#gaw' + i + 'R');
+      if (rb) rb.onclick = async function(){
+        rb.disabled = true;
+        rb.textContent = '重置中…';
+        try {
+          await api('/api/genius-api/token', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ watchId: w.watchId }),
+          });
+          toast('令牌已重置，旧令牌立即失效');
+          await loadGeniusApiCard();
+        } catch(e){
+          toast(e.message || '重置失败', true);
+          rb.disabled = false;
+          rb.textContent = '重置';
+        }
+      };
     });
 
     if ($('#gaToggle')) $('#gaToggle').onclick = async function(){

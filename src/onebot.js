@@ -9,16 +9,22 @@
 // 令牌: HTTP 用 Authorization: Bearer <token> 或 ?access_token=<token>;
 //       WS 必须用 ?access_token=<token>(浏览器握手指令带不了自定义头)。
 const http = require('http');
+const fs = require('fs');
 const crypto = require('crypto');
 const log = require('./logger');
 const device = require('./device');
 const { describe, mediaUrl, EMOJI_PRESET } = require('./message');
-const { resolveMediaSrc, cleanupMediaSrc } = require('./upload');
+const {
+  resolveMediaSrc, cleanupMediaSrc, downloadToTmp, probeDuration, splitAudio, cleanupSplit,
+} = require('./upload');
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 // OneBot 返回码
 const RC = { OK: 0, BAD: 1400, AUTH: 1403, NOTFOUND: 1404, INTERNAL: 1500 };
+
+// 本地表情图的数量。QQ 的 face id 是全局编号, 超出这个范围就没有对应图可发
+const EMOJI_COUNT = ((EMOJI_PRESET && EMOJI_PRESET.emojis) || []).length;
 
 function genToken() {
   return 'jz_' + crypto.randomBytes(16).toString('hex');
@@ -113,16 +119,46 @@ function wsDecode(buf) {
 
 // ============ OneBot 服务 ============
 
-async function startOneBot({ cfg, ctx }) {
+// ===== 媒体段地址解析 =====
+// QQ(NapCat / go-cqhttp) 一个媒体段会同时给 url / path / file 三个字段:
+//   url  —— CDN 直链, 优先用
+//   path —— 框架本机的缓存文件(通常就是解码后的真文件)
+//   file —— 往往只是 "A1B2C3.image" 这种裸文件名, 直接当路径读会 ENOENT
+// 所以按「能用就用」的顺序挑: 带协议的直接用, 本地路径要真的存在才算数。
+function mediaSrcOf(data) {
+  const cands = [data && data.url, data && data.path, data && data.file];
+  for (const c of cands) {
+    const s = String(c == null ? '' : c).trim();
+    if (!s) continue;
+    if (/^(https?|base64|data|file):/i.test(s)) return s;
+    if (fs.existsSync(s)) return s;
+  }
+  // 一个都用不了: 把第一个非空值原样带下去, 让报错里能看到它长什么样
+  for (const c of cands) {
+    const s = String(c == null ? '' : c).trim();
+    if (s) return s;
+  }
+  return '';
+}
+
+// conf:  可选, 直接指定一份 OneBot 配置(按手表分开的实例用它, 不读 cfg.onebot)
+// onSave:可选, 令牌自动生成后的落盘回调。不传则写回 cfg.onebot(全局实例的老行为)
+async function startOneBot({ cfg, ctx, conf: rawConf, onSave }) {
+  const base = rawConf || cfg.onebot || {};
   const conf = Object.assign(
     // qqCompat: QQ 兼容层开关(默认开)。开了之后, 微聊物理上做不到的动作(撤回/禁言/戳一戳等)
     // 一律静默成功, 让按 QQ(NapCat / go-cqhttp)写的插件不会因为一个 1404 整条链路崩掉
     { enabled: false, heartbeat: 30, qqCompat: true },
-    cfg.onebot || {},
+    base,
     {
-      http: Object.assign({ enabled: true, host: '0.0.0.0', port: 5700, token: '' }, (cfg.onebot || {}).http || {}),
-      ws: Object.assign({ enabled: true, host: '0.0.0.0', port: 5701, token: '' }, (cfg.onebot || {}).ws || {}),
-      wsClient: Object.assign({ enabled: false, url: '', token: '', reconnect: 5 }, (cfg.onebot || {}).wsClient || {}),
+      // port 传 0/空 时回落到默认端口(按手表的实例会先算好端口再传进来)
+      http: Object.assign({ enabled: true, host: '0.0.0.0', port: 5700, token: '' }, base.http || {}, {
+        port: (base.http && base.http.port) || 5700,
+      }),
+      ws: Object.assign({ enabled: true, host: '0.0.0.0', port: 5701, token: '' }, base.ws || {}, {
+        port: (base.ws && base.ws.port) || 5701,
+      }),
+      wsClient: Object.assign({ enabled: false, url: '', token: '', reconnect: 5 }, base.wsClient || {}),
     }
   );
 
@@ -133,13 +169,17 @@ async function startOneBot({ cfg, ctx }) {
   if (!conf.http.token) { conf.http.token = genToken(); dirty = true; }
   if (!conf.ws.token) { conf.ws.token = genToken(); dirty = true; }
   if (dirty) {
-    cfg.onebot = conf;
-    try {
-      const full = device.load();
-      full.onebot = conf;
-      device.save(full);
-    } catch (e) {
-      log.warn('onebot', '令牌保存失败(每次启动会变): ' + e.message);
+    if (typeof onSave === 'function') {
+      try { onSave(conf); } catch (e) { log.warn('onebot', '令牌保存失败(每次启动会变): ' + e.message); }
+    } else {
+      cfg.onebot = conf;
+      try {
+        const full = device.load();
+        full.onebot = conf;
+        device.save(full);
+      } catch (e) {
+        log.warn('onebot', '令牌保存失败(每次启动会变): ' + e.message);
+      }
     }
   }
 
@@ -397,7 +437,7 @@ async function startOneBot({ cfg, ctx }) {
     // 实际还会发 base64:// 和 file:///abs/path —— 全交给 resolveMediaSrc 解开,
     // 解成临时文件的话发完立刻删掉(图片 1MB+ 堆在 /tmp 里迟早出问题)。
     const sendMedia = async (data, kind, label, extra) => {
-      const raw = String(data.url || data.file || data.path || '');
+      const raw = mediaSrcOf(data);
       const hint = kind === 'image' ? 'image' : kind === 'video' ? 'video' : 'voice';
       const m = resolveMediaSrc(raw, hint);
       if (m.tmp) log.debug('onebot', `媒体段 ${kind} 已解码到临时文件 ${m.src.split(/[\\/]/).pop()}`);
@@ -407,6 +447,52 @@ async function startOneBot({ cfg, ctx }) {
         cleanupMediaSrc(m);
       }
     };
+
+    // 语音: 微聊单条上限 60 秒, 超了发不出去。超过 VOICE_MAX_SEC 就自动切段连发,
+    // 一首 4 分钟的歌会变成 5 条语音, 手表端按顺序听就是完整的。
+    const VOICE_MAX_SEC = 58;   // 留 2 秒余量, 避免刚好 60 被拒
+    const VOICE_MAX_SEG = 20;   // 再长就别发了(>19 分钟), 直接报错比刷屏好
+    const sendVoice = async (data) => {
+      const m = resolveMediaSrc(mediaSrcOf(data), 'voice');
+      let file = m.src;
+      let downloaded = '';
+      try {
+        // ffmpeg 只吃文件, http 的语音也得先落盘才能探测时长 / 切段
+        if (!m.tmp && /^https?:\/\//i.test(file)) {
+          downloaded = await downloadToTmp(file, 'voice');
+          file = downloaded;
+        }
+        const dur = probeDuration(file);
+        if (!dur || dur <= VOICE_MAX_SEC) {
+          ids.push(await emit(target, { kind: 'voice', src: file }, '[语音]'));
+          return;
+        }
+        const seg = splitAudio(file, VOICE_MAX_SEC);
+        try {
+          if (!seg.files.length) throw new Error('音频切分失败(需要 ffmpeg)');
+          if (seg.files.length > VOICE_MAX_SEG) {
+            throw new Error(`语音 ${Math.round(dur)} 秒, 切分后 ${seg.files.length} 段超过上限 ${VOICE_MAX_SEG} 段, 换短一点的音频`);
+          }
+          log.info('onebot', `语音 ${Math.round(dur)} 秒超过 ${VOICE_MAX_SEC} 秒上限, 切成 ${seg.files.length} 段发送`);
+          for (let i = 0; i < seg.files.length; i++) {
+            // 连着发太快平台会吞掉后面的, 留一点间隔
+            if (i) await new Promise((r) => setTimeout(r, 350));
+            ids.push(await emit(target, { kind: 'voice', src: seg.files[i] }, `[语音 ${i + 1}/${seg.files.length}]`));
+          }
+        } finally {
+          cleanupSplit(seg);
+        }
+      } finally {
+        if (downloaded) { try { fs.unlinkSync(downloaded); } catch (e) { /* ignore */ } }
+        cleanupMediaSrc(m);
+      }
+    };
+
+    // QQ 的合并转发有两种写法: 调 send_forward_msg(走 sendForward), 或者直接把
+    // node 段塞进 message 数组发。后者以前会被当成未知段丢掉, 现在整条都交给转发逻辑。
+    if (segments.length && segments.every((s) => s && String(s.type || '').toLowerCase() === 'node')) {
+      return (await sendForward(target, segments)).message_id;
+    }
 
     for (const seg of segments) {
       const type = String((seg && seg.type) || '').toLowerCase();
@@ -423,9 +509,24 @@ async function startOneBot({ cfg, ctx }) {
       if (type === 'at') { buf += '@' + atName(data, target.peers) + ' '; needSpace = true; continue; }
       if (type === 'reply') continue; // 引用回复: 微聊没有对应能力, 直接忽略
       if (type === 'face') {
+        const idx = toInt(data.id) || 0;
+        // QQ 的表情号是 0~300+, 本地只有 EMOJI_COUNT 个对应图。
+        // 超出范围就降级成文本 —— 直接丢给下游会因为「表情不存在」把整条消息打成 1400,
+        // 这是按 QQ 写的插件最容易踩的一个坑(随便发个 doge 就整条失败)。
+        if (idx >= 1 && idx <= EMOJI_COUNT) {
+          await flush();
+          ids.push(await emit(target, { kind: 'emoji', index: idx }, '[表情]'));
+        } else {
+          buf += '[表情]';
+        }
+        continue;
+      }
+      // QQ 商城表情(mface) / 小表情(bface): 本质是一张图, 带 url 就按图片发
+      if (type === 'mface' || type === 'bface') {
         await flush();
-        const idx = toInt(data.id) || 1;
-        ids.push(await emit(target, { kind: 'emoji', index: idx }, '[表情]'));
+        const u = String(data.url || '');
+        if (/^https?:\/\//i.test(u)) await sendMedia({ url: u }, 'image', '[表情]');
+        else buf += '[表情]';
         continue;
       }
       if (type === 'image') {
@@ -435,7 +536,7 @@ async function startOneBot({ cfg, ctx }) {
       }
       if (type === 'record' || type === 'voice') {
         await flush();
-        await sendMedia(data, 'voice', '[语音]');
+        await sendVoice(data);
         continue;
       }
       if (type === 'video') {
@@ -450,7 +551,7 @@ async function startOneBot({ cfg, ctx }) {
         await flush();
         const name = String(data.name || data.file || data.url || '');
         const ext = (name.toLowerCase().match(/\.(amr|mp3|m4a|aac|wav|ogg|oga|opus|flac|webm|mp4|mov|m4v|3gp|mkv|avi|jpe?g|png|gif|webp)(?:[?#]|$)/) || [])[1] || '';
-        if (/^(amr|mp3|m4a|aac|wav|ogg|oga|opus|flac)$/.test(ext)) { await sendMedia(data, 'voice', '[语音]'); continue; }
+        if (/^(amr|mp3|m4a|aac|wav|ogg|oga|opus|flac)$/.test(ext)) { await sendVoice(data); continue; }
         if (/^(mp4|mov|m4v|3gp|mkv|avi|webm)$/.test(ext)) { await sendMedia(data, 'video', '[视频]', { duration: Number(data.duration) || 0 }); continue; }
         if (/^(jpe?g|png|gif|webp)$/.test(ext)) { await sendMedia(data, 'image', '[图片]'); continue; }
         buf += (buf ? ' ' : '') + '[文件] ' + name;
@@ -488,6 +589,12 @@ async function startOneBot({ cfg, ctx }) {
       if (type === 'poke' || type === 'shake' || type === 'dice' || type === 'rps') {
         const label = { poke: '[戳一戳]', shake: '[窗口抖动]', dice: '[骰子]', rps: '[猜拳]' }[type];
         buf += (buf ? ' ' : '') + label;
+        continue;
+      }
+      // 混在文本里的单个 node 段(上面整条都是 node 的情况已经拦掉了): 摊成一行
+      if (type === 'node') {
+        const line = flattenNodes([seg])[0];
+        if (line) buf += (buf ? ' ' : '') + line;
         continue;
       }
       // 其余段: 兼容模式下静默丢弃(别为了一个不认识的段把整条消息打回去), 严格模式报错
@@ -1106,14 +1213,25 @@ async function startOneBot({ cfg, ctx }) {
       }
 
       if (req.method === 'POST') {
+        // base64:// 的语音/视频很容易上几 MB(一首 4 分钟的 mp3 转 base64 就有 5MB+)。
+        // 以前这里 4MB 就 req.destroy(), 客户端只看到连接被重置、根本不知道原因;
+        // 现在放宽到 32MB, 超了也照样读完再回一个明确的 1400。
+        const MAX_BODY = 32 * 1024 * 1024;
         const chunks = [];
         let size = 0;
+        let tooBig = false;
         req.on('data', (c) => {
           size += c.length;
-          if (size > 4 * 1024 * 1024) { try { req.destroy(); } catch (e) { /* ignore */ } return; }
-          chunks.push(c);
+          if (size > MAX_BODY) { tooBig = true; chunks.length = 0; return; }
+          if (!tooBig) chunks.push(c);
         });
         req.on('end', () => {
+          if (tooBig) {
+            return sendJson(400, {
+              status: 'failed', retcode: RC.BAD, data: null,
+              message: `请求体超过 ${MAX_BODY / 1048576}MB 上限（多半是 base64:// 的媒体太大），改用 http(s) 地址或降低码率`,
+            });
+          }
           let body = {};
           try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch (e) { body = {}; }
           const action = body.action || url.searchParams.get('action');
@@ -1329,6 +1447,8 @@ async function startOneBot({ cfg, ctx }) {
   }
 
   return {
+    // 归一化后的配置(含自动生成的令牌), 调用方据此回写 cfg 与展示
+    conf,
     http: { enabled: !!conf.http.enabled, running: httpOk, host: conf.http.host, port: conf.http.port, token: conf.http.token },
     ws: { enabled: !!conf.ws.enabled, running: wsOk, host: conf.ws.host, port: conf.ws.port, token: conf.ws.token },
     // 反向 WS 状态用 getter 实时求值: 握手是异步的, 若写成静态快照会永远停在 connecting

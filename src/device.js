@@ -61,12 +61,59 @@ const DEFAULTS = {
     sessions: [],        // 启用 AI 的会话 { key, type, name, receiverId|dialogId }
   },
   // 对外 API: 给第三方脚本/机器人取加好友口令(独立令牌, 不走 WebUI 的访问令牌)
+  // 这是**全局**令牌(历史配置): 一块令牌能看所有手表。按手表分开的设置见下面的 extApi
   geniusApi: {
     enabled: false,      // 关闭时对外接口一律 403
     token: '',           // 为空时首次启用自动生成并写回
   },
+  // 按手表分开的 OneBot 实例: watchId -> { enabled, http:{}, ws:{}, wsClient:{}, targets:[] }
+  // 每块表一套自己的端口/令牌, 各自只推自己那块表的会话。port=0 表示自动分配(见 webui.js)
+  onebotWatches: {},
+  // 按手表分开的对外 API 令牌: watchId -> { enabled, token }。令牌即身份, 只能操作对应的那块表
+  extApi: {},
   // 公告服务地址写死在 src/site.config.js 的 notice.baseUrl, 不放进用户配置
 };
+
+// 单块手表的 OneBot 默认配置(端口 0 = 由 webui 自动分配)
+function onebotWatchDefaults() {
+  return {
+    enabled: false,
+    http: { enabled: true, host: '0.0.0.0', port: 0, token: '' },
+    ws: { enabled: true, host: '0.0.0.0', port: 0, token: '' },
+    wsClient: { enabled: false, url: '', token: '', reconnect: 5 },
+    targets: [],   // 手动指定的会话 key(s:xxx / g:xxx); 空数组 = 按手表自动匹配
+  };
+}
+
+function normalizeOnebotWatch(raw) {
+  const d = onebotWatchDefaults();
+  const r = raw && typeof raw === 'object' ? raw : {};
+  return Object.assign({}, d, r, {
+    http: Object.assign({}, d.http, r.http || {}),
+    ws: Object.assign({}, d.ws, r.ws || {}),
+    wsClient: Object.assign({}, d.wsClient, r.wsClient || {}),
+    targets: Array.isArray(r.targets) ? r.targets.map(String) : [],
+  });
+}
+
+function normalizeOnebotWatches(raw) {
+  const out = {};
+  if (raw && typeof raw === 'object') {
+    Object.keys(raw).forEach((k) => { out[String(k)] = normalizeOnebotWatch(raw[k]); });
+  }
+  return out;
+}
+
+function normalizeExtApi(raw) {
+  const out = {};
+  if (raw && typeof raw === 'object') {
+    Object.keys(raw).forEach((k) => {
+      const v = raw[k] || {};
+      out[String(k)] = { enabled: !!v.enabled, token: String(v.token || '') };
+    });
+  }
+  return out;
+}
 
 function load() {
   try {
@@ -79,6 +126,8 @@ function load() {
       cfg.onebot.ws = Object.assign({}, DEFAULTS.onebot.ws, (cfg.onebot || {}).ws || {});
       cfg.onebot.wsClient = Object.assign({}, DEFAULTS.onebot.wsClient, (cfg.onebot || {}).wsClient || {});
       cfg.geniusApi = Object.assign({}, DEFAULTS.geniusApi, cfg.geniusApi || {});
+      cfg.onebotWatches = normalizeOnebotWatches(cfg.onebotWatches);
+      cfg.extApi = normalizeExtApi(cfg.extApi);
       if (!Array.isArray(cfg.ai.sessions)) cfg.ai.sessions = [];
       if (!Array.isArray(cfg.ai.keywords)) cfg.ai.keywords = [];
       return cfg;
@@ -96,6 +145,8 @@ function load() {
     },
     ai: Object.assign({}, DEFAULTS.ai),
     geniusApi: Object.assign({}, DEFAULTS.geniusApi),
+    onebotWatches: {},
+    extApi: {},
   });
 }
 
@@ -137,4 +188,8 @@ function ensureIdentity(cfg) {
   return cfg;
 }
 
-module.exports = { load, save, ensureIdentity, CONFIG_FILE };
+module.exports = {
+  load, save, ensureIdentity, CONFIG_FILE,
+  // 按手表配置的归一化工具(webui 保存单个手表的 OneBot 配置时要用)
+  onebotWatchDefaults, normalizeOnebotWatch, normalizeExtApi,
+};

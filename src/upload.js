@@ -298,7 +298,8 @@ function resolveMediaSrc(raw, hint) {
   }
   if (fs.existsSync(p)) return { src: p, tmp: false };
 
-  throw new Error('媒体地址无法识别(支持 http(s) / base64:// / file:// / 本地路径): ' + s.slice(0, 80));
+  throw new Error('媒体地址无法识别(支持 http(s) / base64:// / file:// / 本地路径): ' + s.slice(0, 80)
+    + (/^[\w.\-]+$/.test(s) ? ' —— 这看起来是 QQ 的裸文件名, 需要框架提供 url 或 path 字段' : ''));
 }
 
 function cleanupMediaSrc(r) {
@@ -367,6 +368,58 @@ function oggOpusToWatch(ogg, rate) {
     parts.push(Buffer.from([pk.length]), pk);
   }
   return { buf: Buffer.concat(parts), duration: audio.length * 0.02, audioType: 1 };
+}
+
+// 探测本地文件时长(秒), 拿不到就返回 0
+function probeDuration(file) {
+  try {
+    const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', file],
+      { encoding: 'utf8', timeout: 30000 });
+    const d = Number(String(r.stdout || '').trim());
+    return Number.isFinite(d) && d > 0 ? d : 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+// 下载到临时文件。要探测时长、要切段的场景必须先落到本地(ffmpeg 只吃文件)。
+async function downloadToTmp(url, hint) {
+  const buf = await fetchBuffer(url, 60000);
+  if (!buf || !buf.length) throw new Error('下载失败: ' + String(url).slice(0, 80));
+  if (buf.length > 100 * 1024 * 1024) throw new Error('文件超过 100MB');
+  const ext = sniffMediaExt(buf) || (hint === 'video' ? '.mp4' : hint === 'image' ? '.jpg' : '.mp3');
+  const f = tmpFile(ext);
+  fs.writeFileSync(f, buf);
+  return f;
+}
+
+// 把超长音频切成多段 —— 微聊语音上限 60 秒, 超了发不出去。
+// 先用 -c copy 直接切流(不重编码, 快且不掉音质); 容器/编码不支持时退回重编码成 16k 单声道 mp3 再切。
+// 返回 { dir, files }; 用完必须调 cleanupSplit()。
+function splitAudio(file, maxSec) {
+  const sec = Math.max(5, Math.round(Number(maxSec) || 58));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'watch_seg_'));
+  const ext = extOfMedia(file) || '.mp3';
+  const pick = () => fs.readdirSync(dir).filter((f) => /^seg_\d+\./.test(f)).sort()
+    .map((f) => path.join(dir, f));
+  const run = (args) => spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', file].concat(args), { timeout: 300000 });
+
+  let r = run(['-f', 'segment', '-segment_time', String(sec), '-reset_timestamps', '1',
+    '-c', 'copy', path.join(dir, 'seg_%03d' + ext)]);
+  let files = pick();
+  if (r.status !== 0 || !files.length) {
+    files.forEach((f) => { try { fs.unlinkSync(f); } catch (e) { /* ignore */ } });
+    r = run(['-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '48k',
+      '-f', 'segment', '-segment_time', String(sec), '-reset_timestamps', '1',
+      path.join(dir, 'seg_%03d.mp3')]);
+    files = pick();
+  }
+  return { dir, files };
+}
+
+function cleanupSplit(res) {
+  if (!res || !res.dir) return;
+  try { fs.rmSync(res.dir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
 }
 
 // mp3/wav/webm/m4a -> 自定义 Opus
@@ -622,6 +675,10 @@ module.exports = {
   sniffMediaExt,
   resolveMediaSrc,
   cleanupMediaSrc,
+  probeDuration,
+  downloadToTmp,
+  splitAudio,
+  cleanupSplit,
   imageSize,
   md5Hex,
   extOf,

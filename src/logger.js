@@ -98,21 +98,44 @@ function write(line) {
   if (promptRedraw && promptRedraw.after) promptRedraw.after();
 }
 
+// ===== 内存环形缓冲 + 订阅 =====
+// 给 WebUI 的实时日志页用。只记录**已经通过级别过滤**的行, 保证网页和终端看到的一致。
+// 存的是脱敏后的纯文本(不带 ANSI), 前端自己上色。
+const RING_MAX = 800;
+const ring = [];
+let ringSeq = 0;
+const subs = new Set();
+
+function pushEntry(sev, tag, cat, msg) {
+  const e = { seq: ++ringSeq, t: Date.now(), sev, tag, cat: cat || '', text: maskSensitive(msg) };
+  ring.push(e);
+  if (ring.length > RING_MAX) ring.splice(0, ring.length - RING_MAX);
+  if (subs.size) {
+    // 单个订阅者(比如已经断开的 SSE 连接)出错不能影响其他订阅者
+    subs.forEach((fn) => { try { fn(e); } catch (err) { /* ignore */ } });
+  }
+  return e;
+}
+
 // 通用一行: [时间] 标签 通道 内容
 function emit(sev, tag, cat, msg) {
   if (sev < level) return;
+  const body = oneLine(msg);
+  pushEntry(sev, tag, cat, body);
   const head = paint(C.dim, '[' + stamp() + ']') + ' ' + paint(TAG_COLOR[tag], tag.padEnd(5, ' '));
   const who = cat ? paint(C.dim, ' ' + String(cat).padEnd(7, ' ')) : '';
-  write(head + who + ' ' + oneLine(msg));
+  write(head + who + ' ' + body);
 }
 
 // 入站 HTTP 请求: GET /api/watches → 200 842ms 1.2KB
 // failed: 接口抛错时 HTTP 仍是 200(响应体 ok:false), 用红色 + 感叹号区分
 function request(method, path, status, ms, bytes, failed) {
   if (LEVELS.info < level) return;
-  const head = paint(C.dim, '[' + stamp() + ']') + ' ' + paint(TAG_COLOR.HTTP, 'HTTP ');
-  const tail = paint(C.dim, ' ' + (Number(ms) || 0) + 'ms' + (fmtBytes(bytes) ? ' ' + fmtBytes(bytes) : ''));
   const st = String(status) + (failed ? '!' : '');
+  const tailPlain = ' ' + (Number(ms) || 0) + 'ms' + (fmtBytes(bytes) ? ' ' + fmtBytes(bytes) : '');
+  pushEntry(LEVELS.info, 'HTTP', '', method + ' ' + path + ' → ' + st + tailPlain);
+  const head = paint(C.dim, '[' + stamp() + ']') + ' ' + paint(TAG_COLOR.HTTP, 'HTTP ');
+  const tail = paint(C.dim, tailPlain);
   write(head + ' ' + method + ' ' + path + ' ' + paint(C.dim, '→') + ' ' +
     paint(failed ? C.red : statusColor(status), st) + tail);
 }
@@ -122,9 +145,11 @@ function request(method, path, status, ms, bytes, failed) {
 function api(method, host, path, code, ms) {
   if (LEVELS.info < level) return;
   const c = String(code == null ? '-' : code);
+  const tailPlain = ' ' + (Number(ms) || 0) + 'ms';
+  pushEntry(LEVELS.info, 'API', '', method + ' ' + host + path + ' → ' + c + tailPlain);
   const cc = c === '000001' ? C.green : C.yellow;
   const head = paint(C.dim, '[' + stamp() + ']') + ' ' + paint(TAG_COLOR.API, 'API  ');
-  const tail = paint(C.dim, ' ' + (Number(ms) || 0) + 'ms');
+  const tail = paint(C.dim, tailPlain);
   write(head + ' ' + method + ' ' + host + path + ' ' + paint(C.dim, '→') + ' ' + paint(cc, c) + tail);
 }
 
@@ -160,4 +185,27 @@ module.exports = {
   request,
   api,
   setPromptRedraw,
+
+  // ===== 供 WebUI 实时日志页使用 =====
+  // recent(limit, sinceSeq): 取最近 limit 条; 传 sinceSeq 时只返回比它新的
+  recent(limit, sinceSeq) {
+    const n = Math.max(1, Math.min(RING_MAX, Number(limit) || 200));
+    const from = Number(sinceSeq) || 0;
+    const src = from > 0 ? ring.filter((e) => e.seq > from) : ring;
+    return src.slice(-n);
+  },
+  seq: () => ringSeq,
+  ringMax: RING_MAX,
+  // 返回取消订阅函数
+  subscribe(fn) {
+    if (typeof fn !== 'function') return () => {};
+    subs.add(fn);
+    return () => { subs.delete(fn); };
+  },
+  subscriberCount: () => subs.size,
+  // 清空缓冲。seq 不回退, 否则前端用 since 游标会重复/漏行
+  clear() {
+    ring.length = 0;
+    return ringSeq;
+  },
 };

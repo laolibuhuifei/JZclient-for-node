@@ -6,7 +6,7 @@
 
 <p align="center">
   用 Node.js 重构的电话手表家长客户端<br>
-  账号 CLI + WebUI 单页面板 · 主页仪表盘（CPU/内存实时监控 + 每日一言） · OneBot v11 桥接（HTTP / WS / 反向 WS） · 型号能力门控 · 后台消息监听 · 自动同意好友申请 · AI 自动回复
+  账号 CLI + WebUI 单页面板 · 主页仪表盘（CPU/内存实时监控 + 每日一言） · OneBot v11 桥接（HTTP / WS / 反向 WS，含 QQ 兼容层） · 型号能力门控 · 后台消息监听 · 自动同意好友申请 · AI 自动回复
 </p>
 
 <p align="center">
@@ -41,7 +41,8 @@
 - [使用](#使用)
 - [公告](#公告)
 - [OneBot v11 接入](#onebot-v11-接入)
-- [加好友口令 API](#加好友口令-api)
+- [实时日志](#实时日志)
+- [对外 API](#对外-api)
 - [新设备验证](#新设备验证)
 - [绑定手表](#绑定手表)
 - [后台消息监听](#后台消息监听)
@@ -60,13 +61,13 @@
 | --- | --- |
 | 账号与手表 | 账号登录与切换、多手表管理、手表详情、在线状态、电量、宝贝资料 |
 | 定位与安全 | 实时位置、历史轨迹、安全区域、丢表模式 |
-| 社交 | 通讯录、好友列表、加好友口令、自动同意好友申请 |
+| 社交 | 通讯录、好友列表、好友详情、删除好友、加好友口令、自动同意好友申请 |
 | 绑定手表 | 全新手表管理员绑定（手表验证码 + 天才号选择/迁移）、已有管理员手表的申请加入 |
 | 聊天 | 文本、表情（图片预览选择）、颜文字、位置、链接、图片、语音、视频 |
 | 手表设置 | 音量、短信同步、定时开关机、睡眠模式、上课禁用、模式限制、省电、系统模式、上学前模式、话费提醒、提醒与通话开关、自动接听授权、短信接收、系统与网络 |
 | 应用与管控 | 应用管理、应用商店设置、使用时长、使用报告、聊天管控、功能开关、隐私项查看 |
 | 健康与工具 | 健康数据、运动数据、闹钟提醒、手表 WiFi、隐藏功能 |
-| 增强能力 | 型号能力门控、后台 IM 常驻监听、自定义字体与背景、AI 自动回复、本地配置持久化、升级不覆盖已有数据 |
+| 增强能力 | 型号能力门控、后台 IM 常驻监听、自定义字体与背景、AI 自动回复、WebUI 实时日志（SSE 推送）、本地配置持久化、升级不覆盖已有数据 |
 | 公告 | 主页置顶公告卡、独立公告页、Markdown 渲染、图片查看大图、离线缓存降级 |
 
 ## 目录结构
@@ -235,7 +236,7 @@ WebUI 包含：
 - 定位：实时位置、历史轨迹、安全区域、丢表模式
 - 聊天：会话列表、消息收发、图片/语音/视频/位置/链接/表情
 - 功能：宝贝资料、通讯录、好友、健康、应用、WiFi、闹钟、设置、隐藏功能、绑定
-- 我的：账号信息、手表账号、OneBot 接入设置（启停/端口/令牌/反向 WS）、加好友口令 API（开关/令牌）、外观（自定义背景）、退出登录
+- 我的：账号信息、手表账号、OneBot 接入设置（启停/端口/令牌/反向 WS）、对外 API（好友列表/详情/删除 + 加好友口令，开关/令牌）、外观（自定义背景）、退出登录
 - 设置：按型号能力自动裁剪的各类开关与时段配置
 
 ### 主页仪表盘
@@ -299,7 +300,7 @@ WebUI 起来后会同时拉起一个 OneBot v11 服务，可以把微聊接进 A
 
 打开 WebUI → 底部「我的」→「OneBot v11 接入」卡片 → 右上角「设置」。设置区按 `基础设置` / `HTTP API` / `正向 WebSocket` / `反向 WebSocket` 分成四组折叠面板，点标题展开，标题上会显示当前值摘要（如 `已启用 · :5700`）。可以改：
 
-- 总开关、心跳间隔
+- 总开关、QQ 兼容模式、心跳间隔
 - HTTP API / 正向 WS：各自启停、监听地址、端口
 - 反向 WS：启停、地址、令牌、重连间隔
 - 每个令牌旁边的「重置」按钮（旧令牌立即失效）
@@ -346,11 +347,38 @@ WebUI 起来后会同时拉起一个 OneBot v11 服务，可以把微聊接进 A
 
 **支持的 action**
 
-`get_login_info` `get_status` `get_version_info` `get_friend_list` `get_group_list` `get_group_info` `get_group_member_list` `get_stranger_info` `send_private_msg` `send_group_msg` `send_msg` `get_msg` `can_send_image` `can_send_record`
+真正实现（数据来自微聊，行为与 QQ 一致）：
 
-消息段支持 `text` `face`（表情序号）`image` `record` `at` `reply`（忽略）`location`；字符串形式的消息支持 `[CQ:image,file=...]` / `[CQ:face,id=...]` 这种简单 CQ 码。
+| 分类 | action |
+| --- | --- |
+| 基础 | `get_login_info` `get_status` `get_version_info` `can_send_image` `can_send_record` `clean_cache` `.handle_quick_operation` |
+| 查询 | `get_friend_list` `get_group_list` `get_group_info` `get_group_member_list` `get_group_member_info` `get_stranger_info` `get_recent_contact` |
+| 发送 | `send_private_msg` `send_group_msg` `send_msg` `send_group_forward_msg` `send_private_forward_msg` `send_forward_msg` |
+| 消息 | `get_msg` `get_forward_msg` `get_group_msg_history` `get_friend_msg_history` `get_image` `get_record` `get_file` |
 
-**暂不支持**：HTTP 上报（webhook）、撤回、禁言、戳一戳、合并转发。
+消息段支持 `text` `face`（表情序号）`image` `record` `video` `at`（降级成 `@昵称` 文本）`reply`（忽略）`location` `share`（拼成文本）`poke` / `shake` / `dice` / `rps`（降级成一句提示）`json` / `xml` / `ark`（捞标题）`forward`（展开成文本）；其中 `image` / `record` / `video` 的 `url` 必须是 http(s) 地址。
+
+字符串形式的消息会完整解析 CQ 码（含 `&#91;` `&#93;` `&#44;` `&amp;` 转义），`[CQ:reply,...]` 这类微聊没有对应能力的段会被丢掉，不会再原样发给手表。
+
+**QQ 兼容性**
+
+按 QQ（NapCat / go-cqhttp）写的 AstrBot 插件会调一堆 QQ 专有动作，只要有一个返回 1404，很多插件整条链路就崩了。所以这里按三档处理，开关是 `onebot.qqCompat`（默认开，WebUI「我的 → OneBot v11 接入 → 设置 → 基础设置」里可关）：
+
+1. **静默成功**——微聊物理上做不到，返回 `{}` 让插件继续往下跑：`delete_msg` `set_group_ban` `set_group_whole_ban` `set_group_anonymous_ban` `set_group_card` `set_group_name` `set_group_special_title` `set_group_remark` `set_group_anonymous` `send_like` `send_poke` `set_msg_emoji_like` `set_input_status` `mark_msg_as_read` `mark_group_msg_as_read` `mark_private_msg_as_read` `mark_all_as_read` `send_group_notice` `_send_group_notice` `send_group_sign` `set_online_status` `set_diy_online_status` `set_qq_profile` `set_qq_avatar` `set_friend_add_request` `set_group_add_request`
+
+   > 注意：这些动作**不会真的发生**。比如 `delete_msg` 返回成功但消息并没有被撤回——微聊没有撤回接口，收到别人的撤回只会推 `group_recall` / `friend_recall` 通知。关掉 `qqCompat` 后这一档会改成明确报错，方便排查「插件为什么没反应」。
+
+2. **返回空值**——只读查询，结构对得上 QQ、内容是空的，严格模式也保留：`get_group_honor_info` `get_group_shut_list` `get_group_at_all_remain` `get_group_system_msg` `get_group_file_system_info` `get_group_root_files` `get_group_files_by_folder` `get_essence_msg_list` `get_group_notice` `_get_group_notice` `get_group_ignore_add_request` `get_doubt_friends_add_request` `get_unidirectional_friend_list` `get_online_clients` `get_cookies` `get_csrf_token` `get_credentials` `get_clientkey` `get_robot_uin_range` `get_model_show` `_get_model_show` `get_profile_like` `fetch_custom_face` `get_group_info_ex` `get_group_detail_info` `get_mini_app_ark` `get_ai_characters` `get_group_album_media_list` `.get_word_slices`
+
+3. **明确拒绝**——危险或确实做不到，直接报错，绝不静默：`set_group_leave` `set_group_kick` `delete_friend`（会破坏手表绑定）、`ocr_image` `send_packet` `get_ai_record` `send_group_ai_record`、`set_restart`
+
+**合并转发**（`send_group_forward_msg` / `send_private_forward_msg` / `send_forward_msg`）没有卡片式转发可用，会降级成「昵称：内容」的多行文本一次发出（超过 1500 字自动分条），并返回一个 `forward_id`；之后 `get_forward_msg` 能按这个 id 取回原文。`node` 里嵌套引用已有转发（`data.id`）会递归展开。
+
+**事件字段**：消息事件的 `sender` 补齐了 `card` / `sex` / `age` / `area` / `level` / `title` / `role`，另有 `anonymous: null` 和 `message_seq`。很多 QQ 插件取昵称走的是 `sender.card`，缺了会直接报错。撤回会转成 `notice` 事件：群 `group_recall`、私聊 `friend_recall`。
+
+**消息历史**：每个会话在内存里保留最近 200 条（全局 800 条），`get_group_msg_history` / `get_friend_msg_history` / `get_msg` / `get_recent_contact` 都读这份缓存。没有客户端连着的时候也照样记，重启程序后清空。
+
+**暂不支持**：HTTP 上报（webhook）、真正的撤回、禁言、戳一戳、群文件、好友/入群申请审批。
 
 配置在 `~/.watch-parent-cli/config.json`：
 
@@ -358,6 +386,7 @@ WebUI 起来后会同时拉起一个 OneBot v11 服务，可以把微聊接进 A
 "onebot": {
   "enabled": true,
   "heartbeat": 30,
+  "qqCompat": true,
   "http": { "enabled": true, "host": "0.0.0.0", "port": 5700, "token": "jz_..." },
   "ws":   { "enabled": true, "host": "0.0.0.0", "port": 5701, "token": "jz_..." },
   "wsClient": { "enabled": false, "url": "", "token": "", "reconnect": 5 }
@@ -366,7 +395,11 @@ WebUI 起来后会同时拉起一个 OneBot v11 服务，可以把微聊接进 A
 
 只开反向 WS 时可以把 `http.enabled` / `ws.enabled` 都设成 `false`，本程序就只做客户端，不监听任何端口。
 
-### 实时日志
+## 实时日志
+
+日志有两个出口：**终端**（带颜色，适合 `> webui.log`）和 **WebUI 日志页**（网页上实时滚动，适合远程看）。两边内容一致，都经过同一套脱敏。
+
+### 终端输出
 
 WebUI 启动后，终端会实时打印带时间戳、按级别着色的日志：
 
@@ -404,26 +437,113 @@ WP_LOG=warn  npm start   # 只看告警和错误
 
 输出到文件时会自动去掉颜色转义符，可直接 `> webui.log`。手机号、邮箱等敏感信息在写日志前统一脱敏。
 
-## 加好友口令 API
+### WebUI 日志页
 
-给第三方脚本 / 机器人用：不用登录 WebUI，凭一个独立令牌就能取到孩子的加好友口令。
+入口：左侧「我的」→ 下方子标签「实时日志」，或者「我的」页里「诊断」卡片上的「查看」按钮。
+页面默认只保留最近 **600 行** DOM，开一晚上也不会越来越卡（服务端另有 800 条环形缓冲）。
 
-在 WebUI 底部「我的」→「加好友口令 API」卡片里点「启用接口」，会自动生成一个 `gk_` 开头的令牌，页面上能直接复制接口地址和令牌。也可以随时「关闭接口」或「重置令牌」（旧令牌立即失效）。
+| 控件 | 说明 |
+| --- | --- |
+| 级别下拉 | 直接改服务端的日志级别，等于终端里的 `WP_LOG`，立即生效；调 `DEBUG` 才能看到接口明细，`SILENT` 停止输出 |
+| 自动滚动 | 勾选时始终贴底；手动往上翻会自动失效，翻回底部又恢复（不会把你拽回去） |
+| 暂停 / 继续 | 暂停期间新日志不进 DOM，继续时按最近 300 条重刷，不会漏中间段 |
+| 清空 | 只清服务端缓冲区，不影响终端；清空后游标不回退，不会重复显示旧行 |
+| 复制 | 把当前屏上的日志按行拼成纯文本复制，不带 ANSI 颜色码 |
 
-**请求**
+推送走 **SSE**（`GET /api/logs/stream`，`text/event-stream`）：连上先补 200 条历史，之后逐条推，20 秒一个 `: ping` 心跳防反代掐连接。反代需要 `X-Accel-Buffering: no`（已带）才不会被缓冲；如果环境确实过不去，前端 3 秒内收不到数据会自动退化成 1.5 秒轮询，功能不受影响。
+
+配套接口（都要 WebUI 登录态，和别的接口一样走 Cookie 或 `Authorization: Bearer`）：
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/logs?limit=300&since=<seq>` | 取最近日志，`since` 只返回更新的条目 |
+| `GET /api/logs/stream` | SSE 实时流，先发 `event: init` 带历史，之后每条一个 `data:` |
+| `POST /api/logs/level` | `{"level":"debug"}`，取值 `debug/info/warn/error/silent` |
+| `DELETE /api/logs` | 清空缓冲区，返回当前 `seq` |
+
+## 对外 API
+
+给第三方脚本 / 机器人用：不用登录 WebUI，凭一个独立令牌就能取加好友口令、读好友列表、删好友。
+
+在 WebUI 底部「我的」→「对外 API」卡片里点「启用接口」，会自动生成一个 `gk_` 开头的令牌，页面上能直接复制接口地址和令牌。也可以随时「关闭接口」或「重置令牌」（旧令牌立即失效）。
+
+**四个接口共用一个令牌**
+
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| `GET` | `/api/ext/friends` | 好友列表 |
+| `GET` | `/api/ext/friends/:friendId` | 好友详情 |
+| `DELETE` | `/api/ext/friends/:friendId?confirm=<好友记录 id>` | 删除好友 |
+| `GET` | `/api/ext/genius` | 加好友口令 |
+
+`watchId` 都可省略（默认第一台手表）。列表 / 详情也接受 `POST`（等价于 `GET`，方便只支持 POST 的客户端）；**删除只认 `DELETE`**，用 GET 触发删除会被浏览器预取、爬虫或链接预览误伤。
 
 ```bash
-# query 传令牌（推荐，方便直接 curl / 浏览器调试）
-curl "http://192.168.1.10:8787/api/ext/genius?token=gk_xxxx"
+T=gk_xxxx
+H=http://192.168.1.10:8787
+
+# 令牌走 query（推荐，方便直接 curl / 浏览器调试）
+curl "$H/api/ext/friends?token=$T"
+
+# 或者走 Header
+curl -H "Authorization: Bearer $T" "$H/api/ext/friends"
 
 # 指定手表（不传则用第一台）
-curl "http://192.168.1.10:8787/api/ext/genius?token=gk_xxxx&watchId=a1b2c3d4..."
+curl "$H/api/ext/friends?token=$T&watchId=a1b2c3d4..."
 
-# 也可以走 Header
-curl -H "Authorization: Bearer gk_xxxx" "http://192.168.1.10:8787/api/ext/genius"
+# 好友详情
+curl "$H/api/ext/friends/F1001?token=$T"
+
+# 删除好友（confirm 必须和好友记录 id 完全一致）
+curl -X DELETE "$H/api/ext/friends/F1001?token=$T&confirm=F1001"
 ```
 
-**响应**
+**好友列表响应**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "watchId": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+    "watchName": "宝贝的手表",
+    "total": 2,
+    "friends": [
+      {
+        "id": "F1001",
+        "friendId": "90001",
+        "imAccountId": "5550001",
+        "friendName": "小明",
+        "friendRealName": "王小明",
+        "number": "13800000001",
+        "bindNumber": "1001",
+        "icon": "iconA",
+        "customIcon": "",
+        "type": 1,
+        "avatar": "https://cdn.example.com/iconA.png"
+      }
+    ]
+  }
+}
+```
+
+好友记录是**平台返回的字段原样带出**，不裁剪（版本一变也不会少字段），只额外补一个 `avatar`（头像直链，优先取 `customIcon`，回退 `icon`；取不到是空串）。
+
+**好友详情响应**是 `data: { watchId, watchName, friend }`，`friend` 就是上面数组里的单个对象。
+
+`:friendId` 依次按 `id`（好友记录 id）→ `friendId` → `imAccountId` → `number` → `bindNumber` → 姓名匹配，任意一个能唯一命中就行。**删好友时 `confirm` 必须填好友记录 `id`**，不是路径里传的那个值。
+
+**删除好友的二次确认**
+
+`DELETE` 不带 `confirm` 或值不匹配会返回 `400`，并在 `data` 里带上目标 `friendId` 和姓名方便核对：
+
+```json
+{ "ok": false, "error": "删除好友是破坏性操作，需要带 confirm=<好友记录 id> 二次确认",
+  "data": { "friendId": "F1001", "name": "小明" } }
+```
+
+成功返回 `{ "ok": true, "data": { "deleted": true, "friendId": "F1001", "name": "小明" } }`。
+
+**加好友口令响应**
 
 ```json
 {
@@ -439,13 +559,14 @@ curl -H "Authorization: Bearer gk_xxxx" "http://192.168.1.10:8787/api/ext/genius
 }
 ```
 
-失败时 `ok` 为 `false` 并带 `error` 文案。HTTP 状态码：未启用 `403`、令牌错误 `401`、手表不存在 `404`、方法不对 `405`。
+失败时 `ok` 为 `false` 并带 `error` 文案。HTTP 状态码：未启用 `403`、令牌错误 `401`、手表 / 好友不存在 `404`、方法不对 `405`、删除缺 `confirm` `400`。
 
 **注意**
 
 - 这个令牌和 WebUI 访问令牌**完全独立**，互不通用（对外令牌调不了 WebUI 接口，WebUI 令牌也调不了这个接口）
-- 每次调用都会真实向服务器申请一个新口令，旧口令可能随之失效，不要高频轮询
-- 配置在 `~/.watch-parent-cli/config.json` 的 `geniusApi` 字段：
+- 每次取口令都会真实向服务器申请一个新口令，旧口令可能随之失效，不要高频轮询
+- 好友列表没有分页也没有「按 id 查单个」的官方接口，详情是拉全量列表后本地筛出来的，好友多时会多一次网络往返
+- 配置在 `~/.watch-parent-cli/config.json` 的 `geniusApi` 字段（键名沿用历史命名，实际管的是整组对外接口）：
 
 ```json
 "geniusApi": { "enabled": true, "token": "gk_..." }
@@ -542,7 +663,7 @@ WebUI 每 30 秒同步一次电量与上报时间，不需要手动刷新页面�
 - 摄像头管控、应用白名单：未实现
 - 隐私相关开关：各网关的写接口都返回 `000007`，目前只能查看不能修改
 - 单应用使用时长：接口还没定位到
-- OneBot v11 还缺 HTTP 上报（webhook）、消息撤回、禁言、戳一戳、合并转发
+- OneBot v11 还缺 HTTP 上报（webhook）；撤回/禁言/戳一戳/群文件只是「静默成功」的兼容实现，微聊本身没有这些能力
 
 **需要真机验证**
 

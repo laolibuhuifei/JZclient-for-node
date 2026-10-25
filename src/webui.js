@@ -399,6 +399,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
       clients: onebot ? onebot.clients() : 0,
       selfId: im ? im.imAccountId : (cfg.imAccountId || 0),
       heartbeat: c.heartbeat != null ? c.heartbeat : 30,
+      qqCompat: c.qqCompat !== false,
       http: pick(onebot && onebot.http, c.http),
       ws: pick(onebot && onebot.ws, c.ws),
       wsClient: wc,
@@ -1136,43 +1137,49 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     startImBackground();
   }
 
-  // ===== 对外 API: 加好友口令 =====
-  // GET/POST /api/ext/genius?token=<独立令牌>[&watchId=<手表ID>]
-  // 不走 WebUI 的 Cookie 鉴权, 只用 geniusApi.token, 关闭时一律 403
-  async function handleExtApi(req, res, parts, query) {
-    if (parts[2] !== 'genius') {
-      return sendJson(res, 404, { ok: false, error: '接口不存在' });
-    }
-    const c = cfg.geniusApi || {};
-    if (!c.enabled) {
-      return sendJson(res, 403, { ok: false, error: '该接口未启用，请在 WebUI「我的 → 加好友口令 API」里打开' });
-    }
-    const m = /^Bearer\s+(\S+)\s*$/i.exec(String(req.headers.authorization || ''));
-    const tk = String(query.get('token') || (m ? m[1] : '')).trim();
-    if (!c.token || !safeEqual(tk, c.token)) {
-      log.warn('geniusapi', `令牌不正确 ip=${clientIp(req)}`);
-      return sendJson(res, 401, { ok: false, error: '令牌不正确' });
-    }
-    if (req.method !== 'GET' && req.method !== 'POST') {
-      return sendJson(res, 405, { ok: false, error: '只支持 GET / POST' });
-    }
+  // ===== 对外 API: 加好友口令 + 好友管理 =====
+  // 统一前缀 /api/ext/*, 全部用 geniusApi 的独立令牌(前缀 gk_), 不走 WebUI 的 Cookie 鉴权:
+  //   GET    /api/ext/genius                取加好友口令
+  //   GET    /api/ext/friends               好友列表
+  //   GET    /api/ext/friends/:friendId     好友详情
+  //   DELETE /api/ext/friends/:friendId     删除好友(必须带 confirm=<好友记录 id>)
+  // 开关关闭时一律 403
 
-    let list;
-    try {
-      list = await watchList(false);
-    } catch (e) {
-      return sendJson(res, 200, { ok: false, error: '获取手表列表失败: ' + (e && e.message ? e.message : e) });
+  // 给好友记录补一个头像直链。平台返回的是文件 key, 要再换一次下载地址
+  async function withFriendAvatars(friends) {
+    const list = Array.isArray(friends) ? friends : [];
+    const keys = [];
+    list.forEach((f) => {
+      const k = (f && (f.customIcon || f.icon)) || '';
+      if (k && keys.indexOf(k) < 0) keys.push(k);
+    });
+    const urlMap = {};
+    if (keys.length) {
+      const urls = await safe(() => api.getFileUrls(keys, 1));
+      if (Array.isArray(urls)) keys.forEach((k, i) => { urlMap[k] = urls[i] || ''; });
     }
-    if (!list.length) return sendJson(res, 200, { ok: false, error: '当前账号没有绑定手表' });
+    return list.map((f) => {
+      const k = (f && (f.customIcon || f.icon)) || '';
+      return Object.assign({}, f, { avatar: urlMap[k] || '' });
+    });
+  }
 
-    // watchId 可选, 不传则用第一台
-    const wid = String(query.get('watchId') || '').trim();
-    let target = list[0];
-    if (wid) {
-      target = list.find((w) => String(w.watchId) === wid);
-      if (!target) return sendJson(res, 404, { ok: false, error: '找不到该手表: ' + wid });
+  // 好友列表没有分页也没有"按 id 查单个"的接口, 详情就地从列表里挑。
+  // id 优先级最高, 其余字段兜底, 让调用方用 watchfriend 记录 id / friendId / IM 账号 / 号码
+  // 任意一个都能定位; 按名字匹配时必须唯一, 重名就报错让人改用 id
+  function pickFriend(friends, key) {
+    const k = String(key == null ? '' : key).trim();
+    if (!k) return null;
+    const fields = ['id', 'friendId', 'imAccountId', 'number', 'bindNumber'];
+    for (const f of fields) {
+      const hit = friends.find((x) => x && x[f] != null && String(x[f]) === k);
+      if (hit) return hit;
     }
+    const byName = friends.filter((x) => x && (String(x.friendName || '') === k || String(x.friendRealName || '') === k));
+    return byName.length === 1 ? byName[0] : null;
+  }
 
+  async function handleExtGenius(req, res, query, target) {
     const config = await safe(() => api.getGeniusConfig());
     const account = await safe(() => api.getGeniusAccount(target.watchId));
     const geniusNumber = (account && account.geniusNumber) || '';
@@ -1206,6 +1213,142 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     });
   }
 
+  async function handleExtFriends(req, res, parts, query, target) {
+    const key = parts[3] ? decodeURIComponent(parts[3]) : '';
+    let friends;
+    try {
+      friends = await withFriendAvatars(ensure(await api.getWatchFriends(target.watchId)) || []);
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: '获取好友列表失败: ' + (e && e.message ? e.message : e) });
+    }
+
+    // 列表
+    if (!key) {
+      return sendJson(res, 200, {
+        ok: true,
+        data: { watchId: target.watchId, watchName: target.name || '', total: friends.length, friends },
+      });
+    }
+
+    const f = pickFriend(friends, key);
+    if (!f) return sendJson(res, 404, { ok: false, error: '找不到该好友: ' + key });
+    const name = f.friendName || f.friendRealName || '';
+
+    // 删除
+    if (req.method === 'DELETE') {
+      const confirm = String(query.get('confirm') || '').trim();
+      const expect = String(f.id);
+      if (confirm !== expect) {
+        // 破坏性操作, 确认值必须与目标 id 完全一致, 防止脚本参数写错就把人删了
+        return sendJson(res, 400, {
+          ok: false,
+          error: '删除好友是破坏性操作，需要带 confirm=<好友记录 id> 二次确认',
+          data: { friendId: expect, name },
+        });
+      }
+      try {
+        ensure(await api.deleteWatchFriend(f.id));
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, error: '删除失败: ' + (e && e.message ? e.message : e) });
+      }
+      log.info('geniusapi', `删除好友 watchId=${target.watchId} friend=${expect} ip=${clientIp(req)}`);
+      return sendJson(res, 200, { ok: true, data: { deleted: true, friendId: expect, name } });
+    }
+
+    // 详情: 平台返回的字段原样带出, 不裁剪, 免得版本一变就少字段
+    return sendJson(res, 200, {
+      ok: true,
+      data: { watchId: target.watchId, watchName: target.name || '', friend: f },
+    });
+  }
+
+  async function handleExtApi(req, res, parts, query) {
+    const sub = String(parts[2] || '');
+    if (sub !== 'genius' && sub !== 'friends') {
+      return sendJson(res, 404, { ok: false, error: '接口不存在' });
+    }
+    const c = cfg.geniusApi || {};
+    if (!c.enabled) {
+      return sendJson(res, 403, { ok: false, error: '该接口未启用，请在 WebUI「我的 → 对外 API」里打开' });
+    }
+    const m = /^Bearer\s+(\S+)\s*$/i.exec(String(req.headers.authorization || ''));
+    const tk = String(query.get('token') || (m ? m[1] : '')).trim();
+    if (!c.token || !safeEqual(tk, c.token)) {
+      log.warn('geniusapi', `令牌不正确 ip=${clientIp(req)}`);
+      return sendJson(res, 401, { ok: false, error: '令牌不正确' });
+    }
+
+    // /api/ext/friends/:id 额外接受 DELETE(删除好友); 其余只收 GET/POST。
+    // 删除只认 DELETE, 用 GET 触发会被浏览器预取 / 爬虫 / 链接预览误伤
+    const hasId = sub === 'friends' && parts[3];
+    const allow = hasId ? ['GET', 'POST', 'DELETE'] : ['GET', 'POST'];
+    if (allow.indexOf(req.method) < 0) {
+      return sendJson(res, 405, { ok: false, error: '该接口只支持 ' + allow.join(' / ') });
+    }
+
+    let list;
+    try {
+      list = await watchList(false);
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: '获取手表列表失败: ' + (e && e.message ? e.message : e) });
+    }
+    if (!list.length) return sendJson(res, 200, { ok: false, error: '当前账号没有绑定手表' });
+
+    // watchId 可选, 不传则用第一台
+    const wid = String(query.get('watchId') || '').trim();
+    let target = list[0];
+    if (wid) {
+      target = list.find((w) => String(w.watchId) === wid);
+      if (!target) return sendJson(res, 404, { ok: false, error: '找不到该手表: ' + wid });
+    }
+
+    if (sub === 'friends') return handleExtFriends(req, res, parts, query, target);
+    return handleExtGenius(req, res, query, target);
+  }
+
+  // ===== 实时日志: SSE 推送 =====
+  // 零依赖, 直接往 response 里写 text/event-stream。EventSource 同源会自动带 Cookie,
+  // 所以不用为它单独开鉴权口子(前端 fetch 也是靠 Cookie 的, 没有 Authorization 头)
+  function streamLogs(req, res) {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      // nginx 反代时默认会缓冲 event-stream, 这个头让它直通
+      'X-Accel-Buffering': 'no',
+    });
+    if (res.flushHeaders) res.flushHeaders();
+
+    // 先补一屏历史, 打开页面就能看到上下文
+    res.write('retry: 3000\n');
+    res.write('event: init\ndata: ' + JSON.stringify({
+      level: log.levelName(),
+      seq: log.seq(),
+      entries: log.recent(200),
+    }) + '\n\n');
+
+    const unsub = log.subscribe((e) => {
+      try { res.write('data: ' + JSON.stringify(e) + '\n\n'); } catch (err) { /* 连接已断, 下面 cleanup 会收尾 */ }
+    });
+    // 心跳: 防止反代/浏览器把空闲连接掐掉(20 秒一次注释行, 前端不会当成消息)
+    const hb = setInterval(() => {
+      try { res.write(': ping\n\n'); } catch (e) { /* ignore */ }
+    }, 20000);
+    if (hb.unref) hb.unref();
+
+    let done = false;
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      clearInterval(hb);
+      unsub();
+    };
+    req.on('close', cleanup);
+    req.on('error', cleanup);
+    res.on('error', cleanup);
+    res.on('close', cleanup);
+  }
+
   async function handleApi(req, res, parts, query) {
     if (parts[1] === 'watches') return ok(res, { watches: await watchList(query.get('refresh') === '1') });
     if (parts[1] === 'notices') return ok(res, { notices: ensure(await api.getNoticeNew()) });
@@ -1215,6 +1358,37 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
 
     // 每日一言: 当天缓存, ?refresh=1 强制换一条
     if (parts[1] === 'yiyan') return ok(res, await fetchYiyan(query.get('refresh') === '1'));
+
+    // 实时日志: 拉取 / SSE 推送 / 切级别 / 清空
+    if (parts[1] === 'logs') {
+      if (!parts[2] && req.method === 'GET') {
+        return ok(res, {
+          level: log.levelName(),
+          levels: ['debug', 'info', 'warn', 'error', 'silent'],
+          seq: log.seq(),
+          subscribers: log.subscriberCount(),
+          entries: log.recent(clampInt(query.get('limit') || 300, 1, 1000, 300), Number(query.get('since') || 0) || 0),
+        });
+      }
+      if (parts[2] === 'stream' && req.method === 'GET') {
+        streamLogs(req, res);
+        return null; // 响应由 streamLogs 接管, 不能再走 ok()/JSON 包装
+      }
+      if (parts[2] === 'level' && req.method === 'POST') {
+        const b = await readBody(req);
+        const name = String(b.level || '').toLowerCase();
+        if (log.LEVELS[name] == null) throw new Error('级别只能是 debug / info / warn / error / silent');
+        log.setLevel(name);
+        // 这条会在切级别之后写, 所以切到 silent 时看不到 —— 前端会回读 level 确认
+        log.info('webui', '日志级别已切换为 ' + name);
+        return ok(res, { level: log.levelName() });
+      }
+      if (!parts[2] && req.method === 'DELETE') {
+        const seq = log.clear();
+        return ok(res, { cleared: true, seq });
+      }
+      throw new Error('接口不存在');
+    }
 
     // OneBot 接入信息与设置
     if (parts[1] === 'onebot') {
@@ -1226,6 +1400,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
 
         if (b.enabled != null) o.enabled = !!b.enabled;
         if (b.heartbeat != null) o.heartbeat = clampInt(b.heartbeat, 0, 600, 30);
+        if (b.qqCompat != null) o.qqCompat = !!b.qqCompat;
 
         // 子对象合并: 只覆盖前端提交的字段, token 不在这里改
         const mergeSub = (old, patch, def) => {
@@ -2440,22 +2615,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     // ===== 好友 =====
     if (action === 'friends') {
       if (req.method === 'GET') {
-        const friends = ensure(await api.getWatchFriends(id)) || [];
-        const keys = [];
-        friends.forEach((f) => {
-          const k = f.customIcon || f.icon || '';
-          if (k && keys.indexOf(k) < 0) keys.push(k);
-        });
-        const urlMap = {};
-        if (keys.length) {
-          const urls = await safe(() => api.getFileUrls(keys, 1));
-          if (Array.isArray(urls)) keys.forEach((k, i) => { urlMap[k] = urls[i] || ''; });
-        }
-        const list = friends.map((f) => {
-          const k = f.customIcon || f.icon || '';
-          return Object.assign({}, f, { avatar: urlMap[k] || '' });
-        });
-        return ok(res, { friends: list });
+        const friends = await withFriendAvatars(ensure(await api.getWatchFriends(id)) || []);
+        return ok(res, { friends });
       }
       if (req.method === 'DELETE' && parts[4]) {
         ensure(await api.deleteWatchFriend(decodeURIComponent(parts[4])));
@@ -2542,6 +2703,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     const t0 = Date.now();
     res.on('finish', () => {
       const ms = Date.now() - t0;
+      // 日志流是长连接, 断开时打一行 ms=几十万的记录没有意义, 直接跳过
+      if (url.pathname === '/api/logs/stream') return;
       if (parts[0] === 'assets') {
         if (log.isEnabled('debug')) log.request(req.method, url.pathname, res.statusCode, ms, res._bytes);
         return;

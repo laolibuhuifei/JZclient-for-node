@@ -1135,6 +1135,46 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
 /* 主题切换按钮 */
 .theme-btn{width:32px;padding:0;display:inline-flex;align-items:center;justify-content:center;flex:none}
 .theme-btn svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;display:block}
+/* ===== 实时日志 ===== */
+.log-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:10px}
+.log-toolbar select{
+  height:30px;padding:0 8px;border-radius:8px;font-size:12.5px;
+  border:1px solid var(--outline-variant);background:var(--card);color:var(--on-card);
+}
+.log-auto{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--on-surface-variant);cursor:pointer}
+.log-auto input{width:15px;height:15px;margin:0}
+.log-body{
+  height:calc(100vh - 330px);min-height:260px;overflow:auto;
+  background:var(--card);color:var(--on-card);
+  border:1px solid var(--outline-variant);border-radius:var(--radius-md);
+  padding:8px 10px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  font-size:12px;line-height:1.7;
+  -webkit-overflow-scrolling:touch;
+}
+.log-line{display:flex;gap:8px;padding:1px 0;white-space:pre-wrap;word-break:break-word}
+.log-line.lg-error{border-left:2px solid var(--error);margin-left:-10px;padding-left:8px}
+.log-t{flex:none;color:var(--outline)}
+.log-tag{flex:none;font-weight:600;min-width:42px}
+.log-cat{flex:none;color:var(--outline)}
+.log-msg{flex:1;min-width:0}
+.log-line.lg-error .log-msg{color:var(--error)}
+.log-tag.lg-debug{color:var(--outline)}
+.log-tag.lg-info{color:var(--primary)}
+.log-tag.lg-warn{color:#b26a00}
+.log-tag.lg-error{color:var(--error)}
+.log-tag.lg-http{color:var(--success)}
+.log-tag.lg-api{color:#0b7285}
+[data-theme="dark"] .log-tag.lg-warn{color:#ffb74d}
+[data-theme="dark"] .log-tag.lg-api{color:#66d9e8}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]) .log-tag.lg-warn{color:#ffb74d}
+  :root:not([data-theme="light"]) .log-tag.lg-api{color:#66d9e8}
+}
+@media (max-width:600px){
+  .log-body{height:calc(100vh - 380px);min-height:220px;font-size:11.5px}
+  .log-tag{min-width:38px}
+}
 </style>
 </head>
 <body>
@@ -1201,11 +1241,12 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     overview:'概览', friends:'好友', profile:'宝贝资料', contacts:'通讯录',
     guard:'安全区域', settings:'设置', health:'健康', apps:'应用', wifi:'WiFi',
     alarms:'闹钟', ai:'AI 助手', hidden:'隐藏功能', bind:'绑定手表', account:'账号',
-    announcements:'公告'
+    announcements:'公告', logs:'实时日志'
   };
   var PAGE_SUBS = {
     home:'运行状态与账号概览', chat:'与手表和家庭群的会话', location:'实时位置与历史轨迹',
-    more:'设备、通讯、安全与系统管理', me:'账号与设备信息', announcements:'历史公告与更新说明'
+    more:'设备、通讯、安全与系统管理', me:'账号与设备信息', announcements:'历史公告与更新说明',
+    logs:'服务运行日志，实时推送'
   };
   var NAV_ICONS = {
     home:'<svg viewBox="0 0 24 24"><path d="M4 11.5 12 4l8 7.5"/><path d="M6.5 10v9.5h11V10"/></svg>',
@@ -1218,7 +1259,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     'var(--surface-variant)', 'var(--surface-variant)', 'var(--surface-variant)',
     'var(--surface-variant)', 'var(--surface-variant)', 'var(--surface-variant)'
   ];
-  var SUB_TABS = ['overview','friends','profile','contacts','guard','settings','health','apps','wifi','alarms','ai','hidden','bind','account','announcements'];
+  var SUB_TABS = ['overview','friends','profile','contacts','guard','settings','health','apps','wifi','alarms','ai','hidden','bind','account','announcements','logs'];
   var state = { watches: [], id: null, tab: 'home', chatKey: null, chatTargets: [], chatPoll: null, homePoll: null, bindData: null, map: null, noticeId: null, backTo: null };
   var $ = function(s){ return document.querySelector(s); };
 
@@ -1585,7 +1626,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     if (state.tab === 'home' || state.tab === 'announcements') return 'home';
     if (state.tab === 'chat') return 'chat';
     if (state.tab === 'location') return 'location';
-    if (state.tab === 'me' || state.tab === 'account') return 'me';
+    // 日志是从「我的」进来的诊断页, 高亮跟着「我的」走
+    if (state.tab === 'me' || state.tab === 'account' || state.tab === 'logs') return 'me';
     return 'more';
   }
 
@@ -1657,13 +1699,15 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     var seq = ++loadSeq;
     if (state.chatPoll) { clearInterval(state.chatPoll); state.chatPoll = null; }
     if (state.homePoll) { clearInterval(state.homePoll); state.homePoll = null; }
+    // 离开日志页必须断开 SSE, 否则会一直挂着一条长连接在后台推数据
+    stopLogStream();
     var navBox = $('#nav');
     if (navBox) navBox.classList.remove('open');
     var nt = $('#navToggle');
     if (nt) nt.setAttribute('aria-expanded', 'false');
     destroyMap();
     setLoading();
-    if (!state.id && ['home', 'announcements', 'account', 'bind', 'ai', 'chat', 'more', 'me'].indexOf(state.tab) < 0) {
+    if (!state.id && ['home', 'announcements', 'account', 'bind', 'ai', 'chat', 'more', 'me', 'logs'].indexOf(state.tab) < 0) {
       $('#content').innerHTML = '<div class="empty">没有已绑定的手表，请先在「绑定」页添加手表</div>';
       return;
     }
@@ -1699,6 +1743,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       else if (state.tab === 'hidden') await run(api('/api/watch/' + id + '/hidden'), renderHidden);
       else if (state.tab === 'ai') await run(api('/api/ai'), renderAi);
       else if (state.tab === 'account') await run(api('/api/account'), renderAccount);
+      else if (state.tab === 'logs') await renderLogs();
       else if (state.tab === 'bind') renderBind();
       if (seq !== loadSeq) return;
       addBackBar();
@@ -2200,6 +2245,10 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
 
     var secBasic =
       '<div class="row"><span>启用 OneBot</span>' + sw('obEnabled', ob.enabled) + '</div>' +
+      '<div class="row"><span>QQ 兼容模式</span>' + sw('obQqCompat', ob.qqCompat !== false) + '</div>' +
+      '<div class="muted" style="font-size:12px;line-height:1.6;margin:6px 0 10px">' +
+        '开启后，微聊做不到的动作（撤回、禁言、戳一戳、群文件等）会静默返回成功，' +
+        '按 QQ 写的插件不会因为一个报错整条链路崩掉。关掉则严格报错，便于排查。</div>' +
       '<label class="field" style="margin-top:10px"><span>心跳间隔（秒，0 表示不发心跳）</span>' +
         '<input id="obHeartbeat" type="number" min="0" max="600" value="' + esc(String(hb)) + '"></label>';
 
@@ -2226,7 +2275,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       '<label class="field"><span>重连间隔（秒）</span><input id="obRevReconnect" type="number" min="1" max="3600" value="' + esc(String(rc.reconnect || 5)) + '"></label>';
 
     html += '<div id="obForm" class="hidden" style="border-top:1px solid var(--outline-variant);margin-top:14px;padding-top:14px">' +
-      sec('基础设置', '心跳 ' + hb + 's', secBasic, true) +
+      sec('基础设置', '心跳 ' + hb + 's · QQ 兼容' + (ob.qqCompat !== false ? '开' : '关'), secBasic, true) +
       sec('HTTP API', onOff(httpC.enabled) + ' · :' + hp, secHttp, false) +
       sec('正向 WebSocket', onOff(wsC.enabled) + ' · :' + wp, secWs, false) +
       sec('反向 WebSocket', revSub, secRev, false) +
@@ -2286,6 +2335,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       var btn = this;
       var payload = {
         enabled: $('#obEnabled').checked,
+        qqCompat: $('#obQqCompat').checked,
         heartbeat: Number($('#obHeartbeat').value),
         http: { enabled: $('#obHttpEnabled').checked, host: $('#obHttpHost').value.trim(), port: Number($('#obHttpPort').value) },
         ws: { enabled: $('#obWsEnabled').checked, host: $('#obWsHost').value.trim(), port: Number($('#obWsPort').value) },
@@ -2315,7 +2365,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     };
   }
 
-  // 对外 API 卡片: 加好友口令(开关 + 独立令牌)
+  // 对外 API 卡片: 加好友口令 + 好友管理(共用开关 + 独立令牌)
   async function loadGeniusApiCard(){
     var box = $('#geniusApiCard');
     if (!box) return;
@@ -2323,7 +2373,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     try { st = await api('/api/genius-api'); } catch(e){ box.innerHTML = ''; return; }
     var on = !!(st && st.enabled);
     var token = (st && st.token) || '';
-    var url = location.origin + '/api/ext/genius?token=' + encodeURIComponent(token);
+    var base = location.origin + '/api/ext';
+    var q = '?token=' + encodeURIComponent(token);
 
     var row = function(label, val){
       return '<div class="row"><span>' + label + '</span><span class="value" style="display:flex;align-items:center;gap:6px;min-width:0">' +
@@ -2331,11 +2382,12 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         '<button class="btn small tonal js-copy" data-copy="' + esc(val) + '">复制</button></span></div>';
     };
 
-    var html = '<div class="card"><div class="card-title">加好友口令 API</div>' +
+    var html = '<div class="card"><div class="card-title">对外 API</div>' +
       '<div class="row"><span>状态</span><span class="value">' +
         (on ? '<span style="color:var(--success)">已启用</span>' : '未启用') + '</span></div>';
     if (on && token) {
-      html += row('接口地址', url);
+      html += row('好友列表', base + '/friends' + q);
+      html += row('加好友口令', base + '/genius' + q);
       html += row('令牌', token);
     }
     html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">' +
@@ -2343,9 +2395,13 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       (on ? '<button class="btn small tonal" id="gaReset">重置令牌</button>' : '') +
       '</div>';
     html += '<div class="muted" style="font-size:12px;line-height:1.75;margin-top:10px">' +
-      '给第三方脚本 / 机器人用，走自己的令牌，不需要 WebUI 访问令牌。<br>' +
-      '<code>GET /api/ext/genius?token=…&amp;watchId=…</code>，<code>watchId</code> 可省略（默认第一台手表）。<br>' +
-      '返回 <code>{ ok, data: { watchId, watchName, command, expire } }</code>。' +
+      '给第三方脚本 / 机器人用，走自己的令牌，不需要 WebUI 访问令牌。以下四个接口共用这一个令牌，' +
+      '<code>watchId</code> 都可省略（默认第一台手表）：<br>' +
+      '<code>GET /api/ext/friends</code> 好友列表<br>' +
+      '<code>GET /api/ext/friends/&lt;好友id&gt;</code> 好友详情（id 也可用 friendId / IM 账号 / 号码）<br>' +
+      '<code>DELETE /api/ext/friends/&lt;好友id&gt;?confirm=&lt;好友id&gt;</code> 删除好友<br>' +
+      '<code>GET /api/ext/genius</code> 加好友口令<br>' +
+      '删除是破坏性操作，<code>confirm</code> 必须和好友记录 id 完全一致，否则返回 400。' +
       '</div></div>';
     box.innerHTML = html;
 
@@ -2381,6 +2437,199 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         btn.disabled = false; btn.textContent = '重置令牌';
       }
     };
+  }
+
+  // ===== 实时日志 =====
+  // 主通道是 SSE(/api/logs/stream), 拿不到数据就退化成 1.5 秒轮询。
+  // 只保留最近 LOG_MAX 行 DOM, 否则页面开一晚上会越来越卡。
+  var LOG_MAX = 600;
+  var logES = null;          // EventSource
+  var logPollTimer = null;   // 轮询兜底
+  var logSeq = 0;            // 已收到的最新 seq, 轮询时当游标
+  var logPaused = false;
+  var logAutoScroll = true;
+
+  function logTagName(e){
+    var t = String(e.tag || '');
+    if (t === 'HTTP' || t === 'API') return t;
+    return ({ 10:'DEBUG', 20:'INFO', 30:'WARN', 40:'ERROR' })[e.sev] || 'INFO';
+  }
+  function logTagClass(e){
+    var t = String(e.tag || '');
+    if (t === 'HTTP') return 'lg-http';
+    if (t === 'API') return 'lg-api';
+    if (e.sev >= 40) return 'lg-error';
+    if (e.sev >= 30) return 'lg-warn';
+    if (e.sev >= 20) return 'lg-info';
+    return 'lg-debug';
+  }
+  function logLineHtml(e){
+    var d = new Date(e.t);
+    var p = function(x){ return String(x).padStart(2, '0'); };
+    var tm = p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()) + '.' +
+      String(d.getMilliseconds()).padStart(3, '0');
+    var cls = logTagClass(e);
+    return '<div class="log-line ' + cls + '">' +
+      '<span class="log-t">' + tm + '</span>' +
+      '<span class="log-tag ' + cls + '">' + esc(logTagName(e)) + '</span>' +
+      (e.cat ? '<span class="log-cat">' + esc(e.cat) + '</span>' : '') +
+      '<span class="log-msg">' + esc(e.text) + '</span></div>';
+  }
+  function logSetCount(n){
+    var c = $('#logCount');
+    if (c) c.textContent = (n == null ? 0 : n) + ' 行';
+  }
+  function logTrim(){
+    var body = $('#logBody');
+    if (!body) return 0;
+    var extra = body.childElementCount - LOG_MAX;
+    for (var i = 0; i < extra; i++) body.removeChild(body.firstChild);
+    return body.childElementCount;
+  }
+  function logAppend(entries){
+    var body = $('#logBody');
+    if (!body || !entries || !entries.length) return;
+    // 用户往上翻看历史时别把他拽回底部
+    var atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 48;
+    body.insertAdjacentHTML('beforeend', entries.map(logLineHtml).join(''));
+    logSetCount(logTrim());
+    if (logAutoScroll && atBottom) body.scrollTop = body.scrollHeight;
+    var last = entries[entries.length - 1];
+    if (last && last.seq > logSeq) logSeq = last.seq;
+  }
+  function logReset(entries, seq){
+    var body = $('#logBody');
+    if (!body) return;
+    body.innerHTML = (entries || []).map(logLineHtml).join('');
+    logSetCount(logTrim());
+    body.scrollTop = body.scrollHeight;
+    if (typeof seq === 'number' && seq >= 0) logSeq = seq;
+    else if (entries && entries.length) logSeq = entries[entries.length - 1].seq;
+  }
+
+  function stopLogStream(){
+    if (logES) { try { logES.close(); } catch(e){} logES = null; }
+    if (logPollTimer) { clearInterval(logPollTimer); logPollTimer = null; }
+  }
+
+  function startLogPoll(){
+    if (logPollTimer) return;
+    logPollTimer = setInterval(async function(){
+      if (state.tab !== 'logs' || logPaused) return;
+      try {
+        var d = await api('/api/logs?limit=200&since=' + logSeq);
+        if (d && d.entries && d.entries.length) logAppend(d.entries);
+      } catch(e){ /* 下一轮再试 */ }
+    }, 1500);
+  }
+
+  function startLogStream(){
+    stopLogStream();
+    if (!window.EventSource) { startLogPoll(); return; }
+    var got = false;
+    try { logES = new EventSource('/api/logs/stream'); }
+    catch(e){ logES = null; startLogPoll(); return; }
+
+    logES.addEventListener('init', function(ev){
+      got = true;
+      var d = null;
+      try { d = JSON.parse(ev.data); } catch(e){ return; }
+      // 暂停时不要动 DOM: 用户正盯着某一段, 重连(或首连)刷历史会把它冲掉
+      if (!logPaused) logReset(d.entries || [], d.seq || 0);
+      else if (typeof d.seq === 'number') logSeq = d.seq;
+      var sel = $('#logLevel');
+      if (sel && d.level) sel.value = d.level;
+    });
+    logES.onmessage = function(ev){
+      got = true;
+      if (logPaused) return;
+      var e = null;
+      try { e = JSON.parse(ev.data); } catch(err){ return; }
+      logAppend([e]);
+    };
+    // 一条数据都没收到就报错 = SSE 不通(多半是反代把 event-stream 缓冲了), 换轮询
+    logES.onerror = function(){
+      if (!got) { stopLogStream(); startLogPoll(); }
+    };
+    setTimeout(function(){
+      if (!got && state.tab === 'logs') { stopLogStream(); startLogPoll(); }
+    }, 3000);
+  }
+
+  async function renderLogs(){
+    var d = null;
+    try { d = await api('/api/logs?limit=300'); }
+    catch(e){
+      if (state.tab !== 'logs') return;
+      $('#content').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+      return;
+    }
+    // 取数期间已经切走了就别再动 DOM, 也别起流
+    if (state.tab !== 'logs') return;
+    var levels = (d && d.levels) || ['debug', 'info', 'warn', 'error', 'silent'];
+    var cur = (d && d.level) || 'info';
+
+    var html = '<div class="log-toolbar">' +
+      '<select id="logLevel" title="日志级别">' + levels.map(function(l){
+        return '<option value="' + esc(l) + '"' + (l === cur ? ' selected' : '') + '>' + esc(l.toUpperCase()) + '</option>';
+      }).join('') + '</select>' +
+      '<label class="log-auto"><input type="checkbox" id="logAuto"' + (logAutoScroll ? ' checked' : '') + '> 自动滚动</label>' +
+      '<button class="btn small tonal" id="logPause">' + (logPaused ? '继续' : '暂停') + '</button>' +
+      '<button class="btn small tonal" id="logClear">清空</button>' +
+      '<button class="btn small text" id="logCopy">复制</button>' +
+      '<span class="muted" id="logCount" style="margin-left:auto;font-size:12px">0 行</span>' +
+      '</div>' +
+      '<div class="log-body" id="logBody"></div>' +
+      '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:8px">' +
+        '实时推送，页面最多保留 600 行。要看到接口明细得把级别调到 DEBUG；调到 SILENT 会停止输出。' +
+        '手机号等敏感信息在服务端已脱敏，复制出来也不会带原文。</div>';
+    $('#content').innerHTML = html;
+    logReset((d && d.entries) || [], (d && d.seq) || 0);
+
+    var sel = $('#logLevel');
+    if (sel) sel.onchange = async function(){
+      try {
+        var r = await api('/api/logs/level', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ level: sel.value }),
+        });
+        toast('日志级别已切换为 ' + String((r && r.level) || sel.value).toUpperCase());
+      } catch(e){
+        toast(e.message || '切换失败', true);
+        sel.value = cur;
+      }
+    };
+    var auto = $('#logAuto');
+    if (auto) auto.onchange = function(){
+      logAutoScroll = auto.checked;
+      if (logAutoScroll) { var b = $('#logBody'); if (b) b.scrollTop = b.scrollHeight; }
+    };
+    var pb = $('#logPause');
+    if (pb) pb.onclick = function(){
+      logPaused = !logPaused;
+      pb.textContent = logPaused ? '继续' : '暂停';
+      if (!logPaused) {
+        // 暂停期间的消息没进 DOM, 继续时直接按最近 300 条重刷
+        api('/api/logs?limit=300').then(function(x){ logReset(x.entries || [], x.seq || 0); }).catch(function(){});
+      }
+    };
+    var cb = $('#logClear');
+    if (cb) cb.onclick = async function(){
+      try {
+        var r = await api('/api/logs', { method: 'DELETE' });
+        logReset([], (r && typeof r.seq === 'number') ? r.seq : logSeq);
+        toast('已清空');
+      } catch(e){ toast(e.message || '清空失败', true); }
+    };
+    var cp = $('#logCopy');
+    if (cp) cp.onclick = function(){
+      var body = $('#logBody');
+      var txt = body ? Array.prototype.map.call(body.children, function(el){ return el.textContent; }).join('\n') : '';
+      if (!txt) { toast('没有内容可复制', true); return; }
+      copyText(txt, cp);
+    };
+
+    startLogStream();
   }
 
   function renderMe(d, ov){
@@ -2426,8 +2675,16 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     // OneBot v11 接入信息(异步填充, 见下方 loadOneBotCard)
     html += '<div id="onebotCard" style="margin-top:12px"></div>';
 
-    // 对外 API: 加好友口令(异步填充, 见下方 loadGeniusApiCard)
+    // 对外 API: 加好友口令 + 好友管理(异步填充, 见下方 loadGeniusApiCard)
     html += '<div id="geniusApiCard" style="margin-top:12px"></div>';
+
+    // 诊断: 实时日志
+    html += '<div class="card" style="margin-top:12px"><div class="card-title">诊断</div>' +
+      '<div class="row"><span>实时日志</span><span class="value" style="display:flex;align-items:center;gap:8px">' +
+        '<span class="muted" style="font-size:12px">服务运行日志</span>' +
+        '<button class="btn small tonal" id="goLogs">查看</button></span></div>' +
+      '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:6px">' +
+        '实时显示服务端日志，可切换级别、暂停滚动、清空与复制导出。</div></div>';
 
     // 外观: 自定义背景
     html += '<div class="card" style="margin-top:12px"><div class="card-title">外观</div>' +
@@ -2441,6 +2698,13 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     $('#content').innerHTML = html;
     loadOneBotCard();
     loadGeniusApiCard();
+
+    var gl = $('#goLogs');
+    if (gl) gl.onclick = function(){
+      state.tab = 'logs';
+      state.backTo = 'me';
+      renderNav(); updateTitle(); load();
+    };
 
     var sw = $('#classSwitch');
     if (sw) sw.onchange = async function(){
@@ -4540,7 +4804,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       state.watches = d.watches || [];
       if (state.watches.length) state.id = state.watches[0].watchId;
       renderStrip();
-      if (!state.watches.length && ['home', 'announcements', 'account', 'bind', 'chat', 'more', 'me'].indexOf(state.tab) < 0) {
+      if (!state.watches.length && ['home', 'announcements', 'account', 'bind', 'chat', 'more', 'me', 'logs'].indexOf(state.tab) < 0) {
         state.tab = 'me';
       }
       var acc = await tryApi('/api/account');

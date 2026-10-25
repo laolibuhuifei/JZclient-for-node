@@ -39,6 +39,8 @@ const DEFAULTS = {
   onebot: {
     enabled: true,
     heartbeat: 30,       // 心跳间隔(秒), 0 = 关闭
+    // QQ 兼容层: 微聊做不到的动作(撤回/禁言/戳一戳等)静默成功, 让按 QQ 写的插件不崩
+    qqCompat: true,
     http: { enabled: true, host: '0.0.0.0', port: 5700, token: '' }, // HTTP API, token 为空自动生成
     ws: { enabled: true, host: '0.0.0.0', port: 5701, token: '' },   // 正向 WebSocket(对方连进来)
     wsClient: {          // 反向 WebSocket(我们主动连到 AstrBot 等)
@@ -87,6 +89,7 @@ function load() {
     onebot: {
       enabled: DEFAULTS.onebot.enabled,
       heartbeat: DEFAULTS.onebot.heartbeat,
+      qqCompat: DEFAULTS.onebot.qqCompat,
       http: Object.assign({}, DEFAULTS.onebot.http),
       ws: Object.assign({}, DEFAULTS.onebot.ws),
       wsClient: Object.assign({}, DEFAULTS.onebot.wsClient),

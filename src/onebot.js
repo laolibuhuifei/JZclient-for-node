@@ -114,7 +114,9 @@ function wsDecode(buf) {
 
 async function startOneBot({ cfg, ctx }) {
   const conf = Object.assign(
-    { enabled: false, heartbeat: 30 },
+    // qqCompat: QQ 兼容层开关(默认开)。开了之后, 微聊物理上做不到的动作(撤回/禁言/戳一戳等)
+    // 一律静默成功, 让按 QQ(NapCat / go-cqhttp)写的插件不会因为一个 1404 整条链路崩掉
+    { enabled: false, heartbeat: 30, qqCompat: true },
     cfg.onebot || {},
     {
       http: Object.assign({ enabled: true, host: '0.0.0.0', port: 5700, token: '' }, (cfg.onebot || {}).http || {}),
@@ -133,7 +135,14 @@ async function startOneBot({ cfg, ctx }) {
   }
 
   const sockets = new Set();   // 已连上的 WS 客户端
-  const msgStore = new Map();  // message_id -> 元信息(供 get_msg)
+  // message_id -> 消息记录。get_msg / *_msg_history / get_recent_contact 都靠它
+  // 记录里带真实消息段, 不只是文本, 这样插件拿回去能还原图片/语音
+  const msgStore = new Map();
+  const histMap = new Map();    // targetKey -> [记录], 每个会话最多 HIST_MAX 条
+  const forwardStore = new Map(); // forward_id -> nodes, 合并转发的原文
+  const HIST_MAX = 200;
+  const MSG_MAX = 800;
+  const stats = { message_received: 0, message_sent: 0 }; // get_status 用
   let msgSeq = 0;
   let heartbeatTimer = null;
   let httpServer = null;
@@ -142,6 +151,58 @@ async function startOneBot({ cfg, ctx }) {
   function nextMsgId() {
     msgSeq = msgSeq % 2000000000 + 1;
     return msgSeq;
+  }
+
+  // 记账: 同时写 msgStore(全局, 供 get_msg) 和 per-target 历史(供 *_msg_history)
+  function remember(rec) {
+    msgStore.set(rec.message_id, rec);
+    while (msgStore.size > MSG_MAX) {
+      const k = msgStore.keys().next();
+      if (k.done) break;
+      msgStore.delete(k.value);
+    }
+    const arr = histMap.get(rec.targetKey) || [];
+    arr.push(rec);
+    if (arr.length > HIST_MAX) arr.splice(0, arr.length - HIST_MAX);
+    histMap.set(rec.targetKey, arr);
+  }
+
+  function historyOf(key, count) {
+    const arr = histMap.get(key) || [];
+    const n = Math.max(1, Math.min(HIST_MAX, toInt(count) || 20));
+    return arr.slice(Math.max(0, arr.length - n));
+  }
+
+  // 一条记录 -> OneBot 消息事件。sender 按 QQ 的字段补齐(card/sex/age/role ...),
+  // 少了这些字段很多 QQ 插件会在取昵称时直接 KeyError
+  function msgEventOf(rec) {
+    const evt = {
+      post_type: 'message',
+      message_type: rec.type === 'group' ? 'group' : 'private',
+      sub_type: rec.type === 'group' ? 'normal' : 'friend',
+      message_id: rec.message_id,
+      message_seq: rec.message_id,
+      user_id: toInt(rec.userId),
+      message: rec.segments,
+      raw_message: rec.text || '',
+      font: 0,
+      sender: {
+        user_id: toInt(rec.userId),
+        nickname: rec.senderName || String(rec.userId || ''),
+        card: rec.type === 'group' ? (rec.senderName || '') : '',
+        sex: 'unknown',
+        age: 0,
+        area: '',
+        level: '',
+        title: '',
+        role: rec.role || 'member',
+      },
+      anonymous: null,
+      self_id: selfId(),
+      time: rec.time,
+    };
+    if (rec.type === 'group') evt.group_id = toInt(rec.groupId);
+    return evt;
   }
 
   function selfId() {
@@ -174,77 +235,234 @@ async function startOneBot({ cfg, ctx }) {
     return list.find((t) => t.type === 'group' && String(t.dialogId) === String(id)) || null;
   }
 
-  function normSegments(msg) {
+  // CQ 码里的字符转义(QQ 标准)。顺序不能变: &amp; 必须最后还原
+  function cqUnescape(s) {
+    return String(s)
+      .replace(/&#91;/g, '[')
+      .replace(/&#93;/g, ']')
+      .replace(/&#44;/g, ',')
+      .replace(/&amp;/g, '&');
+  }
+
+  function normSegments(msg, autoEscape) {
     if (Array.isArray(msg)) return msg;
     if (msg && typeof msg === 'object' && msg.type) return [msg];
-    // 字符串: 支持 CQ 码里的 [CQ:image,file=...] 简单形式, 其余当纯文本
     const s = String(msg == null ? '' : msg);
+    if (!s) return [];
+    // auto_escape=true 表示整串都是纯文本, 不要解析 CQ 码
+    if (autoEscape) return [{ type: 'text', data: { text: s } }];
+
+    // 字符串形式: 解析 CQ 码。QQ 插件发字符串消息时几乎都会带 [CQ:reply]/[CQ:at] 这类段,
+    // 以前只认 4 种, 剩下的会原样发给手表 —— 现在一律先解析再交给 sendSegments 决定去留
     const out = [];
-    const re = /\[CQ:(image|face|at),([^\]]*)\]/g;
+    const re = /\[CQ:([a-zA-Z_]+)((?:,[^\]]*)?)\]/g;
     let last = 0;
     let m;
     while ((m = re.exec(s))) {
-      if (m.index > last) out.push({ type: 'text', data: { text: s.slice(last, m.index) } });
+      if (m.index > last) out.push({ type: 'text', data: { text: cqUnescape(s.slice(last, m.index)) } });
       const attrs = {};
-      m[2].split(',').forEach((kv) => {
+      String(m[2] || '').replace(/^,/, '').split(',').forEach((kv) => {
         const i = kv.indexOf('=');
-        if (i > 0) attrs[kv.slice(0, i)] = kv.slice(i + 1);
+        if (i > 0) attrs[kv.slice(0, i)] = cqUnescape(kv.slice(i + 1));
       });
-      out.push({ type: m[1], data: attrs });
+      out.push({ type: m[1].toLowerCase(), data: attrs });
       last = m.index + m[0].length;
     }
-    if (last < s.length) out.push({ type: 'text', data: { text: s.slice(last) } });
+    if (last < s.length) out.push({ type: 'text', data: { text: cqUnescape(s.slice(last)) } });
     return out;
+  }
+
+  // at 段的显示名: 优先用 name, 其次按 qq 去会话成员里找, qq=all 时按 QQ 的说法叫全体成员
+  function atName(data, peers) {
+    const qq = String(data.qq == null ? '' : data.qq);
+    if (qq === 'all') return '全体成员';
+    if (data.name) return String(data.name);
+    const p = (peers || []).find((a) => String(a.imAccountId) === qq);
+    return (p && p.name) || qq;
+  }
+
+  // 合并转发里的一个 node -> 一行文本
+  function nodeText(d) {
+    const c = d.content;
+    if (typeof c === 'string') return c;
+    if (!Array.isArray(c)) return '';
+    return c.map((s) => {
+      if (!s || !s.type) return '';
+      const dd = s.data || {};
+      if (s.type === 'text') return String(dd.text || '');
+      if (s.type === 'image') return '[图片]';
+      if (s.type === 'face') return '[表情]';
+      if (s.type === 'record') return '[语音]';
+      if (s.type === 'video') return '[视频]';
+      if (s.type === 'at') return '@' + atName(dd);
+      return '';
+    }).join('');
+  }
+
+  // 把 messages 数组(可能是 node / 引用已有转发 / 老式 {name,uin,content})摊平成文本行
+  function flattenNodes(messages) {
+    const out = [];
+    const walk = (arr, depth) => {
+      if (!Array.isArray(arr)) return;
+      arr.forEach((n) => {
+        if (!n) return;
+        const d = n.data || n;
+        // {type:'node', data:{id}} 是引用一条已存在的转发
+        if (d.id && d.content === undefined) {
+          const cached = forwardStore.get(String(d.id));
+          if (cached) walk(cached, depth + 1);
+          return;
+        }
+        const name = d.name || d.nickname || d.uin || d.user_id || '';
+        const txt = nodeText(d);
+        if (!name && !txt) return;
+        out.push('　'.repeat(depth) + (name ? name + '：' : '') + txt);
+      });
+    };
+    walk(messages, 0);
+    return out;
+  }
+
+  // 发出去的消息统一记账, 顺手写历史
+  async function emit(target, body, label, segments) {
+    await ctx.send(target.key, body);
+    stats.message_sent += 1;
+    const id = nextMsgId();
+    remember({
+      message_id: id,
+      targetKey: target.key,
+      type: target.type,
+      groupId: target.type === 'group' ? target.dialogId : null,
+      userId: selfId(),
+      senderName: (ctx.nickname && ctx.nickname()) || 'JZClientForNode',
+      role: 'member',
+      segments: segments || [{ type: 'text', data: { text: label } }],
+      text: label,
+      time: nowSec(),
+      self: true,
+    });
+    return id;
+  }
+
+  // 合并转发: 微聊没有卡片式转发, 降级成「昵称：内容」的多行文本一次发出
+  async function sendForward(target, messages) {
+    const lines = flattenNodes(messages);
+    if (!lines.length) throw new Error('转发内容为空');
+    // 手表端对超长文本会截断, 按 1500 字切块分条发
+    const chunks = [];
+    let buf = '';
+    lines.forEach((l) => {
+      if (buf && buf.length + l.length + 1 > 1500) { chunks.push(buf); buf = ''; }
+      buf += (buf ? '\n' : '') + l;
+    });
+    if (buf) chunks.push(buf);
+
+    let last = 0;
+    for (const c of chunks) last = await emit(target, { kind: 'text', text: c }, c);
+
+    const fid = 'fwd_' + crypto.randomBytes(6).toString('hex');
+    forwardStore.set(fid, messages);
+    while (forwardStore.size > 50) {
+      const k = forwardStore.keys().next();
+      if (k.done) break;
+      forwardStore.delete(k.value);
+    }
+    return { message_id: last, forward_id: fid };
   }
 
   // 把 OneBot 消息段翻译成微聊的多次发送
   async function sendSegments(target, segments) {
-    let ids = [];
+    const ids = [];
     let buf = '';
+    let needSpace = false; // at 段刚补过尾空格, 下一段若自己也以空白开头就吃掉重复的那个
 
     const flush = async () => {
       const text = buf.trim();
       buf = '';
+      needSpace = false;
       if (!text) return;
-      await ctx.send(target.key, { kind: 'text', text });
-      const id = nextMsgId();
-      msgStore.set(id, { targetKey: target.key, type: target.type, text, time: nowSec() });
-      ids.push(id);
+      ids.push(await emit(target, { kind: 'text', text }, text));
     };
 
     for (const seg of segments) {
-      const type = seg && seg.type;
+      const type = String((seg && seg.type) || '').toLowerCase();
       const data = (seg && seg.data) || {};
-      if (type === 'text') { buf += String(data.text || ''); continue; }
-      if (type === 'at') { buf += '@' + String(data.qq || data.name || ''); continue; }
+
+      if (type === 'text') {
+        let t = String(data.text || '');
+        if (needSpace && /^\s/.test(t)) t = t.replace(/^\s+/, '');
+        needSpace = false;
+        buf += t;
+        continue;
+      }
+      // 微聊不能 @ 人, 降级成 @昵称 文本
+      if (type === 'at') { buf += '@' + atName(data, target.peers) + ' '; needSpace = true; continue; }
       if (type === 'reply') continue; // 引用回复: 微聊没有对应能力, 直接忽略
       if (type === 'face') {
         await flush();
         const idx = toInt(data.id) || 1;
-        await ctx.send(target.key, { kind: 'emoji', index: idx });
-        const id = nextMsgId();
-        msgStore.set(id, { targetKey: target.key, type: target.type, text: '[表情]', time: nowSec() });
-        ids.push(id);
+        ids.push(await emit(target, { kind: 'emoji', index: idx }, '[表情]'));
         continue;
       }
       if (type === 'image') {
         await flush();
         const src = String(data.url || data.file || '');
         if (!/^https?:\/\//i.test(src)) throw new Error('图片段只支持 http(s) 地址或 url 字段');
-        await ctx.send(target.key, { kind: 'image', src });
-        const id = nextMsgId();
-        msgStore.set(id, { targetKey: target.key, type: target.type, text: '[图片]', time: nowSec() });
-        ids.push(id);
+        ids.push(await emit(target, { kind: 'image', src }, '[图片]'));
         continue;
       }
-      if (type === 'record') {
+      if (type === 'record' || type === 'voice') {
         await flush();
         const src = String(data.url || data.file || '');
         if (!/^https?:\/\//i.test(src)) throw new Error('语音段只支持 http(s) 地址或 url 字段');
-        await ctx.send(target.key, { kind: 'voice', src });
-        const id = nextMsgId();
-        msgStore.set(id, { targetKey: target.key, type: target.type, text: '[语音]', time: nowSec() });
-        ids.push(id);
+        ids.push(await emit(target, { kind: 'voice', src }, '[语音]'));
+        continue;
+      }
+      if (type === 'video') {
+        await flush();
+        const src = String(data.url || data.file || '');
+        if (!/^https?:\/\//i.test(src)) throw new Error('视频段只支持 http(s) 地址或 url 字段');
+        // duration 是秒, 部分框架会带; 不带就让 upload 那边自己探测
+        ids.push(await emit(target, { kind: 'video', src, duration: Number(data.duration) || 0 }, '[视频]'));
+        continue;
+      }
+      if (type === 'location') {
+        await flush();
+        const lat = Number(data.lat);
+        const lng = Number(data.lon != null ? data.lon : data.lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new Error('位置段的经纬度不正确');
+        ids.push(await emit(target, { kind: 'location', latitude: lat, longitude: lng, poi: String(data.title || '') }, '[位置]'));
+        continue;
+      }
+      // 链接分享: 拼成「标题 + 地址」当文本发, 微聊的 link 气泡要业务类型, 这里不猜
+      if (type === 'share') {
+        const u = String(data.url || '');
+        if (/^https?:\/\//i.test(u)) buf += (buf ? ' ' : '') + (data.title ? data.title + ' ' : '') + u;
+        continue;
+      }
+      // 合并转发段: 引用之前缓存过的 nodes, 展开成文本
+      if (type === 'forward') {
+        await flush();
+        const nodes = forwardStore.get(String(data.id || ''));
+        if (!nodes) throw new Error('转发内容不存在或已过期');
+        ids.push((await sendForward(target, nodes)).message_id);
+        continue;
+      }
+      // QQ 卡片消息(小程序 / 分享卡片): 微聊还原不了, 只捞一个标题当文本
+      if (type === 'json' || type === 'xml' || type === 'ark' || type === 'light_app') {
+        const m = /"(?:prompt|title|desc)"\s*:\s*"([^"]{1,80})"/.exec(String(data.data || data.content || ''));
+        if (m) buf += (buf ? ' ' : '') + m[1];
+        continue;
+      }
+      // 戳一戳 / 抖动 / 骰子 / 猜拳: 转成一句提示, 至少让手表知道发生过
+      if (type === 'poke' || type === 'shake' || type === 'dice' || type === 'rps') {
+        const label = { poke: '[戳一戳]', shake: '[窗口抖动]', dice: '[骰子]', rps: '[猜拳]' }[type];
+        buf += (buf ? ' ' : '') + label;
+        continue;
+      }
+      // 其余段: 兼容模式下静默丢弃(别为了一个不认识的段把整条消息打回去), 严格模式报错
+      if (conf.qqCompat !== false) {
+        log.debug('onebot', '忽略不支持的消息段: ' + type);
         continue;
       }
       throw new Error('暂不支持的消息段类型: ' + type);
@@ -254,6 +472,75 @@ async function startOneBot({ cfg, ctx }) {
     return ids[ids.length - 1];
   }
 
+  // ===== QQ 兼容层 =====
+  // 微聊(手表)和 QQ 的能力差得很远, 而按 QQ(NapCat / go-cqhttp)写的 AstrBot 插件会调一堆
+  // QQ 专有动作。只要有一个动作回 1404, 很多插件整条链路就崩了。所以分三档:
+  //   1) 真做     —— 用微聊能力实现(信息查询 / 发送 / 历史 / 合并转发降级)
+  //   2) 空实现   —— 物理上做不到, 返回结构合理的空值或 {}, 让插件继续往下跑
+  //   3) 明确拒绝 —— 危险操作(踢人 / 退群 / 删好友)直接报错, 绝不静默
+  // 每一档的具体清单写在 README 的「QQ 兼容性」一节, 增删动作要同步。
+
+  // 空实现: 调用即成功, 什么也不会发生
+  const NOOP_ACTIONS = [
+    'delete_msg',                        // 微聊没有撤回接口(收到别人的撤回只是通知)
+    'set_group_ban', 'set_group_whole_ban', 'set_group_anonymous_ban',
+    'set_group_card', 'set_group_name', 'set_group_special_title', 'set_group_remark',
+    'set_group_anonymous',
+    'send_like', 'send_poke', 'set_msg_emoji_like', 'set_input_status',
+    'mark_msg_as_read', 'mark_group_msg_as_read', 'mark_private_msg_as_read', 'mark_all_as_read',
+    'send_group_notice', '_send_group_notice', 'send_group_sign',
+    'set_online_status', 'set_diy_online_status',
+    'set_qq_profile', 'set_qq_avatar',
+    'set_friend_add_request', 'set_group_add_request',
+  ];
+
+  // 固定空值: 查询类, 结构对得上 QQ, 内容为空
+  const EMPTY_ACTIONS = {
+    get_group_honor_info: (p) => ({
+      group_id: toInt(p.group_id), current_talkative: null,
+      talkative_list: [], performer_list: [], legend_list: [], strong_newbie_list: [], emotion_list: [],
+    }),
+    get_group_shut_list: () => [],
+    get_group_at_all_remain: () => ({ can_at_all: false, remain_at_all_count_for_group: 0, remain_at_all_count_for_uin: 0 }),
+    get_group_system_msg: () => ({ invited_requests: [], join_requests: [] }),
+    get_group_file_system_info: () => ({ file_count: 0, limit_count: 0 }),
+    get_group_root_files: () => ({ files: [], folders: [] }),
+    get_group_files_by_folder: () => ({ files: [], folders: [] }),
+    get_essence_msg_list: () => [],
+    get_group_notice: () => [],
+    _get_group_notice: () => [],
+    get_group_ignore_add_request: () => [],
+    get_doubt_friends_add_request: () => [],
+    get_unidirectional_friend_list: () => [],
+    get_online_clients: () => ({ clients: [] }),
+    get_cookies: () => ({ cookies: '' }),
+    get_csrf_token: () => ({ token: 0 }),
+    get_credentials: () => ({ cookies: '', csrf_token: 0 }),
+    get_clientkey: () => '',
+    get_robot_uin_range: () => [],
+    get_model_show: () => ({ variants: [] }),
+    _get_model_show: () => ({ variants: [] }),
+    get_profile_like: () => ({ uid: '', time: 0, favorite_count: 0, vote_count: 0, favorite_user_count: 0, vote_user_count: 0 }),
+    fetch_custom_face: () => [],
+    get_group_info_ex: () => ({}),
+    get_group_detail_info: () => ({}),
+    get_mini_app_ark: () => ({}),
+    get_ai_characters: () => [],
+    get_group_album_media_list: () => ({ media_list: [] }),
+    '.get_word_slices': () => ({ slices: [] }),
+  };
+
+  // 明确拒绝: 要么物理上做不到, 要么会动到绑定关系, 静默成功会害人
+  const DENY_ACTIONS = {
+    ocr_image: '微聊没有图片文字识别能力',
+    send_packet: '不支持发送原始数据包',
+    get_ai_record: '微聊没有 AI 语音合成能力',
+    send_group_ai_record: '微聊没有 AI 语音合成能力',
+    set_group_leave: '退出家庭群会破坏手表绑定, 已禁用',
+    set_group_kick: '踢人会破坏手表绑定, 已禁用',
+    delete_friend: '删除好友会破坏手表绑定, 已禁用',
+  };
+
   const actions = {
     // ===== 基础信息 =====
     get_login_info: async () => ({
@@ -261,11 +548,20 @@ async function startOneBot({ cfg, ctx }) {
       nickname: (ctx.nickname && ctx.nickname()) || 'JZClientForNode',
     }),
 
-    get_status: async () => ({
-      online: isOnline(),
-      good: isOnline(),
-      stat: { packet_received: 0, packet_sent: 0, message_received: 0, message_sent: 0 },
-    }),
+    get_status: async () => {
+      const online = isOnline();
+      return {
+        online,
+        good: online,
+        app_initialized: true,
+        app_enabled: true,
+        plugins_good: true,
+        stat: {
+          packet_received: 0, packet_sent: 0, packet_lost: 0,
+          message_received: stats.message_received, message_sent: stats.message_sent,
+        },
+      };
+    },
 
     get_version_info: async () => ({
       app_name: 'JZClientForNode',
@@ -291,6 +587,8 @@ async function startOneBot({ cfg, ctx }) {
         group_name: t.name || '家庭群',
         member_count: (t.peers || []).length,
         max_member_count: (t.peers || []).length,
+        group_create_time: 0,
+        group_level: 0,
       }));
     },
 
@@ -302,6 +600,8 @@ async function startOneBot({ cfg, ctx }) {
         group_name: t.name || '家庭群',
         member_count: (t.peers || []).length,
         max_member_count: (t.peers || []).length,
+        group_create_time: 0,
+        group_level: 0,
       };
     },
 
@@ -313,8 +613,42 @@ async function startOneBot({ cfg, ctx }) {
         user_id: toInt(a.imAccountId),
         nickname: a.name || '',
         card: a.name || '',
+        sex: 'unknown',
+        age: 0,
+        area: '',
+        join_time: 0,
+        last_sent_time: 0,
+        level: '1',
         role: a.accountType === 1 ? 'member' : 'owner',
+        unfriendly: false,
+        title: '',
+        title_expire_time: 0,
+        card_changeable: false,
       }));
+    },
+
+    get_group_member_info: async (p) => {
+      const t = await findTarget('group', p.group_id);
+      if (!t) throw new Error('群不存在');
+      const a = (t.peers || []).find((x) => String(x.imAccountId) === String(p.user_id));
+      if (!a) throw new Error('该成员不在这个群里');
+      return {
+        group_id: toInt(t.dialogId),
+        user_id: toInt(a.imAccountId),
+        nickname: a.name || '',
+        card: a.name || '',
+        sex: 'unknown',
+        age: 0,
+        area: '',
+        join_time: 0,
+        last_sent_time: 0,
+        level: '1',
+        role: a.accountType === 1 ? 'member' : 'owner',
+        unfriendly: false,
+        title: '',
+        title_expire_time: 0,
+        card_changeable: false,
+      };
     },
 
     get_stranger_info: async (p) => {
@@ -324,6 +658,9 @@ async function startOneBot({ cfg, ctx }) {
         nickname: (t && t.name) || String(p.user_id),
         sex: 'unknown',
         age: 0,
+        qid: '',
+        level: 0,
+        login_days: 0,
       };
     },
 
@@ -331,14 +668,14 @@ async function startOneBot({ cfg, ctx }) {
     send_private_msg: async (p) => {
       const t = await findTarget('private', p.user_id);
       if (!t) throw new Error('没有这个私聊会话(手表未绑定或 ID 不对)');
-      const id = await sendSegments(t, normSegments(p.message));
+      const id = await sendSegments(t, normSegments(p.message, p.auto_escape));
       return { message_id: id };
     },
 
     send_group_msg: async (p) => {
       const t = await findTarget('group', p.group_id);
       if (!t) throw new Error('没有这个群会话(家庭群 ID 不对)');
-      const id = await sendSegments(t, normSegments(p.message));
+      const id = await sendSegments(t, normSegments(p.message, p.auto_escape));
       return { message_id: id };
     },
 
@@ -351,19 +688,77 @@ async function startOneBot({ cfg, ctx }) {
       throw new Error('send_msg 需要 user_id 或 group_id');
     },
 
+    // ===== 合并转发(降级成多行文本) =====
+    send_group_forward_msg: async (p) => {
+      const t = await findTarget('group', p.group_id);
+      if (!t) throw new Error('没有这个群会话(家庭群 ID 不对)');
+      return sendForward(t, p.messages);
+    },
+
+    send_private_forward_msg: async (p) => {
+      const t = await findTarget('private', p.user_id);
+      if (!t) throw new Error('没有这个私聊会话(手表未绑定或 ID 不对)');
+      return sendForward(t, p.messages);
+    },
+
+    send_forward_msg: async (p) => {
+      if (p.group_id != null) return actions.send_group_forward_msg(p);
+      if (p.user_id != null) return actions.send_private_forward_msg(p);
+      throw new Error('send_forward_msg 需要 user_id 或 group_id');
+    },
+
+    get_forward_msg: async (p) => {
+      const nodes = forwardStore.get(String(p.id || p.message_id || ''));
+      if (!nodes) throw new Error('转发内容不存在或已过期');
+      return { messages: nodes };
+    },
+
     // ===== 消息查询 =====
     get_msg: async (p) => {
       const rec = msgStore.get(toInt(p.message_id));
       if (!rec) throw new Error('消息不存在或已过期');
-      return {
-        message_id: toInt(p.message_id),
-        message_type: rec.type === 'group' ? 'group' : 'private',
-        sender: { user_id: selfId(), nickname: 'JZClientForNode' },
-        time: rec.time,
-        message: [{ type: 'text', data: { text: rec.text } }],
-        raw_message: rec.text,
-      };
+      return msgEventOf(rec);
     },
+
+    get_group_msg_history: async (p) => {
+      const t = await findTarget('group', p.group_id);
+      if (!t) throw new Error('群不存在');
+      return { messages: historyOf(t.key, p.count).map((r) => msgEventOf(r)) };
+    },
+
+    get_friend_msg_history: async (p) => {
+      const t = await findTarget('private', p.user_id);
+      if (!t) throw new Error('没有这个私聊会话');
+      return { messages: historyOf(t.key, p.count).map((r) => msgEventOf(r)) };
+    },
+
+    get_recent_contact: async (p) => {
+      const list = (await ctx.targets()) || [];
+      const n = Math.max(1, Math.min(50, toInt(p.count) || 10));
+      const out = [];
+      list.forEach((t) => {
+        const arr = histMap.get(t.key) || [];
+        const last = arr[arr.length - 1];
+        if (!last) return;
+        out.push({
+          lastest_msg: msgEventOf(last),
+          peer_id: toInt(t.type === 'group' ? t.dialogId : t.receiverId),
+          peer_name: t.name || '',
+          peer_remark: t.name || '',
+          remark: t.name || '',
+          msg_time: last.time,
+          msg_seq: last.message_id,
+          chat_type: t.type === 'group' ? 2 : 1,
+          sender_id: toInt(last.userId),
+        });
+      });
+      return out.slice(0, n);
+    },
+
+    // 拿媒体文件的地址。插件通常用它去下载, 所以把 url 原样回给它们
+    get_image: async (p) => ({ file: String(p.file || ''), url: String(p.url || p.file || '') }),
+    get_record: async (p) => ({ file: String(p.file || ''), url: String(p.url || p.file || '') }),
+    get_file: async (p) => ({ file: String(p.file || ''), url: String(p.url || p.file || ''), file_size: '0' }),
 
     // ===== 能力声明 =====
     can_send_image: async () => ({ yes: true }),
@@ -375,9 +770,38 @@ async function startOneBot({ cfg, ctx }) {
     clean_cache: async () => ({}),
   };
 
+  // 把三档兼容动作挂上去。放最后是为了让上面的真实实现永远优先(顺序即优先级)
+  // 注意: 关掉 qqCompat 时只有「静默成功」这一档会被拆掉 —— 那是唯一会骗插件的地方;
+  //       「返回空值」是诚实的(确实没有禁言列表), 严格模式也保留, 否则一堆只读插件直接跑不起来
+  NOOP_ACTIONS.forEach((name) => {
+    if (actions[name]) return;
+    actions[name] = async () => {
+      if (conf.qqCompat === false) {
+        const e = new Error('不支持的 action: ' + name + '(微聊没有对应能力, QQ 兼容模式已关闭)');
+        e.retcode = RC.NOTFOUND;
+        throw e;
+      }
+      log.debug('onebot', `QQ 兼容: ${name} 在微聊没有对应能力, 已忽略`);
+      return {};
+    };
+  });
+  Object.keys(EMPTY_ACTIONS).forEach((name) => {
+    if (!actions[name]) actions[name] = EMPTY_ACTIONS[name];
+  });
+  Object.keys(DENY_ACTIONS).forEach((name) => {
+    if (actions[name]) return;
+    actions[name] = async () => {
+      const e = new Error(DENY_ACTIONS[name]);
+      e.retcode = RC.BAD;
+      throw e;
+    };
+  });
+
   async function dispatch(action, params) {
     const fn = actions[action];
     if (!fn) {
+      // 打出来方便用户反馈"某个插件用不了"时直接对上是哪个动作没实现
+      log.debug('onebot', '未实现的 action: ' + action);
       const e = new Error('不支持的 action: ' + action);
       e.retcode = RC.NOTFOUND;
       throw e;
@@ -487,31 +911,48 @@ async function startOneBot({ cfg, ctx }) {
 
   // 由 webui 在收到 IM 聊天消息时调用
   function pushMessage({ type, userId, groupId, senderName, parsed, text, time }) {
-    if (!sockets.size) return;
-    const segments = toSegments(parsed, text);
-    if (!segments.length) return;
-    const id = nextMsgId();
-    msgStore.set(id, { targetKey: type === 'group' ? 'g:' + groupId : 's:' + userId, type, text: text || '', time: nowSec() });
-    if (msgStore.size > 500) {
-      const first = msgStore.keys().next();
-      if (!first.done) msgStore.delete(first.value);
+    const at = time ? Math.floor(Number(time) / 1000) : nowSec();
+
+    // 撤回: 微聊有明确的撤回消息体, 转成 QQ 的 recall 通知事件。
+    // 手表侧不知道被撤回的是哪条, message_id 只能给 0
+    if (parsed && parsed.kind === 'withdraw') {
+      if (!sockets.size) return;
+      const evt = {
+        post_type: 'notice',
+        notice_type: type === 'group' ? 'group_recall' : 'friend_recall',
+        sub_type: 'withdraw',
+        self_id: selfId(),
+        time: at,
+        user_id: toInt(userId),
+        operator_id: toInt(userId),
+        message_id: 0,
+      };
+      if (type === 'group') evt.group_id = toInt(groupId);
+      broadcast(evt);
+      return;
     }
 
-    const evt = {
-      post_type: 'message',
-      message_type: type === 'group' ? 'group' : 'private',
-      sub_type: type === 'group' ? 'normal' : 'friend',
-      message_id: id,
-      user_id: toInt(userId),
-      message: segments,
-      raw_message: text || describe(parsed) || '',
-      font: 0,
-      sender: { user_id: toInt(userId), nickname: senderName || String(userId), role: 'member' },
-      self_id: selfId(),
-      time: time ? Math.floor(Number(time) / 1000) : nowSec(),
+    const segments = toSegments(parsed, text);
+    if (!segments.length) return;
+
+    // 先记账再广播: 没有客户端连着的时候也要留历史, 否则 get_group_msg_history 永远是空的
+    const rec = {
+      message_id: nextMsgId(),
+      targetKey: type === 'group' ? 'g:' + groupId : 's:' + userId,
+      type,
+      groupId: type === 'group' ? groupId : null,
+      userId: toInt(userId),
+      senderName: senderName || String(userId || ''),
+      role: 'member',
+      segments,
+      text: text || describe(parsed) || '',
+      time: at,
+      self: false,
     };
-    if (type === 'group') evt.group_id = toInt(groupId);
-    broadcast(evt);
+    remember(rec);
+    stats.message_received += 1;
+    if (!sockets.size) return;
+    broadcast(msgEventOf(rec));
   }
 
   // 处理某个 WS 连接收到的数据: 切帧 → 分发动作 → 回包

@@ -440,8 +440,14 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     if (Object.keys(cfg.onebotWatches || {}).length) { delete cfg.onebotLegacy; return; }
     let list = [];
     try { list = (await watchList(false)) || []; } catch (e) { list = []; }
-    if (!list.length) return; // 还没登录/拿不到手表, 下次启动再试
-    const wid = String(list[0].watchId);
+    // 平台接口拿不到手表(登录票据过期时很常见)就退回本地缓存。不兜这一下的话旧配置会一直
+    // 挂着不迁移 —— 用户升级后 OneBot 直接停摆, 已经接好的 AstrBot 会以为机器人掉线了。
+    let wid = list.length ? String(list[0].watchId) : '';
+    if (!wid) {
+      const cached = Object.keys(cfg.watchStatus || {});
+      if (cached.length) wid = String(cached[0]);
+    }
+    if (!wid) return; // 本地也没缓存, 下次启动再试
     const wc = device.normalizeOnebotWatch(cfg.onebotWatches[wid] || {});
     wc.enabled = !!legacy.enabled;
     if (legacy.http) wc.http = Object.assign({}, wc.http, legacy.http);

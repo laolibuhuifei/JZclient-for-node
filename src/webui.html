@@ -1450,6 +1450,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
   // ===== 访问令牌登录 =====
   function showGate(msg){
     var g = $('#authGate'); if (!g) return;
+    // 弹出登录遮罩时把加载看门狗停掉, 否则遮罩后面会冒出「加载超时」
+    if (loadWatchdog) { clearTimeout(loadWatchdog); loadWatchdog = 0; }
     g.classList.remove('hidden');
     var e = $('#authErr'); if (e) e.textContent = msg || '';
     var i = $('#authToken');
@@ -1704,10 +1706,11 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     navToggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
   };
 
-  // 加载兜底: 12 秒还没渲染出内容就给个「重试」按钮, 不让页面永远停在「加载中…」
+  // 加载兜底: 12 秒还没渲染出内容就给个「重试」按钮, 不让页面永远停在「加载中…」。
+  // 注意 boot() 一开始也要 arm 一次 —— 启动阶段的 /api/watches 如果卡住,
+  // 那时 load() 还没跑, 没有看门狗的话页面会一直停在初始的「加载中…」。
   var loadWatchdog = 0;
-  function setLoading(){
-    $('#content').innerHTML = '<div class="loading">加载中…</div>';
+  function armWatchdog(ms){
     if (loadWatchdog) { clearTimeout(loadWatchdog); loadWatchdog = 0; }
     loadWatchdog = setTimeout(function(){
       loadWatchdog = 0;
@@ -1718,8 +1721,29 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         '<button class="btn small tonal" id="retryLoad" style="margin-top:12px">重试</button></div>';
       var b = $('#retryLoad');
       if (b) b.onclick = function(){ load(); };
-    }, 12000);
+    }, ms || 12000);
   }
+  function setLoading(){
+    $('#content').innerHTML = '<div class="loading">加载中…</div>';
+    armWatchdog(12000);
+  }
+
+  // 兜底显示: 脚本哪一步抛了未捕获的错, 如果页面还停在「加载中…」就把错误摆出来,
+  // 否则用户只能看到一个永远转圈的页面, 连去控制台看报错的机会都没有。
+  function showFatal(msg){
+    var c = $('#content');
+    if (!c || !c.querySelector('.loading')) return;   // 已经有内容了就不打扰
+    c.innerHTML = '<div class="empty">页面脚本出错了：' + esc(String(msg || '未知错误')) + '<br>' +
+      '把这一行发给开发者，或点下面重试。<br>' +
+      '<button class="btn small tonal" id="retryLoad" style="margin-top:12px">重试</button></div>';
+    var b = $('#retryLoad');
+    if (b) b.onclick = function(){ location.reload(); };
+  }
+  window.addEventListener('error', function(e){ showFatal(e && (e.message || (e.error && e.error.message))); });
+  window.addEventListener('unhandledrejection', function(e){
+    var r = e && e.reason;
+    showFatal(r && (r.message || r));
+  });
 
   async function tryApi(path, opts){
     try { return await api(path, opts); } catch (e) { return null; }
@@ -1780,7 +1804,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         // 手表信息失败要说一声, 否则页面会像"没绑定手表"一样空着, 用户不知道是接口挂了
         var ov = null, ovErr = '';
         if (state.id) {
-          try { ov = await api('/api/watch/' + id + '/overview'); }
+          // overview 要串好几个平台接口, 给 15 秒; 拿不到也照样渲染, 只是没有电量/型号
+          try { ov = await api('/api/watch/' + id + '/overview', { timeout: 15000 }); }
           catch(e){ ovErr = e.message; }
         }
         if (seq === loadSeq) {
@@ -4912,6 +4937,9 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
   }
 
   async function boot(){
+    // 启动阶段就先上兜底: 这时候 load() 还没跑, 没有看门狗的话
+    // /api/auth/status 或 /api/watches 一旦挂住, 页面会永远停在初始的「加载中…」
+    armWatchdog(15000);
     // 先确认令牌, 未授权就停在登录页
     try {
       var st = await (await fetch('/api/auth/status')).json();
@@ -4924,10 +4952,13 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       return;
     }
     hideGate();
-    renderNav(); updateTitle();
-    loadBackground();
+    armWatchdog(15000);
     try {
-      var d = await api('/api/watches');
+      renderNav(); updateTitle();
+      loadBackground();
+      // 这里单独收紧超时: 默认 30 秒对首屏来说太久了, 平台接口卡住时用户就是干等。
+      // 拿不到就落到「我的」页(能看到登录/绑定入口), 别把整页卡在转圈上。
+      var d = await api('/api/watches', { timeout: 12000 });
       state.watches = d.watches || [];
       if (state.watches.length) state.id = state.watches[0].watchId;
       renderStrip();
@@ -4939,18 +4970,15 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       if (an && acc && acc.userName) an.textContent = acc.userName;
       renderNav(); updateTitle(); load();
     } catch(e){
-      // 未登录时 /api/watches 返回 000003(token invalid), 这是"还没登录"不是出错,
-      // 直接甩一行报错会让人以为程序坏了 —— 落到「我的」页引导登录
-      if (/000003|token is invalid/i.test(String((e && e.message) || e))) {
-        state.tab = 'me';
-        state.watches = [];
-        state.id = null;
-        renderStrip(); renderNav(); updateTitle();
-        await load();
-        toast('请先登录家长端账号');
-      } else {
-        $('#content').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
-      }
+      // 手表列表拿不到(未登录 000003 / 平台接口超时 / 网络不通)都落到「我的」页,
+      // 那里至少有登录、绑定、查看配置的入口 —— 比甩一行报错有用得多
+      state.tab = 'me';
+      state.watches = [];
+      state.id = null;
+      renderStrip(); renderNav(); updateTitle();
+      await load();
+      var msg = String((e && e.message) || e);
+      toast(/000003|token is invalid/i.test(msg) ? '请先登录家长端账号' : '手表列表加载失败：' + msg, true);
     }
   }
 

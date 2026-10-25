@@ -2221,7 +2221,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       '<div class="row"><span>启用</span>' + sw('obRevEnabled', rc.enabled) + '</div>' +
       '<div class="muted" style="font-size:12px;line-height:1.6;margin:8px 0 10px">由本程序主动连到对方，适合 AstrBot 跑在别的机器或公网。' +
         '启用后正向 HTTP / WS 可以全部关掉，本程序就不监听任何端口。</div>' +
-      '<label class="field"><span>地址</span><input id="obRevUrl" value="' + esc(rc.url || '') + '" placeholder="ws://1.2.3.4:6199/onebot/v11/ws"></label>' +
+      '<label class="field"><span>地址</span><input id="obRevUrl" value="' + esc(rc.url || '') + '" placeholder="ws://127.0.0.1:6199/ws"></label>' +
       '<label class="field"><span>令牌</span><input id="obRevToken" value="' + esc(rc.token || '') + '" placeholder="对方设置的 access_token"></label>' +
       '<label class="field"><span>重连间隔（秒）</span><input id="obRevReconnect" type="number" min="1" max="3600" value="' + esc(String(rc.reconnect || 5)) + '"></label>';
 
@@ -4548,7 +4548,18 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       if (an && acc && acc.userName) an.textContent = acc.userName;
       renderNav(); updateTitle(); load();
     } catch(e){
-      $('#content').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+      // 未登录时 /api/watches 返回 000003(token invalid), 这是"还没登录"不是出错,
+      // 直接甩一行报错会让人以为程序坏了 —— 落到「我的」页引导登录
+      if (/000003|token is invalid/i.test(String((e && e.message) || e))) {
+        state.tab = 'me';
+        state.watches = [];
+        state.id = null;
+        renderStrip(); renderNav(); updateTitle();
+        await load();
+        toast('请先登录家长端账号');
+      } else {
+        $('#content').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+      }
     }
   }
 

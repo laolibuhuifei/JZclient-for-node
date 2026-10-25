@@ -43,7 +43,7 @@ const DEFAULTS = {
     ws: { enabled: true, host: '0.0.0.0', port: 5701, token: '' },   // 正向 WebSocket(对方连进来)
     wsClient: {          // 反向 WebSocket(我们主动连到 AstrBot 等)
       enabled: false,
-      url: '',           // 例如 ws://127.0.0.1:6199/onebot/v11/ws
+      url: '',           // AstrBot 填 ws://127.0.0.1:6199/ws, NapCat 一般填 ws://127.0.0.1:3001/
       token: '',
       reconnect: 5,      // 断线重连间隔(秒)
     },

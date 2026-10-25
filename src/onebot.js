@@ -764,6 +764,11 @@ async function startOneBot({ cfg, ctx }) {
       Upgrade: 'websocket',
       'Sec-WebSocket-Key': key,
       'Sec-WebSocket-Version': '13',
+      // aiocqhttp(AstrBot/NoneBot 用的库) 会直接读这两个头, 缺了会 500:
+      // X-Client-Role 决定这条连接同时收发(Universal) 还是只收事件/只发动作
+      // X-Self-ID 是账号标识, 事件里的 self_id 要与它一致, 否则回消息找不到连接
+      'X-Self-ID': String(selfId()),
+      'X-Client-Role': 'Universal',
     };
     if (c.token) headers.Authorization = 'Bearer ' + c.token;
 

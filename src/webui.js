@@ -904,10 +904,18 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     if (im && im.connected) return im;
     if (imConnecting) return imConnecting;
     imConnecting = (async () => {
+      const prevImId = cfg.imAccountId;
       const c = new ImClient(cfg);
       await c.connect();
       cfg.imAccountId = c.imAccountId;
       device.save(cfg);
+      // 反向 WS 握手头里的 X-Self-ID 是"连接那一刻"的快照, 而 AstrBot 回消息时会拿
+      // 事件里的 self_id 去匹配这条连接。换账号后 self_id 变了, 不重连就会出现
+      // "能收到消息但回复发不出去" —— 这里主动重建一次
+      if (onebot && String(prevImId || '') !== String(c.imAccountId || '')) {
+        log.info('onebot', `账号标识变化(${prevImId || 0} → ${c.imAccountId})，重连反向 WS`);
+        restartOneBot();
+      }
       c.on('message', (m) => { try { onImMessage(m); } catch (e) { /* ignore */ } });
       c.on('close', () => {
         if (im === c) im = null;

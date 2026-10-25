@@ -324,12 +324,14 @@ WebUI 起来后会同时拉起一个 OneBot v11 服务，可以把微聊接进 A
 
 反向 WS（由本程序主动连过去）：
 
-1. AstrBot 里新建一个 `OneBot v11` 平台，连接方式选 **反向 WebSocket**，记下它监听的路径（形如 `ws://<AstrBot 地址>:6199/onebot/v11/ws`）和 access_token
+1. AstrBot 里新建一个 `OneBot v11` 平台，连接方式选 **反向 WebSocket**，记下它监听的端口（默认 `6199`，路径固定为 `/ws`）和 access_token
 2. 本程序配置文件里填：
    ```json
-   "wsClient": { "enabled": true, "url": "ws://1.2.3.4:6199/onebot/v11/ws", "token": "对方设置的令牌", "reconnect": 5 }
+   "wsClient": { "enabled": true, "url": "ws://1.2.3.4:6199/ws", "token": "对方设置的令牌", "reconnect": 5 }
    ```
 3. 重启 WebUI。日志出现 `[onebot] 反向 WS 已连接` 即成功；断线会按 `reconnect` 秒数自动重连
+
+握手时会带上 `X-Self-ID`（当前账号标识）和 `X-Client-Role: Universal`，AstrBot / NoneBot 用的 aiocqhttp 库依赖这两个头识别连接，缺了会被直接拒绝。换成别的框架时如果它要求别的路径，按对方文档改 `url` 即可。
 
 令牌会同时以 `Authorization: Bearer <token>` 和 `?access_token=<token>` 两种形式发送，AstrBot 两种校验方式都认。
 
@@ -372,7 +374,7 @@ WebUI 启动后，终端会实时打印带时间戳、按级别着色的日志�
 [18:00:56.062] INFO  webui   服务已启动 http://127.0.0.1:8787
 [18:00:57.114] HTTP  GET /api/watches?refresh=1 → 200 507ms 686B
 [18:00:57.331] API   GET watch.okii.com/mobileinit/authid → 000001 217ms
-[18:00:57.402] INFO  im      后台监听在线 imAccountId=115554045
+[18:00:57.402] INFO  im      后台监听在线 imAccountId=100000000
 [18:00:58.021] WARN  im      连接已断开，60 秒后重连
 [18:00:59.010] ERROR webui   GET /api/nope 失败: 接口不存在
 ```
@@ -572,7 +574,7 @@ WebUI 每 30 秒同步一次电量与上报时间，不需要手动刷新页面�
 
 **反向 WS 一直重连 / 日志报「连接被拒绝 HTTP xxx」**
 
-`ws://` 和 `wss://` 要跟对方一致（对方开了 TLS 就得用 `wss://`）。`url` 要写到对方的完整路径，通常是 `.../onebot/v11/ws`，只写到端口会 404。令牌要和对方设置的一致。日志里 `反向 WS 已连接` 才算成功，之后每隔 `reconnect` 秒重试一次是正常行为。
+`ws://` 和 `wss://` 要跟对方一致（对方开了 TLS 就得用 `wss://`）。`url` 要写全路径：AstrBot 固定是 `/ws`，部分框架用 `/onebot/v11/ws`，只写到端口会被拒绝。令牌要和对方设置的一致。日志里 `反向 WS 已连接` 才算成功，之后每隔 `reconnect` 秒重试一次是正常行为。
 
 **语音发送失败**
 

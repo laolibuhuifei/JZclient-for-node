@@ -13,6 +13,7 @@ const crypto = require('crypto');
 const log = require('./logger');
 const device = require('./device');
 const { describe, mediaUrl, EMOJI_PRESET } = require('./message');
+const { resolveMediaSrc, cleanupMediaSrc } = require('./upload');
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
@@ -384,6 +385,21 @@ async function startOneBot({ cfg, ctx }) {
       ids.push(await emit(target, { kind: 'text', text }, text));
     };
 
+    // 媒体段统一入口。OneBot 规范只说 http(s), 但 NapCat / go-cqhttp / AstrBot
+    // 实际还会发 base64:// 和 file:///abs/path —— 全交给 resolveMediaSrc 解开,
+    // 解成临时文件的话发完立刻删掉(图片 1MB+ 堆在 /tmp 里迟早出问题)。
+    const sendMedia = async (data, kind, label, extra) => {
+      const raw = String(data.url || data.file || data.path || '');
+      const hint = kind === 'image' ? 'image' : kind === 'video' ? 'video' : 'voice';
+      const m = resolveMediaSrc(raw, hint);
+      if (m.tmp) log.debug('onebot', `媒体段 ${kind} 已解码到临时文件 ${m.src.split(/[\\/]/).pop()}`);
+      try {
+        ids.push(await emit(target, Object.assign({ kind, src: m.src }, extra || {}), label));
+      } finally {
+        cleanupMediaSrc(m);
+      }
+    };
+
     for (const seg of segments) {
       const type = String((seg && seg.type) || '').toLowerCase();
       const data = (seg && seg.data) || {};
@@ -406,24 +422,30 @@ async function startOneBot({ cfg, ctx }) {
       }
       if (type === 'image') {
         await flush();
-        const src = String(data.url || data.file || '');
-        if (!/^https?:\/\//i.test(src)) throw new Error('图片段只支持 http(s) 地址或 url 字段');
-        ids.push(await emit(target, { kind: 'image', src }, '[图片]'));
+        await sendMedia(data, 'image', '[图片]');
         continue;
       }
       if (type === 'record' || type === 'voice') {
         await flush();
-        const src = String(data.url || data.file || '');
-        if (!/^https?:\/\//i.test(src)) throw new Error('语音段只支持 http(s) 地址或 url 字段');
-        ids.push(await emit(target, { kind: 'voice', src }, '[语音]'));
+        await sendMedia(data, 'voice', '[语音]');
         continue;
       }
       if (type === 'video') {
         await flush();
-        const src = String(data.url || data.file || '');
-        if (!/^https?:\/\//i.test(src)) throw new Error('视频段只支持 http(s) 地址或 url 字段');
         // duration 是秒, 部分框架会带; 不带就让 upload 那边自己探测
-        ids.push(await emit(target, { kind: 'video', src, duration: Number(data.duration) || 0 }, '[视频]'));
+        await sendMedia(data, 'video', '[视频]', { duration: Number(data.duration) || 0 });
+        continue;
+      }
+      // 文件段: 微聊没有文件传输。但插件经常用它兜底 —— 比如音乐插件语音发不出去时
+      // 会 fallback 成 file 段, 内容其实还是音频。按扩展名当对应消息发, 实在不认识才降级成文本。
+      if (type === 'file') {
+        await flush();
+        const name = String(data.name || data.file || data.url || '');
+        const ext = (name.toLowerCase().match(/\.(amr|mp3|m4a|aac|wav|ogg|oga|opus|flac|webm|mp4|mov|m4v|3gp|mkv|avi|jpe?g|png|gif|webp)(?:[?#]|$)/) || [])[1] || '';
+        if (/^(amr|mp3|m4a|aac|wav|ogg|oga|opus|flac)$/.test(ext)) { await sendMedia(data, 'voice', '[语音]'); continue; }
+        if (/^(mp4|mov|m4v|3gp|mkv|avi|webm)$/.test(ext)) { await sendMedia(data, 'video', '[视频]', { duration: Number(data.duration) || 0 }); continue; }
+        if (/^(jpe?g|png|gif|webp)$/.test(ext)) { await sendMedia(data, 'image', '[图片]'); continue; }
+        buf += (buf ? ' ' : '') + '[文件] ' + name;
         continue;
       }
       if (type === 'location') {

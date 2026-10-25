@@ -356,7 +356,22 @@ WebUI 起来后会同时拉起一个 OneBot v11 服务，可以把微聊接进 A
 | 发送 | `send_private_msg` `send_group_msg` `send_msg` `send_group_forward_msg` `send_private_forward_msg` `send_forward_msg` |
 | 消息 | `get_msg` `get_forward_msg` `get_group_msg_history` `get_friend_msg_history` `get_image` `get_record` `get_file` |
 
-消息段支持 `text` `face`（表情序号）`image` `record` `video` `at`（降级成 `@昵称` 文本）`reply`（忽略）`location` `share`（拼成文本）`poke` / `shake` / `dice` / `rps`（降级成一句提示）`json` / `xml` / `ark`（捞标题）`forward`（展开成文本）；其中 `image` / `record` / `video` 的 `url` 必须是 http(s) 地址。
+消息段支持 `text` `face`（表情序号）`image` `record` `video` `at`（降级成 `@昵称` 文本）`reply`（忽略）`location` `share`（拼成文本）`file`（按扩展名当语音/视频/图片发）`poke` / `shake` / `dice` / `rps`（降级成一句提示）`json` / `xml` / `ark`（捞标题）`forward`（展开成文本）。
+
+**媒体段（`image` / `record` / `video` / `file`）的地址四种写法都认**：
+
+| 写法 | 说明 |
+| --- | --- |
+| `http(s)://...` | 直接用，不改写 |
+| `base64://<data>` | NapCat / go-cqhttp / AstrBot 发本地图片、语音时用这个。解码后按文件头判断真实格式（png/jpg/mp3/wav/amr/ogg/flac/mp4/webm…），落到临时文件，**发完立刻删除** |
+| `data:image/png;base64,...` | 同上，认 data URL |
+| `file:///abs/path`、`/abs/path`、`C:\x.png` | 直接读本地文件 |
+
+> 只认 http(s) 的话，插件一发表情包、一放歌就整条链 1400（`图片段只支持 http(s) 地址`），AstrBot 的音乐插件还会因为 `record` 被拒去 fallback 发 `file` 段，结果落到「消息内容为空」。这两条现在都通了。
+>
+> `file` 段本身微聊没有文件传输能力，但很多插件拿它兜底发音频/视频，所以按扩展名转成对应的语音/视频/图片消息；实在认不出类型就发一句 `[文件] 名字`，不会让整条消息失败。
+>
+> 安全边界：本地路径和 base64 都会被读进内存当媒体上传，内容校验在下游——图片必须能被识别成图片格式，音频必须能被 ffmpeg 解码，否则报错。程序不会把读到的任意文件内容发出去。
 
 字符串形式的消息会完整解析 CQ 码（含 `&#91;` `&#93;` `&#44;` `&amp;` 转义），`[CQ:reply,...]` 这类微聊没有对应能力的段会被丢掉，不会再原样发给手表。
 

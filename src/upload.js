@@ -208,7 +208,7 @@ function tmpFile(ext) {
 }
 
 function extOfMedia(name) {
-  const m = String(name || '').toLowerCase().match(/\.(amr|mp3|m4a|aac|wav|ogg|oga|opus|webm|mp4|mov|m4v|3gp|mkv|avi|jpe?g|png|gif|webp)$/);
+  const m = String(name || '').toLowerCase().match(/\.(amr|mp3|m4a|aac|wav|ogg|oga|opus|flac|webm|mp4|mov|m4v|3gp|mkv|avi|jpe?g|png|gif|webp)$/);
   if (!m) return '';
   return '.' + (m[1] === 'jpeg' ? 'jpg' : m[1]);
 }
@@ -229,6 +229,81 @@ async function loadMediaSource(src, extDefault) {
   const buf = fs.readFileSync(s);
   if (buf.length > 100 * 1024 * 1024) throw new Error('文件超过 100MB');
   return { buf, filename: s.split(/[\\/]/).pop() || ('media' + (extDefault || '')) };
+}
+
+// 按文件头猜媒体扩展名(图片/音频/视频), 认不出来返回 ''
+// base64 里没有文件名, 但转码和上传都要靠后缀判断格式, 所以只能嗅探
+function sniffMediaExt(buf) {
+  if (!buf || buf.length < 12) return '';
+  const a = (o, n) => buf.slice(o, o + n).toString('ascii');
+  const img = detectExt(buf);
+  if (img) return img;
+  if (a(0, 5) === '#!AMR') return '.amr';
+  if (a(0, 6) === '!Opus.') return '.opus';
+  if (a(0, 4) === 'OggS') return '.ogg';
+  if (a(0, 4) === 'fLaC') return '.flac';
+  if (a(0, 4) === 'RIFF') {
+    const t = a(8, 4);
+    if (t === 'WAVE') return '.wav';
+    if (t === 'AVI ') return '.avi';
+  }
+  if (a(0, 3) === 'ID3') return '.mp3';
+  if (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0) return '.mp3';
+  if (a(4, 4) === 'ftyp') {
+    const brand = a(8, 4).toLowerCase();
+    if (brand.indexOf('m4a') === 0 || brand.indexOf('m4b') === 0) return '.m4a';
+    if (brand === 'qt  ') return '.mov';
+    return '.mp4';
+  }
+  if (buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) return '.webm';
+  return '';
+}
+
+// 把各家框架五花八门的媒体写法统一成「http(s) 地址」或「本地文件路径」。
+// OneBot 规范只约定了 http(s), 但实际上:
+//   NapCat / go-cqhttp 发本地图会塞 base64://
+//   AstrBot 的 aiocqhttp 适配器也用 base64://, 语音/文件还用 file:///abs/path
+// 只认 http(s) 的话插件一发表情包、一放歌就整条链失败(1400), 所以这里全部解开。
+// 返回 { src, tmp }: tmp=true 表示是临时文件, 调用方用完必须 cleanupMediaSrc()。
+function resolveMediaSrc(raw, hint) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) throw new Error('媒体地址为空');
+  if (/^https?:\/\//i.test(s)) return { src: s, tmp: false };
+
+  const defExt = hint === 'image' ? '.jpg' : hint === 'video' ? '.mp4' : '.mp3';
+
+  // base64://<data>  或  data:image/png;base64,<data>
+  let b64 = '';
+  if (/^base64:\/\//i.test(s)) b64 = s.slice('base64://'.length);
+  else if (/^data:[^,]*;base64,/i.test(s)) b64 = s.replace(/^data:[^,]*;base64,/i, '');
+
+  if (b64) {
+    // 允许换行、URL-safe 变体
+    b64 = b64.replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
+    const buf = Buffer.from(b64, 'base64');
+    if (!buf.length) throw new Error('base64 媒体内容为空');
+    if (buf.length > 100 * 1024 * 1024) throw new Error('媒体超过 100MB');
+    const ext = sniffMediaExt(buf) || defExt;
+    const f = tmpFile(ext);
+    fs.writeFileSync(f, buf);
+    return { src: f, tmp: true };
+  }
+
+  // file:///abs/path (Windows 上是 file:///C:/x)
+  let p = s;
+  if (/^file:\/\//i.test(p)) {
+    p = p.slice('file://'.length);
+    if (/^\/[a-z]:\//i.test(p)) p = p.slice(1);
+    try { p = decodeURIComponent(p); } catch (e) { /* 保持原样 */ }
+  }
+  if (fs.existsSync(p)) return { src: p, tmp: false };
+
+  throw new Error('媒体地址无法识别(支持 http(s) / base64:// / file:// / 本地路径): ' + s.slice(0, 80));
+}
+
+function cleanupMediaSrc(r) {
+  if (!r || !r.tmp || !r.src) return;
+  try { fs.unlinkSync(r.src); } catch (e) { /* ignore */ }
 }
 
 function probeDurationBuf(buf, ext) {
@@ -544,6 +619,9 @@ module.exports = {
   uploadVideo,
   directVideo,
   loadMediaSource,
+  sniffMediaExt,
+  resolveMediaSrc,
+  cleanupMediaSrc,
   imageSize,
   md5Hex,
   extOf,

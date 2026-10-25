@@ -63,10 +63,10 @@ const DEFAULTS = {
     enabled: false,      // 关闭时对外接口一律 403
     token: '',           // 为空时首次启用自动生成并写回
   },
-  // 公告服务(独立部署的私有服务, 客户端只做拉取与渲染)
+  // 公告服务(客户端只做拉取与渲染, 地址可换成自建服务)
   noticeApi: {
     enabled: true,
-    baseUrl: 'http://127.0.0.1:8899', // 改成你自己的公告服务地址
+    baseUrl: 'https://app.laolibuhuifei.com', // 官方公告服务地址, 可改成自己的
     cacheMinutes: 10,                 // 客户端本地缓存时长
   },
 };

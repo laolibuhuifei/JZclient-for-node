@@ -35,20 +35,12 @@ const DEFAULTS = {
     host: '0.0.0.0',     // 默认允许局域网访问(接口需访问令牌)
     token: '',           // 访问令牌, 为空时首次启动自动生成并写回
   },
-  // OneBot v11 桥接(给 AstrBot / NoneBot 等第三方框架用)
+  // OneBot v11 桥接的**公共行为**设置。端口/令牌/会话范围都是按手表分开的,
+  // 见下面的 onebotWatches —— 这里只放每块表都要用同一份的开关
   onebot: {
-    enabled: true,
     heartbeat: 30,       // 心跳间隔(秒), 0 = 关闭
     // QQ 兼容层: 微聊做不到的动作(撤回/禁言/戳一戳等)静默成功, 让按 QQ 写的插件不崩
     qqCompat: true,
-    http: { enabled: true, host: '0.0.0.0', port: 5700, token: '' }, // HTTP API, token 为空自动生成
-    ws: { enabled: true, host: '0.0.0.0', port: 5701, token: '' },   // 正向 WebSocket(对方连进来)
-    wsClient: {          // 反向 WebSocket(我们主动连到 AstrBot 等)
-      enabled: false,
-      url: '',           // AstrBot 填 ws://127.0.0.1:6199/ws, NapCat 一般填 ws://127.0.0.1:3001/
-      token: '',
-      reconnect: 5,      // 断线重连间隔(秒)
-    },
   },
   ai: {
     baseUrl: '',         // OpenAI 兼容地址, 例如 https://api.openai.com/v1
@@ -59,12 +51,6 @@ const DEFAULTS = {
     keywords: [],
     systemPrompt: '你是一个家长端聊天助手。请用简短、口语化的中文回复，不要使用表情符号。',
     sessions: [],        // 启用 AI 的会话 { key, type, name, receiverId|dialogId }
-  },
-  // 对外 API: 给第三方脚本/机器人取加好友口令(独立令牌, 不走 WebUI 的访问令牌)
-  // 这是**全局**令牌(历史配置): 一块令牌能看所有手表。按手表分开的设置见下面的 extApi
-  geniusApi: {
-    enabled: false,      // 关闭时对外接口一律 403
-    token: '',           // 为空时首次启用自动生成并写回
   },
   // 按手表分开的 OneBot 实例: watchId -> { enabled, http:{}, ws:{}, wsClient:{}, targets:[] }
   // 每块表一套自己的端口/令牌, 各自只推自己那块表的会话。port=0 表示自动分配(见 webui.js)
@@ -121,11 +107,22 @@ function load() {
       const cfg = Object.assign({}, DEFAULTS, JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')));
       cfg.ai = Object.assign({}, DEFAULTS.ai, cfg.ai || {});
       cfg.webui = Object.assign({}, DEFAULTS.webui, cfg.webui || {});
-      cfg.onebot = Object.assign({}, DEFAULTS.onebot, cfg.onebot || {});
-      cfg.onebot.http = Object.assign({}, DEFAULTS.onebot.http, (cfg.onebot || {}).http || {});
-      cfg.onebot.ws = Object.assign({}, DEFAULTS.onebot.ws, (cfg.onebot || {}).ws || {});
-      cfg.onebot.wsClient = Object.assign({}, DEFAULTS.onebot.wsClient, (cfg.onebot || {}).wsClient || {});
-      cfg.geniusApi = Object.assign({}, DEFAULTS.geniusApi, cfg.geniusApi || {});
+      // 老配置里的 onebot.http / ws / wsClient / enabled 属于「全局实例」时代。
+      // 现在只有按手表的实例了, 但直接丢掉会让老用户已经接好的端口和令牌全废,
+      // 所以先摘到 onebotLegacy 里(不可枚举, 不会被写回文件), 交给 webui.js 的
+      // restartOneBot 搬到第一块手表上。
+      const old = cfg.onebot || {};
+      const legacy = (old.enabled || old.http || old.ws || old.wsClient)
+        ? { enabled: old.enabled !== false, http: old.http || null, ws: old.ws || null, wsClient: old.wsClient || null }
+        : null;
+      cfg.onebot = Object.assign({}, DEFAULTS.onebot, old);
+      ['enabled', 'http', 'ws', 'wsClient'].forEach((k) => { delete cfg.onebot[k]; });
+      delete cfg.geniusApi;
+      if (legacy) {
+        Object.defineProperty(cfg, 'onebotLegacy', {
+          value: legacy, enumerable: false, configurable: true, writable: true,
+        });
+      }
       cfg.onebotWatches = normalizeOnebotWatches(cfg.onebotWatches);
       cfg.extApi = normalizeExtApi(cfg.extApi);
       if (!Array.isArray(cfg.ai.sessions)) cfg.ai.sessions = [];
@@ -135,16 +132,8 @@ function load() {
   } catch (e) { /* 损坏则用默认 */ }
   return Object.assign({}, DEFAULTS, {
     webui: Object.assign({}, DEFAULTS.webui),
-    onebot: {
-      enabled: DEFAULTS.onebot.enabled,
-      heartbeat: DEFAULTS.onebot.heartbeat,
-      qqCompat: DEFAULTS.onebot.qqCompat,
-      http: Object.assign({}, DEFAULTS.onebot.http),
-      ws: Object.assign({}, DEFAULTS.onebot.ws),
-      wsClient: Object.assign({}, DEFAULTS.onebot.wsClient),
-    },
+    onebot: Object.assign({}, DEFAULTS.onebot),
     ai: Object.assign({}, DEFAULTS.ai),
-    geniusApi: Object.assign({}, DEFAULTS.geniusApi),
     onebotWatches: {},
     extApi: {},
   });

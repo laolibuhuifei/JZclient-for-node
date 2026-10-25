@@ -462,26 +462,26 @@ async function startServer() {
     console.log(`  ${c.dim('访问令牌')}  ${c.bold(srv.token)}`);
     console.log(c.dim(`  快捷链接    http://127.0.0.1:${port}/?token=${srv.token}`));
   }
-  if (srv && srv.onebot) {
-    const ob = srv.onebot;
-    // 只启用反向 WS 时也要打印这一段(此时 http/ws 可能都是关的)
-    const any = (ob.http && ob.http.running) || (ob.ws && ob.ws.running) || (ob.wsClient && ob.wsClient.enabled);
-    if (any) {
-      console.log('');
-      console.log(c.dim('  OneBot v11'));
-      if (ob.http && ob.http.running) {
-        console.log(`    ${c.dim('HTTP API')}  http://127.0.0.1:${ob.http.port}   ${c.dim('令牌')} ${c.bold(ob.http.token)}`);
+  const obList = (srv && srv.onebotSummary) ? srv.onebotSummary() : [];
+  const alive = obList.filter((ob) => ob.http.running || ob.ws.running || ob.wsClient.enabled);
+  if (alive.length) {
+    console.log('');
+    console.log(c.dim('  OneBot v11（每块手表一套）'));
+    alive.forEach((ob) => {
+      console.log(`    ${c.bold(ob.name || ob.watchId)}`);
+      if (ob.http.running) {
+        console.log(`      ${c.dim('HTTP API')}  http://127.0.0.1:${ob.http.port}   ${c.dim('令牌')} ${c.bold(ob.http.token)}`);
       }
-      if (ob.ws && ob.ws.running) {
-        console.log(`    ${c.dim('WS')}        ws://127.0.0.1:${ob.ws.port}   ${c.dim('令牌')} ${c.bold(ob.ws.token)}`);
+      if (ob.ws.running) {
+        console.log(`      ${c.dim('WS')}        ws://127.0.0.1:${ob.ws.port}   ${c.dim('令牌')} ${c.bold(ob.ws.token)}`);
         if (host === '0.0.0.0') {
-          lanIps().forEach((ip) => console.log(c.dim(`    局域网    ws://${ip}:${ob.ws.port}/?access_token=${ob.ws.token}`)));
+          lanIps().forEach((ip) => console.log(c.dim(`      局域网    ws://${ip}:${ob.ws.port}/?access_token=${ob.ws.token}`)));
         }
       }
-      if (ob.wsClient && ob.wsClient.enabled) {
-        console.log(`    ${c.dim('反向 WS')}  ${ob.wsClient.url}  ${ob.wsClient.connected ? c.green('已连接') : c.yellow('连接中')}`);
+      if (ob.wsClient.enabled) {
+        console.log(`      ${c.dim('反向 WS')}  ${ob.wsClient.url}  ${ob.wsClient.connected ? c.green('已连接') : c.yellow('连接中')}`);
       }
-    }
+    });
   }
   return true;
 }
@@ -535,52 +535,64 @@ async function resetToken() {
 // ===== OneBot v11 接入信息 =====
 
 function showOneBot() {
-  const conf = cfg.onebot || {};
-  const ob = srv && srv.onebot;
-  const host = (conf.ws && conf.ws.host) || '0.0.0.0';
+  const obList = (srv && srv.onebotSummary) ? srv.onebotSummary() : [];
   line();
-  if (!conf.enabled) {
-    console.log(`${c.dim('OneBot')}  未启用（配置里 onebot.enabled = false）`);
+  if (!srv) {
+    console.log(`${c.dim('OneBot')}  WebUI 没在跑。输入 5 启动 WebUI 后 OneBot 会一起起来`);
     line();
     return;
   }
-  if (!ob) {
-    console.log(`${c.dim('OneBot')}  已启用但未运行，输入 5 启动 WebUI 后会一起起来`);
+  if (!obList.length) {
+    console.log(`${c.dim('OneBot')}  还没有启用的手表`);
+    console.log(c.dim('  去 WebUI「我的 → OneBot v11 接入」为某块手表打开开关，每块表一套端口和令牌'));
     line();
     return;
   }
-  console.log(`${c.dim('OneBot v11')}  ${(ob.http && ob.http.running) || (ob.ws && ob.ws.running) || (ob.wsClient && ob.wsClient.enabled) ? '运行中' : '未运行(端口可能被占用)'}`);
-  if (ob.http.enabled) {
-    console.log(`  ${c.dim('HTTP API')}  http://127.0.0.1:${ob.http.port}${ob.http.running ? '' : c.red('  ✗')}`);
-    console.log(`  ${c.dim('HTTP 令牌')} ${c.bold(ob.http.token)}`);
-  }
-  if (ob.ws.enabled) {
-    console.log(`  ${c.dim('WS 地址')}  ws://127.0.0.1:${ob.ws.port}${ob.ws.running ? '' : c.red('  ✗')}`);
-    if (host === '0.0.0.0') lanIps().forEach((ip) => console.log(`             ws://${ip}:${ob.ws.port}`));
-    console.log(`  ${c.dim('WS 令牌')}  ${c.bold(ob.ws.token)}`);
-    console.log(c.dim('  接入 AstrBot: OneBot v11(aiocqhttp) → 上面的 WS 地址 + access_token'));
-  }
-  const rc = ob.wsClient || {};
-  if (rc.enabled) {
-    console.log(`  ${c.dim('反向 WS')}  ${rc.url || '-'}  ${rc.connected ? c.green('已连接') : c.yellow('未连接/重连中')}`);
-  } else {
-    console.log(c.dim('  反向 WS   未启用（onebot.wsClient.enabled = false）'));
-  }
+  console.log(`${c.dim('OneBot v11')}  ${obList.length} 块手表各一套`);
+  obList.forEach((ob) => {
+    const label = ob.name || ob.watchId;
+    const alive = ob.http.running || ob.ws.running || ob.wsClient.enabled;
+    console.log(`  ${c.bold(label)}  ${alive ? '' : c.red('未运行(端口可能被占用)')}`);
+    if (ob.http.running) {
+      console.log(`    ${c.dim('HTTP API')}  http://127.0.0.1:${ob.http.port}`);
+      console.log(`    ${c.dim('HTTP 令牌')} ${c.bold(ob.http.token)}`);
+    }
+    if (ob.ws.running) {
+      console.log(`    ${c.dim('WS 地址')}  ws://127.0.0.1:${ob.ws.port}`);
+      lanIps().forEach((ip) => console.log(c.dim(`               ws://${ip}:${ob.ws.port}`)));
+      console.log(`    ${c.dim('WS 令牌')}  ${c.bold(ob.ws.token)}`);
+    }
+    if (ob.wsClient.enabled) {
+      console.log(`    ${c.dim('反向 WS')}  ${ob.wsClient.url || '-'}  ${ob.wsClient.connected ? c.green('已连接') : c.yellow('未连接/重连中')}`);
+    }
+    if (!ob.http.running && !ob.ws.running) console.log(c.dim('    只走反向 WS，不监听任何端口'));
+  });
+  console.log(c.dim('  接入 AstrBot: OneBot v11(aiocqhttp) → 对应手表的 WS 地址 + access_token'));
   console.log('');
-  console.log(c.dim('  输入 o new 重新生成 OneBot 令牌'));
+  console.log(c.dim('  输入 o new 重新生成所有手表的 OneBot 令牌'));
   line();
 }
 
 async function resetOneBotToken() {
   const sure = (await ask('重置 OneBot 令牌会断开已接入的机器人，继续?(yes/n): ')).toLowerCase();
   if (sure !== 'yes') { console.log('已取消'); return; }
-  cfg.onebot = cfg.onebot || {};
-  cfg.onebot.http = Object.assign({}, cfg.onebot.http, { token: '' });
-  cfg.onebot.ws = Object.assign({}, cfg.onebot.ws, { token: '' });
-  try { device.save(cfg); } catch (e) { err('保存失败: ' + e.message); return; }
+  // 令牌是按手表分开的, 全都要清, 否则只清一块会让人以为"重置没生效"
+  const full = device.load();
+  const ws = full.onebotWatches || {};
+  const ids = Object.keys(ws);
+  if (!ids.length) { console.log(c.dim('  还没有配置任何手表的 OneBot，去 WebUI 里先给某块表打开开关')); return; }
+  ids.forEach((wid) => {
+    const w = ws[wid] || {};
+    w.http = Object.assign({}, w.http, { token: '' });
+    w.ws = Object.assign({}, w.ws, { token: '' });
+    ws[wid] = w;
+  });
+  full.onebotWatches = ws;
+  try { device.save(full); } catch (e) { err('保存失败: ' + e.message); return; }
+  cfg = full;
   const was = !!srv;
   if (was) { await stopServer(); await startServer(); }
-  ok('OneBot 令牌已重置' + (was ? '，服务已重启' : ''));
+  ok(`已重置 ${ids.length} 块手表的 OneBot 令牌` + (was ? '，服务已重启' : ''));
 }
 
 // ============ 界面 ============

@@ -219,15 +219,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     return 'gk_' + crypto.randomBytes(16).toString('hex');
   }
 
-  // 启用状态下确保令牌存在(为空则生成并写回配置)
+  // 启用状态下确保令牌存在(为空则生成并写回配置)。令牌只有按手表这一种
   function ensureGeniusToken() {
     let dirty = false;
-    cfg.geniusApi = Object.assign({ enabled: false, token: '' }, cfg.geniusApi || {});
-    if (cfg.geniusApi.enabled && !cfg.geniusApi.token) {
-      cfg.geniusApi.token = newGeniusToken();
-      dirty = true;
-    }
-    // 按手表的令牌也要保证存在, 否则用户打开开关后拿不到能用的令牌
     cfg.extApi = device.normalizeExtApi(cfg.extApi);
     Object.keys(cfg.extApi).forEach((wid) => {
       const e = cfg.extApi[wid];
@@ -236,7 +230,6 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     if (dirty) {
       try { device.save(cfg); } catch (e) { log.warn('geniusapi', '令牌保存失败(每次启动会变): ' + e.message); }
     }
-    return cfg.geniusApi.token;
   }
 
   function clientIp(req) {
@@ -344,12 +337,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
   let imConnecting = null;
   let chatTargets = null;
   const chatLog = new Map();
-  let onebot = null;                  // 全局实例(历史行为: 一套端口收全部会话)
-  let onebots = new Map();            // watchId -> 实例, 按手表分开
+  let onebots = new Map();            // watchId -> 实例(每块表一套端口/令牌/会话范围)
   let onebotKeys = new Map();         // watchId -> [会话 key], 该实例只推这些会话
   let watchNames = null;              // [{watchId, name}], 手表名 <-> 会话名 靠它对
 
-  // 单实例的运行时上下文。watchId + scopeKeys 都为空 = 全局实例, 不过滤
+  // 单个实例的运行时上下文。scopeKeys 为空 = 没匹配到会话, 退化成不过滤(收全部),
+  // 免得机器人看起来是死的更难排查; 有值就只暴露这些会话
   function onebotCtx(watchId, scopeKeys) {
     const keys = scopeKeys || null;
     const scoped = !!(watchId && keys && keys.length);
@@ -417,81 +410,83 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     });
   }
 
-  // 端口自动分配: 全局实例通常占 5700/5701, 每块表从 5710 起往后错开 10
+  // 端口自动分配: 没有全局实例了, 每块表都从 5700 起按 10 错开(5700/5701、5710/5711…)
   function usedPorts(exceptWatchId) {
     const used = new Set();
-    const add = (c) => {
+    Object.keys(cfg.onebotWatches || {}).forEach((k) => {
+      if (String(k) === String(exceptWatchId)) return;
+      const c = cfg.onebotWatches[k];
       if (!c) return;
       if (c.http && c.http.port) used.add(Number(c.http.port));
       if (c.ws && c.ws.port) used.add(Number(c.ws.port));
-    };
-    add(cfg.onebot);
-    Object.keys(cfg.onebotWatches || {}).forEach((k) => {
-      if (String(k) !== String(exceptWatchId)) add(cfg.onebotWatches[k]);
     });
     return used;
   }
 
   function pickPorts(watchId) {
     const used = usedPorts(watchId);
-    for (let base = 5710; base < 65000; base += 10) {
+    for (let base = 5700; base < 65000; base += 10) {
       if (!used.has(base) && !used.has(base + 1)) return { http: base, ws: base + 1 };
     }
-    return { http: 5710, ws: 5711 };
+    return { http: 5700, ws: 5701 };
+  }
+
+  // 老版本只有一套全局实例(onebot.enabled + http/ws/wsClient)。升级后这些字段被
+  // device.load() 摘到不可枚举的 onebotLegacy 里, 这里把它搬到第一块手表上,
+  // 这样已经接好的 AstrBot 不用改端口也不用换令牌。
+  async function migrateLegacyOnebot() {
+    const legacy = cfg.onebotLegacy;
+    if (!legacy) return;
+    if (Object.keys(cfg.onebotWatches || {}).length) { delete cfg.onebotLegacy; return; }
+    let list = [];
+    try { list = (await watchList(false)) || []; } catch (e) { list = []; }
+    if (!list.length) return; // 还没登录/拿不到手表, 下次启动再试
+    const wid = String(list[0].watchId);
+    const wc = device.normalizeOnebotWatch(cfg.onebotWatches[wid] || {});
+    wc.enabled = !!legacy.enabled;
+    if (legacy.http) wc.http = Object.assign({}, wc.http, legacy.http);
+    if (legacy.ws) wc.ws = Object.assign({}, wc.ws, legacy.ws);
+    if (legacy.wsClient) wc.wsClient = Object.assign({}, wc.wsClient, legacy.wsClient);
+    cfg.onebotWatches = cfg.onebotWatches || {};
+    cfg.onebotWatches[wid] = wc;
+    delete cfg.onebotLegacy;
+    try { device.save(cfg); } catch (e) { log.warn('onebot', '迁移旧配置失败: ' + (e && e.message ? e.message : e)); }
+    log.info('onebot', `旧的全局配置已搬到手表 ${wid}（端口和令牌保持不变）`);
   }
 
   // 启动/重启 OneBot: 先关掉全部旧实例(端口在 listen 时绑定, 改端口只能整体重来)
   async function restartOneBot() {
-    if (onebot) {
-      try { await onebot.close(); } catch (e) { /* ignore */ }
-      onebot = null;
-    }
     for (const inst of onebots.values()) {
       try { await inst.close(); } catch (e) { /* ignore */ }
     }
     onebots = new Map();
 
-    const wids = Object.keys(cfg.onebotWatches || {});
-    const anyWatchOn = wids.some((k) => cfg.onebotWatches[k] && cfg.onebotWatches[k].enabled);
-    if (anyWatchOn && cfg.onebot && cfg.onebot.enabled) {
-      log.warn('onebot', '全局实例和按手表的实例同时开着，同一条消息会被推送两次，建议只留一种');
-    }
-
-    if (cfg.onebot && cfg.onebot.enabled) {
-      try {
-        onebot = await startOneBot({ cfg, ctx: onebotCtx() });
-        log.info('onebot', '服务已重新加载');
-      } catch (e) {
-        log.error('onebot', '启动失败: ' + (e && e.message ? e.message : e));
-        onebot = null;
-      }
-    } else {
-      log.info('onebot', '已停用');
-    }
-
+    await migrateLegacyOnebot();
     await refreshOnebotScope();
 
+    const wids = Object.keys(cfg.onebotWatches || {});
     for (const wid of wids) {
       const wc = cfg.onebotWatches[wid];
       if (!wc || !wc.enabled) continue;
       const keys = onebotKeys.get(String(wid)) || [];
       if (!keys.length) {
-        log.warn('onebot', `手表 ${wid} 没匹配到会话，暂时接收全部会话；请在「我的 → OneBot v11 接入 → 按手表分开」里手动指定`);
+        log.warn('onebot', `手表 ${wid} 没匹配到会话，暂时接收全部会话；请在「我的 → OneBot v11 接入」里手动指定`);
       }
-      const conf = Object.assign({}, cfg.onebot || {}, wc, {
-        // 心跳和 QQ 兼容跟全局走, 不用每块表配一遍
-        heartbeat: (cfg.onebot && cfg.onebot.heartbeat) != null ? cfg.onebot.heartbeat : 30,
+      const conf = {
+        enabled: true,
+        // 心跳和 QQ 兼容是公共设置, 不用每块表配一遍
+        heartbeat: cfg.onebot && cfg.onebot.heartbeat != null ? cfg.onebot.heartbeat : 30,
         qqCompat: !(cfg.onebot && cfg.onebot.qqCompat === false),
         http: Object.assign({}, wc.http),
         ws: Object.assign({}, wc.ws),
         wsClient: Object.assign({}, wc.wsClient),
-      });
+      };
       try {
         const inst = await startOneBot({
           cfg,
           ctx: onebotCtx(String(wid), keys),
           conf,
-          // 令牌自动生成后只写回这一块表的配置, 绝不碰全局那段
+          // 令牌自动生成后只写回这一块表的配置, 绝不碰别的表
           onSave: (saved) => {
             const cur = device.normalizeOnebotWatch(cfg.onebotWatches[wid] || {});
             cur.http = Object.assign({}, cur.http, { token: saved.http.token });
@@ -506,7 +501,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
         log.error('onebot', `手表 ${wid} 启动失败: ` + (e && e.message ? e.message : e));
       }
     }
-    return onebot;
+    return onebots;
   }
 
   // 整数收敛: 非法/越界一律回落到默认值
@@ -520,39 +515,28 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
   }
 
   // 组装对外暴露的 OneBot 状态(供 GET 与保存后回显共用)
+  // 顶层只放「公共行为 + 总体运行情况」, 端口/令牌/会话范围全在 watches 里按手表分开
   function onebotState() {
     const c = cfg.onebot || {};
-    const pick = (live, saved) => {
-      if (!live) {
-        return { enabled: !!(saved && saved.enabled), running: false, host: saved && saved.host, port: saved && saved.port, token: saved && saved.token };
-      }
-      return { enabled: live.enabled !== false, running: !!live.running, host: live.host, port: live.port, token: live.token };
-    };
-    // wsClient 在 onebot 里是 getter(实时), 这里展开成普通对象再补上 reconnect 等保存态字段
-    const wcLive = onebot ? onebot.wsClient : null;
-    const wc = Object.assign(
-      { enabled: false, url: '', token: '', reconnect: 5, connected: false, state: 'idle' },
-      c.wsClient || {},
-      wcLive ? { enabled: wcLive.enabled, url: wcLive.url, token: wcLive.token, connected: wcLive.connected, state: wcLive.state } : null
-    );
+    let clients = 0;
+    for (const inst of onebots.values()) clients += inst.clients();
     return {
-      enabled: !!c.enabled,
-      running: !!onebot,
-      clients: onebot ? onebot.clients() : 0,
-      selfId: im ? im.imAccountId : (cfg.imAccountId || 0),
       heartbeat: c.heartbeat != null ? c.heartbeat : 30,
       qqCompat: c.qqCompat !== false,
-      http: pick(onebot && onebot.http, c.http),
-      ws: pick(onebot && onebot.ws, c.ws),
-      wsClient: wc,
+      running: onebots.size > 0,
+      clients,
+      selfId: im ? im.imAccountId : (cfg.imAccountId || 0),
     };
   }
 
-  // 按手表分开的实例状态
+  // 每块手表的实例状态。以平台返回的手表列表为准, 这样「还没配置过」的表也能在界面上出现
+  // (前端只渲染当前选中的那块, 但一份完整列表省得来回请求)
   async function onebotWatchesState() {
-    const wids = Object.keys(cfg.onebotWatches || {});
-    if (!wids.length) return [];
     await ensureWatchNames(false);
+    const configured = cfg.onebotWatches || {};
+    let wids = (watchNames || []).map((w) => String(w.watchId));
+    if (!wids.length) wids = Object.keys(configured);
+    if (!wids.length) return [];
     const nameOf = (wid) => ((watchNames || []).find((x) => x.watchId === String(wid)) || {}).name || '';
     const sub = (live, saved, defPort) => {
       const s = saved || {};
@@ -562,19 +546,23 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
       return { enabled: s.enabled !== false, running: false, host: s.host, port: s.port || defPort, token: s.token || '' };
     };
     return wids.map((wid) => {
-      const wc = cfg.onebotWatches[wid] || {};
+      const has = !!configured[wid];
+      const wc = device.normalizeOnebotWatch(configured[wid] || {});
       const inst = onebots.get(String(wid)) || null;
-      const keys = onebotKeys.get(String(wid)) || [];
+      const manual = (wc.targets || []).filter(Boolean);
+      // 没配置过的表也预演一下自动匹配结果, 用户一进来就知道会收哪些会话
+      const keys = onebotKeys.get(String(wid)) || (manual.length ? manual : autoKeysFor(wid));
       const rcSaved = wc.wsClient || {};
       const rcLive = inst ? inst.wsClient : null;
       return {
         watchId: wid,
         name: nameOf(wid),
+        configured: has,
         enabled: !!wc.enabled,
         running: !!inst,
         clients: inst ? inst.clients() : 0,
         keys,
-        auto: !(wc.targets || []).length,
+        auto: !manual.length,
         http: sub(inst && inst.http, wc.http, 0),
         ws: sub(inst && inst.ws, wc.ws, 0),
         wsClient: Object.assign({ enabled: false, url: '', token: '', reconnect: 5, connected: false, state: 'idle' },
@@ -585,7 +573,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
   }
 
   async function onebotStateAll() {
-    // 顺带把可用会话带出去, 前端「按手表分开」要拿它做多选
+    // 顺带把可用会话带出去, 前端「只收这些会话」的多选要拿它做选项
     let targets = [];
     try { targets = (await loadChatTargets()) || []; } catch (e) { targets = []; }
     return Object.assign({}, onebotState(), {
@@ -675,7 +663,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
         loggedIn: !!cfg.token,
         mobileId: cfg.mobileId || '',
         imConnected: !!(im && im.connected),
-        onebotRunning: !!onebot,
+        onebotRunning: onebots.size > 0,
         watchCount: watches.length,
         watches: watches.map((w) => ({
           watchId: w.watchId,
@@ -1061,8 +1049,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     }
     pushChat(key, { self: false, text, kind: parsed.kind, url: messageUrl(parsed), time: m.createTime || Date.now() });
 
-    // 转发给 OneBot(第三方框架从这里收事件)。按手表的实例只收自己范围内的会话
-    if (onebot || onebots.size) {
+    // 转发给 OneBot(第三方框架从这里收事件)。每个实例只收自己那块表范围内的会话
+    if (onebots.size) {
       const target = (chatTargets || []).find((x) => x.key === key);
       if (target) {
         const peer = (target.peers || []).find((a) => String(a.imAccountId) === String(m.imAccountId));
@@ -1075,9 +1063,6 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
           text,
           time: m.createTime || Date.now(),
         };
-        if (onebot) {
-          try { onebot.pushMessage(payload); } catch (e) { log.warn('onebot', '事件推送失败: ' + (e && e.message ? e.message : e)); }
-        }
         onebots.forEach((inst, wid) => {
           const keys = onebotKeys.get(String(wid)) || [];
           // 没匹配到会话(keys 为空)时退化成"收全部", 否则机器人看起来是死的, 更难排查
@@ -1108,7 +1093,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
       // 反向 WS 握手头里的 X-Self-ID 是"连接那一刻"的快照, 而 AstrBot 回消息时会拿
       // 事件里的 self_id 去匹配这条连接。换账号后 self_id 变了, 不重连就会出现
       // "能收到消息但回复发不出去" —— 这里主动重建一次
-      if (onebot && String(prevImId || '') !== String(c.imAccountId || '')) {
+      if (onebots.size && String(prevImId || '') !== String(c.imAccountId || '')) {
         log.info('onebot', `账号标识变化(${prevImId || 0} → ${c.imAccountId})，重连反向 WS`);
         restartOneBot();
       }
@@ -1388,12 +1373,13 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
   }
 
   // ===== 对外 API: 加好友口令 + 好友管理 =====
-  // 统一前缀 /api/ext/*, 全部用 geniusApi 的独立令牌(前缀 gk_), 不走 WebUI 的 Cookie 鉴权:
+  // 统一前缀 /api/ext/*, 用按手表的独立令牌(前缀 gk_, 存在 cfg.extApi[watchId]),
+  // 不走 WebUI 的 Cookie 鉴权。令牌即身份, 只能操作它对应的那块表:
   //   GET    /api/ext/genius                取加好友口令
   //   GET    /api/ext/friends               好友列表
   //   GET    /api/ext/friends/:friendId     好友详情
   //   DELETE /api/ext/friends/:friendId     删除好友(必须带 confirm=<好友记录 id>)
-  // 开关关闭时一律 403
+  // 某块表的开关关闭时, 它的令牌一律 401
 
   // 给好友记录补一个头像直链。平台返回的是文件 key, 要再换一次下载地址
   async function withFriendAvatars(friends) {
@@ -1517,15 +1503,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     if (sub !== 'genius' && sub !== 'friends') {
       return sendJson(res, 404, { ok: false, error: '接口不存在' });
     }
-    // 令牌分两种:
-    //   1) 按手表的令牌(cfg.extApi[watchId]) —— 令牌即身份, 只能操作对应的那块表
-    //   2) 全局令牌(cfg.geniusApi) —— 历史配置, 一块令牌能看所有手表
+    // 令牌只有按手表这一种: cfg.extApi[watchId]。令牌即身份, 拿到它就锁定那块表
     const perWatch = cfg.extApi || {};
-    const g = cfg.geniusApi || {};
     const watchTokens = Object.keys(perWatch).filter((wid) => perWatch[wid] && perWatch[wid].enabled && perWatch[wid].token);
-    const anyEnabled = !!(g.enabled && g.token) || watchTokens.length > 0;
-    if (!anyEnabled) {
-      return sendJson(res, 403, { ok: false, error: '该接口未启用，请在 WebUI「我的 → 对外 API」里打开' });
+    if (!watchTokens.length) {
+      return sendJson(res, 403, { ok: false, error: '该接口未启用，请在 WebUI「我的 → 对外 API」里为这块手表打开' });
     }
     const m = /^Bearer\s+(\S+)\s*$/i.exec(String(req.headers.authorization || ''));
     const tk = String(query.get('token') || (m ? m[1] : '')).trim();
@@ -1533,8 +1515,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     for (const wid of watchTokens) {
       if (safeEqual(tk, perWatch[wid].token)) { scopeWatch = String(wid); break; }
     }
-    const globalOk = !!(g.enabled && g.token && safeEqual(tk, g.token));
-    if (!scopeWatch && !globalOk) {
+    if (!scopeWatch) {
       log.warn('geniusapi', `令牌不正确 ip=${clientIp(req)}`);
       return sendJson(res, 401, { ok: false, error: '令牌不正确' });
     }
@@ -1555,19 +1536,14 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     }
     if (!list.length) return sendJson(res, 200, { ok: false, error: '当前账号没有绑定手表' });
 
-    // 按手表的令牌锁死目标; 全局令牌才允许用 watchId 选(不传则第一台)
+    // 令牌锁死目标表; 传了 watchId 也只能是它自己
     let wid = String(query.get('watchId') || '').trim();
-    if (scopeWatch) {
-      if (wid && wid !== scopeWatch) {
-        return sendJson(res, 403, { ok: false, error: '这个令牌只对应手表 ' + scopeWatch + '，不能操作 ' + wid });
-      }
-      wid = scopeWatch;
+    if (wid && wid !== scopeWatch) {
+      return sendJson(res, 403, { ok: false, error: '这个令牌只对应手表 ' + scopeWatch + '，不能操作 ' + wid });
     }
-    let target = list[0];
-    if (wid) {
-      target = list.find((w) => String(w.watchId) === wid);
-      if (!target) return sendJson(res, 404, { ok: false, error: '找不到该手表: ' + wid });
-    }
+    wid = scopeWatch;
+    const target = list.find((w) => String(w.watchId) === wid);
+    if (!target) return sendJson(res, 404, { ok: false, error: '找不到该手表: ' + wid });
 
     if (sub === 'friends') return handleExtFriends(req, res, parts, query, target);
     return handleExtGenius(req, res, query, target);
@@ -1659,44 +1635,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
 
     // OneBot 接入信息与设置
     if (parts[1] === 'onebot') {
-      // 保存配置: 启停 / 心跳 / HTTP / 正向 WS / 反向 WS, 保存后热重启生效
+      // 保存公共设置: 心跳 / QQ 兼容。端口、令牌、会话范围都是按手表的, 见下面的 watch 路由
       if (parts[2] === 'config' && req.method === 'POST') {
         const b = await readBody(req);
-        const cur = cfg.onebot || {};
-        const o = Object.assign({}, cur);
-
-        if (b.enabled != null) o.enabled = !!b.enabled;
+        const o = Object.assign({}, cfg.onebot || {});
         if (b.heartbeat != null) o.heartbeat = clampInt(b.heartbeat, 0, 600, 30);
         if (b.qqCompat != null) o.qqCompat = !!b.qqCompat;
-
-        // 子对象合并: 只覆盖前端提交的字段, token 不在这里改
-        const mergeSub = (old, patch, def) => {
-          const out = Object.assign({}, def, old || {});
-          if (!patch) return out;
-          if (patch.enabled != null) out.enabled = !!patch.enabled;
-          if (patch.host != null && String(patch.host).trim()) out.host = String(patch.host).trim();
-          if (patch.port != null) out.port = clampInt(patch.port, 1, 65535, def.port);
-          return out;
-        };
-        o.http = mergeSub(o.http, b.http, { enabled: true, host: '0.0.0.0', port: 5700, token: '' });
-        o.ws = mergeSub(o.ws, b.ws, { enabled: true, host: '0.0.0.0', port: 5701, token: '' });
-
-        const rc = Object.assign({ enabled: false, url: '', token: '', reconnect: 5 }, o.wsClient || {});
-        if (b.wsClient) {
-          if (b.wsClient.enabled != null) rc.enabled = !!b.wsClient.enabled;
-          if (b.wsClient.url != null) rc.url = String(b.wsClient.url).trim();
-          if (b.wsClient.token != null) rc.token = String(b.wsClient.token).trim();
-          if (b.wsClient.reconnect != null) rc.reconnect = clampInt(b.wsClient.reconnect, 1, 3600, 5);
-        }
-        if (rc.enabled && !/^wss?:\/\//i.test(rc.url)) {
-          throw new Error('反向 WS 地址必须以 ws:// 或 wss:// 开头');
-        }
-        o.wsClient = rc;
-
-        if (o.http.enabled && o.ws.enabled && Number(o.http.port) === Number(o.ws.port)) {
-          throw new Error('HTTP 与 WS 不能使用同一个端口');
-        }
-
         cfg.onebot = o;
         device.save(cfg);
         await restartOneBot();
@@ -1750,7 +1694,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
           const arr = Array.isArray(b.targets) ? b.targets : [];
           wc.targets = arr.map((x) => String(x)).filter((x) => /^[sg]:.+/.test(x));
         }
-        // 端口没填就自动分配, 避免和全局实例 / 别的手表撞车
+        // 端口没填就自动分配, 避免和别的手表撞车
         if (!wc.http.port || !wc.ws.port) {
           const p = pickPorts(wid);
           if (!wc.http.port) wc.http.port = p.http;
@@ -1771,77 +1715,43 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
         return ok(res, await onebotStateAll());
       }
 
-      // 重置令牌: 清空后 startOneBot 会自动生成新的并写回配置
-      if (parts[2] === 'token' && req.method === 'POST') {
-        const b = await readBody(req);
-        const which = String(b.which || '');
-        if (which !== 'http' && which !== 'ws') throw new Error('which 只能是 http 或 ws');
-        cfg.onebot = cfg.onebot || {};
-        cfg.onebot[which] = Object.assign({}, cfg.onebot[which], { token: '' });
-        device.save(cfg);
-        await restartOneBot();
-        return ok(res, await onebotStateAll());
-      }
+      // 注意: 没有全局令牌路由了。令牌一律按手表, 走 /api/onebot/watch/token
 
       if (!parts[2] && req.method === 'GET') return ok(res, await onebotStateAll());
       throw new Error('接口不存在');
     }
 
-    // ===== 对外 API: 加好友口令(开关 + 独立令牌) =====
-    // 令牌分两种: 全局(geniusApi, 一块令牌看所有表) + 按手表(extApi[watchId], 令牌即身份)
+    // ===== 对外 API: 加好友口令 / 好友管理 =====
+    // 令牌只有按手表这一种: extApi[watchId], 令牌即身份, 只能操作自己那块表
     if (parts[1] === 'genius-api') {
       const state = async () => {
-        const c = cfg.geniusApi || {};
         const per = cfg.extApi || {};
         await ensureWatchNames(false);
         const watches = (watchNames || []).map((w) => {
           const e = per[w.watchId] || {};
           return { watchId: w.watchId, name: w.name, enabled: !!e.enabled, token: e.token || '' };
         });
-        // 顶层保留 enabled/token 给旧前端用, 新前端读 watches
-        return { enabled: !!c.enabled, token: c.token || '', watches };
+        return { watches };
       };
       if (!parts[2] && req.method === 'GET') return ok(res, await state());
 
-      if (parts[2] === 'config' && req.method === 'POST') {
+      // 开关和重置令牌都必须指定是哪块表
+      if ((parts[2] === 'config' || parts[2] === 'token') && req.method === 'POST') {
         const b = await readBody(req);
         const wid = String(b.watchId || '').trim();
-        if (wid) {
-          // 按手表: 令牌即身份, 一块表一个
-          cfg.extApi = cfg.extApi || {};
-          const e = Object.assign({ enabled: false, token: '' }, cfg.extApi[wid] || {});
+        if (!wid) throw new Error('缺少 watchId：对外接口的令牌是按手表分开的');
+        cfg.extApi = cfg.extApi || {};
+        const e = Object.assign({ enabled: false, token: '' }, cfg.extApi[wid] || {});
+        if (parts[2] === 'config') {
           if (b.enabled != null) e.enabled = !!b.enabled;
+          // 开启时若还没令牌, 立刻生成一个, 用户马上就能复制去用
           if (e.enabled && !e.token) e.token = newGeniusToken();
-          cfg.extApi[wid] = e;
-          device.save(cfg);
-          log.info('geniusapi', `手表 ${wid} 的对外接口已` + (e.enabled ? '启用' : '关闭'));
-          return ok(res, await state());
-        }
-        cfg.geniusApi = Object.assign({ enabled: false, token: '' }, cfg.geniusApi || {});
-        if (b.enabled != null) cfg.geniusApi.enabled = !!b.enabled;
-        // 开启时若还没令牌, 立刻生成一个, 用户马上就能复制去用
-        if (cfg.geniusApi.enabled && !cfg.geniusApi.token) cfg.geniusApi.token = newGeniusToken();
-        device.save(cfg);
-        log.info('geniusapi', '全局对外接口已' + (cfg.geniusApi.enabled ? '启用' : '关闭'));
-        return ok(res, await state());
-      }
-
-      if (parts[2] === 'token' && req.method === 'POST') {
-        const b = await readBody(req);
-        const wid = String(b.watchId || '').trim();
-        if (wid) {
-          cfg.extApi = cfg.extApi || {};
-          const e = Object.assign({ enabled: false, token: '' }, cfg.extApi[wid] || {});
+        } else {
           e.token = newGeniusToken();
-          cfg.extApi[wid] = e;
-          device.save(cfg);
-          log.info('geniusapi', `手表 ${wid} 的对外接口令牌已重置`);
-          return ok(res, await state());
         }
-        cfg.geniusApi = Object.assign({ enabled: false, token: '' }, cfg.geniusApi || {});
-        cfg.geniusApi.token = newGeniusToken();
+        cfg.extApi[wid] = e;
         device.save(cfg);
-        log.info('geniusapi', '全局对外接口令牌已重置');
+        log.info('geniusapi', `手表 ${wid} 的对外接口已` + (parts[2] === 'token' ? '重置令牌' : (e.enabled ? '启用' : '关闭')));
         return ok(res, await state());
       }
 
@@ -3196,12 +3106,28 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     server,
     token: AUTH_TOKEN,
     url: `http://${host}:${port}`,
-    onebot,
-    // 按手表分开的实例(可能为空 Map), 测试与 CLI 都要能拿到
+    // 按手表分开的实例(watchId -> 实例), 测试与 CLI 都要能拿到
     onebots,
+    // CLI 打印用: 每块表的地址/令牌快照(实例是活的, 这里取一份静态值)
+    onebotSummary: () => {
+      const out = [];
+      onebots.forEach((inst, wid) => {
+        const nm = (watchNames || []).find((x) => x.watchId === String(wid)) || {};
+        out.push({
+          watchId: String(wid),
+          name: nm.name || '',
+          http: { enabled: inst.http.enabled, running: inst.http.running, port: inst.http.port, token: inst.http.token },
+          ws: { enabled: inst.ws.enabled, running: inst.ws.running, port: inst.ws.port, token: inst.ws.token },
+          wsClient: {
+            enabled: inst.wsClient.enabled, url: inst.wsClient.url,
+            connected: inst.wsClient.connected, state: inst.wsClient.state,
+          },
+        });
+      });
+      return out;
+    },
     close: () => new Promise((resolve) => {
       server.close(async () => {
-        if (onebot) { try { await onebot.close(); } catch (e) { /* ignore */ } onebot = null; }
         for (const inst of onebots.values()) {
           try { await inst.close(); } catch (e) { /* ignore */ }
         }

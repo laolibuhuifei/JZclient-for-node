@@ -214,6 +214,12 @@ function validateSecurityQuestion(cfg, opts) {
 
 // 新设备登录验证通过后换取登录票据
 // mobilePhone 为登录手机号, randCode 在密保问题方式下传空串
+//
+// 参数对照原版 APP: SSONetServiceImpl.z0() 调的是
+//   sdk.Ghana(..., mobilePhone, checkCode, randCode, areaCode, checkType, changeDeviceType,
+//             "-1", deviceId, 10000, 10000, 11, nDeviceId)
+// 其中 "-1" 是 days(票据有效期), 之前漏了 —— 缺了它服务端会走异常分支回 000002。
+// mac 与 loginV3 保持一致用 deviceId, 不要用 ssoMac(那个只用于明文表单的签名公共参数)。
 function changeDeviceLogin(cfg, opts) {
   return encryptedPost(cfg, '/app/changeDeviceLogin', {
     appId: APP_ID,
@@ -223,11 +229,36 @@ function changeDeviceLogin(cfg, opts) {
     checkCode: opts.checkCode,
     checkType: String(opts.checkType),
     changeDeviceType: String(opts.changeDeviceType == null ? 0 : opts.changeDeviceType),
+    days: '-1',
     deviceId: cfg.deviceId,
     nDeviceId: cfg.nDeviceId || cfg.deviceId,
-    mac: cfg.ssoMac || cfg.deviceId,
+    mac: cfg.deviceId,
     timestamp: bjTime(),
   });
+}
+
+// 换取票据 + 重试
+//
+// 为什么需要重试: 密保答案校验通过后, 服务端把「这台设备已通过验证」的状态落库是异步的,
+// 立刻换票会拿到 000002(出现未知异常)。原版 APP 的 H5 验证页
+// (static.watch.okii.com/watch/account-verify) 里 validate() 就是:
+//   "000002" === code ? (isFirst && (isFirst = false, validate())) : router.go(-1)
+// 即遇到 000002 自动重试一次。APP 原生侧在 H5 回调后还要弹一次「继续验证」确认框,
+// 那一下点击的停顿正好让状态落完, 所以 APP 上几乎看不到这个问题。
+// 这里用「间隔递增重试」把那段停顿补上。
+async function changeDeviceLoginRetry(cfg, opts, tries) {
+  const max = tries || 3;
+  let last = null;
+  for (let i = 0; i < max; i++) {
+    if (i) await new Promise((r) => setTimeout(r, 900 * i));
+    last = await changeDeviceLogin(cfg, opts);
+    const code = last && last.json && last.json.code;
+    if (code === '000001') return last;
+    // 只有 000002 值得重试: 其它码(010304 校验码失效 / 010215 答案错 / 010216 次数用完)重试也没用
+    if (code !== '000002') return last;
+    log.warn('sso', `换取登录票据返回 000002, 第 ${i + 1}/${max} 次重试`);
+  }
+  return last;
 }
 
 module.exports = {
@@ -244,4 +275,5 @@ module.exports = {
   getQuestionHint,
   validateSecurityQuestion,
   changeDeviceLogin,
+  changeDeviceLoginRetry,
 };

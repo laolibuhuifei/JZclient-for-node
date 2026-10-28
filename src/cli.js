@@ -232,7 +232,8 @@ async function loadAccount() {
 }
 
 // 新设备登录二次验证: 目前实现密保问题(含手表天才号)
-async function verifyNewDevice(challenge, account) {
+// password 用于换票失败时兜底重新登录, 调用方从 doLogin 传进来(只在内存里)
+async function verifyNewDevice(challenge, account, password) {
   const types = Array.isArray(challenge.checkTypes) ? challenge.checkTypes : [];
   console.log('该账号在新设备登录，需要先完成安全验证。可选方式:');
   types.forEach((t) => console.log(`  - ${t}) ${CHANGE_DEVICE_TYPES[t] || '方式 ' + t}`));
@@ -289,21 +290,42 @@ async function verifyNewDevice(challenge, account) {
   }
   ok('密保验证通过，正在换取登录票据...');
 
-  const cr = await sso.changeDeviceLogin(cfg, {
+  // 000002 是服务端「验证状态还没落库」的瞬时异常, 内部会自动间隔重试几次
+  const cr = await sso.changeDeviceLoginRetry(cfg, {
     mobilePhone: account,
     checkCode: challenge.checkCode,
     checkType: 4,
     changeDeviceType: 0,
     randCode: '',
   });
-  if (!cr.json || cr.json.code !== '000001') {
-    err('换取登录票据失败: ' + explain(cr.json));
-    return false;
+  if (cr.json && cr.json.code === '000001') {
+    return finishLoginFromTicket(cr.json.data, cr.rsaKey, account);
   }
 
-  cfg.token = typeof cr.json.data === 'string' ? cr.json.data : JSON.stringify(cr.json.data);
+  // 换票还是失败: 验证本身已经通过, 服务端已信任这台设备, 直接重新账密登录
+  // (原版 APP 上等价于「杀掉重进再登一次」)
+  const cj = cr.json || {};
+  if (password) {
+    console.log(c.dim('  换取票据失败(' + (cj.code || '?') + ')，改用账密重新登录...'));
+    const rr = await sso.loginByPassword(cfg, account, password);
+    if (rr.json && rr.json.code === '000001') {
+      return finishLoginFromTicket(rr.json.data, rr.rsaKey, account);
+    }
+    const rj = rr.json || {};
+    err('换取登录票据失败: ' + explain(cr.json));
+    err('重新登录也没成功: ' + explain(rj));
+    return false;
+  }
+  err('换取登录票据失败: ' + explain(cr.json));
+  console.log(c.dim('  验证其实已经通过了，重新运行「登录」再输一次账密就能进去。'));
+  return false;
+}
+
+// 拿到 ticket 之后统一收尾
+async function finishLoginFromTicket(data, rsaKey, account) {
+  cfg.token = typeof data === 'string' ? data : JSON.stringify(data);
   cfg.userName = account;
-  cfg.ssoRsaKey = cr.rsaKey;
+  cfg.ssoRsaKey = rsaKey;
   try { cfg.authId = JSON.parse(cfg.token).accountId; } catch (e) { /* ignore */ }
   device.save(cfg);
   api = new ApiClient(cfg);
@@ -333,7 +355,7 @@ async function doLogin() {
 
   if (!r.json || r.json.code !== '000001') {
     if (r.json && r.json.code === '010410') {
-      const done = await verifyNewDevice(parseJsonData(r.json.data), account);
+      const done = await verifyNewDevice(parseJsonData(r.json.data), account, password);
       if (!done) console.log(c.dim('新设备验证未完成，未登录。'));
       return done;
     }
@@ -345,17 +367,7 @@ async function doLogin() {
     return false;
   }
 
-  cfg.token = typeof r.json.data === 'string' ? r.json.data : JSON.stringify(r.json.data);
-  cfg.userName = account;
-  cfg.ssoRsaKey = r.rsaKey;
-  try { cfg.authId = JSON.parse(cfg.token).accountId; } catch (e) { /* ignore */ }
-  device.save(cfg);
-  api = new ApiClient(cfg);
-  watches = [];
-
-  ok('登录成功。');
-  if (await loadAccount()) console.log(`已加载 ${watches.length} 块手表。`);
-  return true;
+  return finishLoginFromTicket(r.json.data, r.rsaKey, account);
 }
 
 async function doLogout() {

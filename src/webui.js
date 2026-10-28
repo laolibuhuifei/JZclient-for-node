@@ -1827,6 +1827,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
         const checkCode = String(b.checkCode || '');
         const questionId = String(b.questionId || '');
         const answer = String(b.answer || '').trim();
+        // 密码只在这一步的内存里过一下, 不落盘; 用于换票失败时兜底重新登录
+        const password = String(b.password || '');
         if (!account || !checkCode || !questionId || !answer) throw new Error('请填写完整验证信息');
 
         const vr = await sso.validateSecurityQuestion(cfg, { userName: account, checkCode, questionId, answer, changeDeviceType: 0 });
@@ -1834,19 +1836,37 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
           const vj = vr.json || {};
           throw new Error('密保验证失败: ' + (vj.desc || vj.code || '未知错误'));
         }
-        const cr = await sso.changeDeviceLogin(cfg, {
+
+        // 换票: 000002 会自动间隔重试(见 sso.changeDeviceLoginRetry 的注释)
+        const cr = await sso.changeDeviceLoginRetry(cfg, {
           mobilePhone: account,
           checkCode,
           checkType: 4,
           changeDeviceType: 0,
           randCode: '',
         });
-        if (!cr.json || cr.json.code !== '000001') {
-          const cj = cr.json || {};
-          throw new Error('换取登录票据失败: ' + (cj.desc || cj.code || '未知错误'));
+        if (cr.json && cr.json.code === '000001') {
+          await finishLogin(account, cr.json.data, cr.rsaKey);
+          return ok(res, { userName: cfg.userName, loggedIn: true });
         }
-        await finishLogin(account, cr.json.data, cr.rsaKey);
-        return ok(res, { userName: cfg.userName, loggedIn: true });
+
+        // 换票还是失败: 走「大退重登」那条路 —— 验证通过后服务端已经信任这台设备,
+        // 重新用账密 loginV3 就能直接拿到票据(用户实测有效)。密码没带上来就明确提示。
+        const cj = cr.json || {};
+        const code = cj.code || '';
+        if (password) {
+          log.warn('account', `换取票据失败(${code}), 改用账密重新登录`);
+          const rr = await sso.loginByPassword(cfg, account, password);
+          if (rr.json && rr.json.code === '000001') {
+            await finishLogin(account, rr.json.data, rr.rsaKey);
+            return ok(res, { userName: cfg.userName, loggedIn: true, viaRelogin: true });
+          }
+          const rj = rr.json || {};
+          throw new Error('换取登录票据失败: ' + (cj.desc || code || '未知错误') +
+            '；重新登录也没成功: ' + (rj.desc || rj.code || '未知错误'));
+        }
+        throw new Error('换取登录票据失败: ' + (cj.desc || code || '未知错误') +
+          '。验证其实已经通过了，点「登录」再登一次就能进去（服务端这时已经认这台设备）');
       }
       if (parts[2] === 'logout' && req.method === 'POST') {
         cfg.token = null;

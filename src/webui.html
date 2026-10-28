@@ -1572,7 +1572,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
   var VERIFY_MODE_NAMES = { 1:'旧设备验证', 2:'家庭成员验证', 3:'短信验证码', 4:'密保问题', 6:'其它方式' };
 
   // 新设备登录: 选择密保问题并提交答案
-  async function startVerifyDialog(account, challenge){
+  // password 只在内存里带到验证接口, 换票失败时后端用它走「重新登录」兜底, 不落盘
+  async function startVerifyDialog(account, password, challenge){
     var r;
     try {
       r = await api('/api/account/verify/questions', {
@@ -1622,7 +1623,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       try {
         await api('/api/account/verify/question', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ account: account, checkCode: challenge.checkCode, questionId: q.questionId, answer: answer })
+          body: JSON.stringify({ account: account, password: password || '', checkCode: challenge.checkCode, questionId: q.questionId, answer: answer })
         });
         closeModal();
         toast('登录成功');
@@ -3864,7 +3865,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
           body: JSON.stringify({ account: account, password: password })
         });
         if (r && r.needVerify) {
-          await startVerifyDialog(account, r.challenge || {});
+          await startVerifyDialog(account, password, r.challenge || {});
           return;
         }
         toast('登录成功');

@@ -13,6 +13,8 @@ const { chat: aiChat } = require('./ai');
 const { parseMessage, describe, mediaUrl, buildText, buildEmoji, buildLocation, buildLink, buildPhoto, buildVideo, buildVoice, buildKaomoji, EMOJI_PRESET } = require('./message');
 const { loadImageSource, uploadImage, uploadVoice, uploadVideo, directVideo, probeDuration, splitAudio, cleanupSplit, downloadToTmp } = require('./upload');
 const { startOneBot } = require('./onebot');
+const bili = require('./bilibili');
+const biliBot = require('./bili-bot');
 const log = require('./logger');
 const SITE = require('./site.config');
 
@@ -143,7 +145,7 @@ function messageUrl(parsed) {
   return mediaUrl(parsed);
 }
 
-async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
+async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSecret } = {}) {
   // 日志默认 info(请求/响应都打印); WP_LOG=debug 追加请求体等细节, WP_LOG=warn 只看告警
   const prevLevel = log.levelName();
   const envLevel = String(process.env.WP_LOG || '').toLowerCase().trim();
@@ -212,6 +214,44 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
 
   function authCookie() {
     return `${AUTH_COOKIE}=${AUTH_HASH}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${AUTH_TTL}`;
+  }
+
+  // ===== 云端托管票据（可选）=====
+  // 托管平台（jz-cloud）不把本实例的访问令牌传进 URL，而是签一张一次性票据：
+  //   ticket = base64url(JSON{u:uid, e:过期ms, n:nonce}) + "." + HMAC-SHA256(payload, 共享密钥)
+  // 平台和实例共享同一个密钥（平台建实例时生成，通过环境变量注入）。
+  // 这样平台侧永远拿不到 wp_auth 的原文，票据泄露也只能用一次、30 秒内。
+  const TICKET_SECRET = String(ticketSecret || process.env.INSTANCE_TICKET_SECRET || '').trim();
+  const ticketUsed = new Map();   // nonce -> 过期时间
+
+  function verifyTicket(t) {
+    if (!TICKET_SECRET || !t) return null;
+    const s = String(t);
+    const dot = s.lastIndexOf('.');
+    if (dot <= 0 || dot === s.length - 1) return null;
+    const payload = s.slice(0, dot);
+    const sig = s.slice(dot + 1);
+    const expect = crypto.createHmac('sha256', TICKET_SECRET).update(payload).digest('base64url');
+    if (!safeEqual(sig, expect)) return null;
+
+    let j;
+    try {
+      j = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    } catch (e) {
+      return null;
+    }
+    if (!j || typeof j.e !== 'number' || Date.now() > j.e) return null;
+    // nonce 单次使用，防重放
+    if (j.n) {
+      if (ticketUsed.has(j.n)) return null;
+      ticketUsed.set(j.n, j.e);
+      // 顺手清理过期的 nonce，别让 Map 一直涨
+      if (ticketUsed.size > 500) {
+        const nowMs = Date.now();
+        for (const [k, exp] of ticketUsed) if (exp < nowMs) ticketUsed.delete(k);
+      }
+    }
+    return j;
   }
 
   // ===== 对外 API 令牌(独立于 WebUI 访问令牌, 给第三方脚本/机器人用) =====
@@ -586,6 +626,152 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
       watches: await onebotWatchesState(),
       targets: targets.map((t) => ({ key: t.key, name: t.name, type: t.type })),
     });
+  }
+
+  // ===== 微聊 B 站点播 =====
+  // 每块表单独开关 / 单独会话范围 / 单独限额。命令只在「那块表启用的会话」里生效:
+  //   /搜索 关键词  → 回前 10 条, 带序号
+  //   /播放 序号    → 下载上一条搜索里的第 N 条, 当视频消息发出去
+  // 搜索结果按「手表 + 会话」隔离: 家庭群里搜的第 3 条, 不会串到单聊里被 /播放 3 拿去用。
+  const BILI_SEARCH_TTL = biliBot.SEARCH_TTL;   // 搜索结果留 30 分钟, 过期要重新搜
+  const BILI_MAX_RESULTS = biliBot.MAX_RESULTS; // 一次只给 10 条, 序号好记
+  const biliSearchCache = new Map();        // `${watchId}|${chatKey}` -> { at, keyword, list }
+  const biliChains = new Map();             // 同一会话串行, 免得连发 /播放 同时下几个大视频
+  const biliQuota = new Map();              // watchId -> { day, n } 当天已点播条数
+
+  // 某块表实际生效的会话范围(手选优先, 没手选就按手表名自动匹配)
+  function biliScopeKeys(wid) {
+    const c = (cfg.biliBots || {})[wid] || {};
+    const manual = (c.targets || []).filter(Boolean);
+    return manual.length ? manual.slice() : autoKeysFor(wid);
+  }
+
+  // 这条会话归哪块表管: 遍历已启用的表, 谁的会话范围里有它就归谁
+  function biliWatchOf(key) {
+    const bots = cfg.biliBots || {};
+    const wids = Object.keys(bots);
+    for (const wid of wids) {
+      const c = bots[wid];
+      if (!c || !c.enabled) continue;
+      if (biliScopeKeys(wid).indexOf(key) >= 0) return String(wid);
+    }
+    return '';
+  }
+
+  async function biliReply(key, text) {
+    try { await sendChat({ key, kind: 'text', text }); }
+    catch (e) { log.warn('bili', '回复失败: ' + (e && e.message ? e.message : e)); }
+  }
+
+  async function biliHandle(wid, key, cmd) {
+    const c = device.normalizeBiliWatch((cfg.biliBots || {})[wid] || {});
+    if (cmd.kind === 'help') { await biliReply(key, biliBot.HELP); return; }
+
+    if (cmd.kind === 'search') {
+      if (!cmd.arg) { await biliReply(key, '用法：/搜索 视频名称\n例如：/搜索 小猪佩奇'); return; }
+      // 先回一句「正在搜索」: B 站偶尔要两三秒, 没反馈会以为机器人没反应
+      await biliReply(key, '[点播] 正在搜索「' + biliBot.clip(cmd.arg, 20) + '」…');
+      let list;
+      try {
+        list = await bili.search(cmd.arg, { limit: BILI_MAX_RESULTS });
+      } catch (e) {
+        log.warn('bili', `手表 ${wid} 搜索「${cmd.arg}」失败: ` + e.message);
+        await biliReply(key, '[点播] 搜索失败：' + e.message);
+        return;
+      }
+      biliSearchCache.set(wid + '|' + key, { at: Date.now(), keyword: cmd.arg, list });
+      log.info('bili', `手表 ${wid} 搜索「${cmd.arg}」得到 ${list.length} 条`);
+      await biliReply(key, biliBot.formatList(cmd.arg, list));
+      return;
+    }
+
+    // /播放 序号
+    const n = Number(String(cmd.arg).replace(/[^0-9]/g, ''));
+    if (!n) { await biliReply(key, '用法：/播放 序号（要先 /搜索 关键词）'); return; }
+    const hit = biliSearchCache.get(wid + '|' + key);
+    if (!hit || Date.now() - hit.at > BILI_SEARCH_TTL) {
+      await biliReply(key, '搜索结果已经过期了，先 /搜索 关键词 再挑序号');
+      return;
+    }
+    const item = hit.list.find((x) => x.index === n);
+    if (!item) { await biliReply(key, '没有第 ' + n + ' 条，刚才只搜到 ' + hit.list.length + ' 条'); return; }
+    if (!biliBot.takeQuota(biliQuota, wid, c.maxPerDay)) {
+      await biliReply(key, '今天的点播次数用完了（每天 ' + c.maxPerDay + ' 条），明天再来吧');
+      return;
+    }
+    await biliReply(key, '[点播] 第 ' + n + ' 条：' + biliBot.clip(item.title, 30) + '\n正在下载，稍等一下…');
+    let v;
+    try {
+      v = await bili.downloadVideo(item, { maxDuration: c.maxDuration, maxBytes: c.maxBytes });
+    } catch (e) {
+      // 下载失败(超时长/超大小/拿不到直链)不该白占一个名额
+      biliBot.refundQuota(biliQuota, wid);
+      log.warn('bili', `手表 ${wid} 下载第 ${n} 条失败: ` + e.message);
+      await biliReply(key, '[点播] 下载失败：' + e.message);
+      return;
+    }
+    try {
+      // 走 sendChat 的 video 分支: 上传 -> buildVideo -> 发送, 和网页上手动发视频同一条路径
+      await sendChat({ key, kind: 'video', src: v.file, duration: v.duration });
+      log.info('bili', `手表 ${wid} 点播第 ${n} 条已发出 ${Math.round(v.size / 1024)}KB ${v.quality}`);
+    } catch (e) {
+      biliBot.refundQuota(biliQuota, wid);
+      await biliReply(key, '[点播] 发送失败：' + e.message);
+    } finally {
+      // 上传完就把临时文件删掉, 不然几部片子下来磁盘就满了
+      bili.cleanup(v);
+    }
+  }
+
+  // 同一会话串行: 两条 /播放 并发会同时下两个大视频, 微聊那边也可能乱序
+  function runBiliCommand(wid, key, cmd) {
+    const id = wid + '|' + key;
+    const prev = biliChains.get(id) || Promise.resolve();
+    const p = prev.then(() => biliHandle(wid, key, cmd)).catch((e) => {
+      log.warn('bili', '点播命令失败: ' + (e && e.message ? e.message : e));
+    });
+    biliChains.set(id, p);
+    p.then(() => { if (biliChains.get(id) === p) biliChains.delete(id); });
+  }
+
+  // 点播也要「手表名 ↔ 会话」的对应关系, 和 OneBot 一样靠名字对, 得先把两边拉齐
+  // 没配置过点播就整段跳过: 启动时不必为一个没用上的功能多打几次平台接口
+  async function refreshBiliScope() {
+    if (!Object.keys(cfg.biliBots || {}).length) return;
+    await ensureWatchNames(false);
+    // 用户可能还没打开微聊页, 那时 chatTargets 是 null, 自动匹配会一律返空
+    try { await loadChatTargets(); } catch (e) { /* 拉不到就让用户去设置里手选会话 */ }
+  }
+
+  async function biliState() {
+    await refreshBiliScope();
+    // 界面要按手表列出(没配置过的表也得能选), 所以手表名在这里无论如何都要拉一次
+    await ensureWatchNames(false);
+    let targets = [];
+    try { targets = (await loadChatTargets()) || []; } catch (e) { targets = []; }
+    const conf = cfg.biliBots || {};
+    let wids = (watchNames || []).map((w) => String(w.watchId));
+    if (!wids.length) wids = Object.keys(conf);
+    const nameOf = (wid) => ((watchNames || []).find((x) => x.watchId === String(wid)) || {}).name || '';
+    return {
+      watches: wids.map((wid) => {
+        const c = device.normalizeBiliWatch(conf[wid] || {});
+        const manual = (c.targets || []).filter(Boolean);
+        return {
+          watchId: wid,
+          name: nameOf(wid),
+          configured: !!conf[wid],
+          enabled: !!c.enabled,
+          // 没配置过的表也预演一下自动匹配结果, 用户一进来就知道会管哪些会话
+          keys: manual.length ? manual : autoKeysFor(wid),
+          auto: !manual.length,
+          maxDuration: c.maxDuration,
+          maxBytes: c.maxBytes,
+          maxPerDay: c.maxPerDay,
+        };
+      }),
+      targets: targets.map((t) => ({ key: t.key, name: t.name, type: t.type })),
+    };
   }
 
   // ===== 主页仪表盘: 系统/进程资源 =====
@@ -1039,14 +1225,18 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
       try { log.debug('im', 'emoji ' + JSON.stringify(parsed.inner || parsed.body).slice(0, 300)); } catch (e) { /* ignore */ }
     }
 
-    // AI 自动回复
-    if (aiRunning && parsed.kind === 'text' && parsed.text) {
+    // 会话 key 提前算: B 站点播命令要按会话判断归属, 命中后也不能再让 AI 抢答一遍
+    const key = text ? resolveChatKey(m) : null;
+    const biliCmd = (key && parsed.kind === 'text' && parsed.text) ? biliBot.parseCommand(parsed.text) : null;
+    const biliWid = biliCmd ? biliWatchOf(key) : '';
+
+    // AI 自动回复(点播命令归点播机器人管)
+    if (aiRunning && !(biliCmd && biliWid) && parsed.kind === 'text' && parsed.text) {
       const sess = findAiSession(m);
       if (sess && aiShouldTrigger(parsed.text)) queueAiReply(sess, parsed.text);
     }
 
     if (!text) return;
-    const key = resolveChatKey(m);
     if (!key) {
       if (log.isEnabled('debug')) {
         log.debug('im', 'drop no-chat-target ' + JSON.stringify({ msgType: m.msgType, contentType: m.contentType, bodyType: (m.body || {}).type }));
@@ -1054,6 +1244,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
       return;
     }
     pushChat(key, { self: false, text, kind: parsed.kind, url: messageUrl(parsed), time: m.createTime || Date.now() });
+
+    // B 站点播命令: 自己处理完直接返回, 不再转给 OneBot(否则插件还会把它当普通消息回一遍)
+    if (biliCmd && biliWid) { runBiliCommand(biliWid, key, biliCmd); return; }
 
     // 转发给 OneBot(第三方框架从这里收事件)。每个实例只收自己那块表范围内的会话
     if (onebots.size) {
@@ -1376,6 +1569,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     startImBackground();
     // 登录后手表列表/会话才拿得到, 按手表分开的实例要按新数据重新算一次会话范围
     refreshOnebotScope().catch(() => {});
+    // 点播的会话范围同理, 换账号后手表名和会话都会变
+    refreshBiliScope().catch(() => {});
   }
 
   // ===== 对外 API: 加好友口令 + 好友管理 =====
@@ -1724,6 +1919,45 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
       // 注意: 没有全局令牌路由了。令牌一律按手表, 走 /api/onebot/watch/token
 
       if (!parts[2] && req.method === 'GET') return ok(res, await onebotStateAll());
+      throw new Error('接口不存在');
+    }
+
+    // ===== 微聊 B 站点播(按手表) =====
+    // 配置只有按手表这一种: cfg.biliBots[watchId], 每块表自己的开关/会话范围/限额
+    if (parts[1] === 'bili') {
+      if (!parts[2] && req.method === 'GET') return ok(res, await biliState());
+
+      // 保存某块表的点播设置
+      if (parts[2] === 'watch' && req.method === 'POST') {
+        const b = await readBody(req);
+        const wid = String(b.watchId || '').trim();
+        if (!wid) throw new Error('缺少 watchId：点播是按手表分开设置的');
+        const c = device.normalizeBiliWatch((cfg.biliBots || {})[wid] || {});
+        if (b.enabled != null) c.enabled = !!b.enabled;
+        // 时长/大小/每天条数都收敛到合理区间; 大小上限卡在 100MB, 微聊视频上传本身就过不去
+        if (b.maxDuration != null) c.maxDuration = clampInt(b.maxDuration, 0, 7200, c.maxDuration);
+        if (b.maxBytes != null) c.maxBytes = clampInt(b.maxBytes, 0, 100 * 1024 * 1024, c.maxBytes);
+        if (b.maxPerDay != null) c.maxPerDay = clampInt(b.maxPerDay, 0, 999, c.maxPerDay);
+        if (b.targets != null) {
+          const arr = Array.isArray(b.targets) ? b.targets : [];
+          c.targets = arr.map((x) => String(x)).filter((x) => /^[sg]:.+/.test(x));
+        }
+        cfg.biliBots = cfg.biliBots || {};
+        cfg.biliBots[wid] = c;
+        device.save(cfg);
+        log.info('bili', `手表 ${wid} 的点播已${c.enabled ? '启用' : '关闭'}（`
+          + (c.targets.length ? '指定 ' + c.targets.length + ' 个会话' : '按手表自动匹配会话') + '）');
+        return ok(res, await biliState());
+      }
+
+      // 测试搜索: 网页上点一下就能确认 B 站通不通, 不用真去手表上发命令
+      if (parts[2] === 'search' && req.method === 'GET') {
+        const kw = String(query.get('kw') || '').trim();
+        if (!kw) throw new Error('缺少搜索关键词');
+        const list = await bili.search(kw, { limit: BILI_MAX_RESULTS });
+        return ok(res, { keyword: kw, list });
+      }
+
       throw new Error('接口不存在');
     }
 
@@ -3021,6 +3255,18 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
     try {
       // 首页: 带 ?token= 时自动种 Cookie 再跳回干净 URL(方便从终端直接点链接进来)
       if (!parts.length) {
+        // 云端托管：带 ?ticket= 时验签换 Cookie，令牌本身不出现在 URL 里
+        const qticket = url.searchParams.get('ticket');
+        if (qticket) {
+          if (verifyTicket(qticket)) {
+            res.writeHead(302, { 'Set-Cookie': authCookie(), Location: '/' });
+            return res.end();
+          }
+          log.warn('webui', `托管票据校验失败 ip=${clientIp(req)}`);
+          res.writeHead(302, { Location: '/?auth=fail' });
+          return res.end();
+        }
+
         const qt = url.searchParams.get('token');
         if (qt) {
           if (safeEqual(qt, AUTH_TOKEN)) {
@@ -3127,6 +3373,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token } = {}) {
 
   // OneBot v11 桥接(HTTP API + 正向 WS + 反向 WS), 供 AstrBot / NoneBot 等第三方框架接入
   await restartOneBot();
+
+  // B 站点播: 先把「手表名 ↔ 会话」拉齐, 否则「按手表自动匹配会话」会一个都匹配不到
+  await refreshBiliScope().catch(() => {});
 
   return {
     server,

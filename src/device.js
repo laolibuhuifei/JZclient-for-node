@@ -57,6 +57,9 @@ const DEFAULTS = {
   onebotWatches: {},
   // 按手表分开的对外 API 令牌: watchId -> { enabled, token }。令牌即身份, 只能操作对应的那块表
   extApi: {},
+  // 按手表分开的微聊 B 站点播: watchId -> { enabled, targets, maxDuration, maxBytes, maxPerDay }
+  // 每块表单独开关、单独会话范围、单独限额 —— 家里两块表, 一块给老大开一块不给, 互不影响
+  biliBots: {},
   // 公告服务地址写死在 src/site.config.js 的 notice.baseUrl, 不放进用户配置
 };
 
@@ -101,6 +104,49 @@ function normalizeExtApi(raw) {
   return out;
 }
 
+// 单块手表的 B 站点播默认值
+//   maxDuration 秒, 0 = 不限; maxBytes 字节, 上限卡在 100MB(微聊视频上传本身就卡这个数);
+//   maxPerDay 每天最多点播几条, 0 = 不限 —— 防小孩一口气刷十几条大视频把带宽和磁盘打满
+function biliWatchDefaults() {
+  return {
+    enabled: false,
+    targets: [],                 // 会话 key(s:xxx / g:xxx); 空数组 = 按手表自动匹配
+    maxDuration: 600,            // 10 分钟
+    maxBytes: 100 * 1024 * 1024, // 100MB
+    maxPerDay: 20,
+  };
+}
+
+// 数值收敛: 非法/越界一律回落到默认值, 免得手改配置文件把机器人搞崩
+function biliInt(v, min, max, def) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return def;
+  const i = Math.round(n);
+  if (i < min) return min;
+  if (i > max) return max;
+  return i;
+}
+
+function normalizeBiliWatch(raw) {
+  const d = biliWatchDefaults();
+  const r = raw && typeof raw === 'object' ? raw : {};
+  return {
+    enabled: !!r.enabled,
+    targets: Array.isArray(r.targets) ? r.targets.map(String).filter(Boolean) : [],
+    maxDuration: biliInt(r.maxDuration, 0, 7200, d.maxDuration),
+    maxBytes: biliInt(r.maxBytes, 0, d.maxBytes, d.maxBytes),
+    maxPerDay: biliInt(r.maxPerDay, 0, 999, d.maxPerDay),
+  };
+}
+
+function normalizeBiliBots(raw) {
+  const out = {};
+  if (raw && typeof raw === 'object') {
+    Object.keys(raw).forEach((k) => { out[String(k)] = normalizeBiliWatch(raw[k]); });
+  }
+  return out;
+}
+
 function load() {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
@@ -125,6 +171,7 @@ function load() {
       }
       cfg.onebotWatches = normalizeOnebotWatches(cfg.onebotWatches);
       cfg.extApi = normalizeExtApi(cfg.extApi);
+      cfg.biliBots = normalizeBiliBots(cfg.biliBots);
       if (!Array.isArray(cfg.ai.sessions)) cfg.ai.sessions = [];
       if (!Array.isArray(cfg.ai.keywords)) cfg.ai.keywords = [];
       return cfg;
@@ -136,6 +183,7 @@ function load() {
     ai: Object.assign({}, DEFAULTS.ai),
     onebotWatches: {},
     extApi: {},
+    biliBots: {},
   });
 }
 
@@ -179,6 +227,7 @@ function ensureIdentity(cfg) {
 
 module.exports = {
   load, save, ensureIdentity, CONFIG_FILE,
-  // 按手表配置的归一化工具(webui 保存单个手表的 OneBot 配置时要用)
+  // 按手表配置的归一化工具(webui 保存单个手表的 OneBot / 点播配置时要用)
   onebotWatchDefaults, normalizeOnebotWatch, normalizeExtApi,
+  biliWatchDefaults, normalizeBiliWatch, normalizeBiliBots,
 };

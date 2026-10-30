@@ -2592,6 +2592,175 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     };
   }
 
+  // B 站点播卡片: 同样只渲染「当前手表」那一套。每块表各自开关/会话范围/限额,
+  // 左上角切换手表后 load() 重新渲染, 卡片自动跟着切过去。
+  async function loadBiliCard(){
+    var box = $('#biliCard');
+    if (!box) return;
+    var wid = String(state.id || '');
+    var cw = currentWatch() || {};
+    if (!wid) { box.innerHTML = ''; return; }
+    var st;
+    try { st = await api('/api/bili'); } catch(e){ box.innerHTML = ''; return; }
+
+    var list = st.watches || [];
+    var w = null;
+    for (var i = 0; i < list.length; i++) if (String(list[i].watchId) === wid) { w = list[i]; break; }
+    if (!w) {
+      w = { watchId: wid, name: cw.name || wid, enabled: false, keys: [], auto: true,
+            maxDuration: 600, maxBytes: 104857600, maxPerDay: 20, configured: false };
+    }
+
+    var wname = w.name || cw.name || wid;
+    var tgts = st.targets || [];
+    var keys = w.keys || [];
+    var mb = Math.round((Number(w.maxBytes) || 0) / 1024 / 1024);
+    var durMin = Math.round((Number(w.maxDuration) || 0) / 60);
+
+    var sw = function(id, on){
+      return '<label class="switch"><input id="' + id + '" type="checkbox"' + (on ? ' checked' : '') + '><span></span></label>';
+    };
+    // 会话范围显示成人能看懂的名字, 找不到名字才退回原始 key
+    var nameOfKey = function(k){
+      for (var n = 0; n < tgts.length; n++) {
+        if (tgts[n].key === k) return tgts[n].type === 'group' ? '家庭群' : (tgts[n].name || k);
+      }
+      return k;
+    };
+    var stat = w.enabled ? '<span style="color:var(--success)">已启用</span>' : '未启用';
+
+    var html = '<div class="card"><div class="card-title" style="display:flex;align-items:center;justify-content:space-between;gap:10px">' +
+      '<span>B 站点播</span><button class="btn small tonal" id="biliEdit">设置</button></div>' +
+      '<div class="row"><span>当前手表<span class="muted" style="font-size:11px"> · 左上角切换</span></span><span class="value">' + esc(wname) + '</span></div>' +
+      '<div class="row"><span>状态</span><span class="value">' + stat + '</span></div>' +
+      '<div class="row"><span>会话范围</span><span class="value" style="font-size:12px;text-align:right">' +
+        (w.auto ? '自动匹配' : '手动指定') + ' → ' +
+        (keys.length ? esc(keys.map(nameOfKey).join('、')) : '<span class="muted">没匹配到，去设置里手选会话</span>') + '</span></div>' +
+      '<div class="row"><span>单条限制</span><span class="value">' +
+        (durMin ? durMin + ' 分钟' : '不限时长') + ' · ' + (mb ? mb + 'MB' : '不限大小') + '</span></div>' +
+      '<div class="row"><span>每天上限</span><span class="value">' + (w.maxPerDay ? w.maxPerDay + ' 条' : '不限') + '</span></div>';
+
+    html += '<div class="muted" style="font-size:12px;line-height:1.75;margin-top:12px">' +
+      '在微聊里（这块表启用的会话）发送：<br>' +
+      '<code>/搜索 关键词</code> —— 回前 10 条视频，带序号<br>' +
+      '<code>/播放 序号</code> —— 把上一条搜索结果里的第 N 条下载并发过来<br>' +
+      '搜索结果 30 分钟内有效，按会话隔离（群里搜的序号不会串到单聊）。' +
+      '视频走微聊自己的视频消息，手表端直接能播。</div>';
+
+    // ===== 设置表单(默认收起) =====
+    var opts = tgts.map(function(t){
+      var label = (t.type === 'group' ? '家庭群' : '单聊 · ' + (t.name || t.key)) + '（' + t.key + '）';
+      return '<option value="' + esc(t.key) + '"' + (keys.indexOf(t.key) >= 0 ? ' selected' : '') + '>' + esc(label) + '</option>';
+    }).join('');
+
+    var secBody =
+      '<div class="row"><span>启用这块表</span>' + sw('biliOn', w.enabled) + '</div>' +
+      '<label class="field" style="margin:10px 0 0"><span>只在这些会话里响应（一个都不选 = 按手表自动匹配）</span>' +
+        '<select id="biliKeys" multiple size="' + Math.min(6, Math.max(2, tgts.length)) + '">' + opts + '</select></label>' +
+      '<div class="ob-w-grid" style="margin-top:10px">' +
+        '<label class="field" style="margin-bottom:0"><span>时长上限（分钟，0 = 不限）</span>' +
+          '<input id="biliDur" type="number" min="0" max="120" value="' + esc(String(durMin)) + '"></label>' +
+        '<label class="field" style="margin-bottom:0"><span>大小上限（MB，最多 100）</span>' +
+          '<input id="biliSize" type="number" min="0" max="100" value="' + esc(String(mb)) + '"></label>' +
+      '</div>' +
+      '<label class="field" style="margin-top:10px"><span>每天最多点播（条，0 = 不限）</span>' +
+        '<input id="biliDay" type="number" min="0" max="999" value="' + esc(String(w.maxPerDay || 0)) + '"></label>' +
+      '<label class="field" style="margin-top:10px"><span>测试搜索（只查不下载，验证 B 站通不通）</span>' +
+        '<input id="biliTestKw" placeholder="例如 小猪佩奇"></label>' +
+      '<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">' +
+        '<button class="btn small" id="biliSave">保存</button>' +
+        '<button class="btn small tonal" id="biliTest">测试搜索</button></div>' +
+      '<div id="biliTestOut" class="muted" style="font-size:12px;line-height:1.7;margin-top:10px;white-space:pre-wrap;word-break:break-word"></div>';
+
+    var isOpen = obSecOpen ? !!obSecOpen['B 站点播'] : true;
+    html += '<div id="biliForm" class="hidden" style="border-top:1px solid var(--outline-variant);margin-top:14px;padding-top:14px">' +
+      '<div class="ob-sec' + (isOpen ? ' open' : '') + '" data-sec="B 站点播">' +
+        '<button type="button" class="ob-sec-head" aria-expanded="' + (isOpen ? 'true' : 'false') + '">' +
+          '<span>本表设置<span class="ob-sec-sub"> · ' + esc(wname) + '</span></span>' +
+          '<i class="ob-sec-arrow" aria-hidden="true"></i></button>' +
+        '<div class="ob-sec-body">' + secBody + '</div></div>' +
+      '<div style="display:flex;gap:8px;margin-top:14px"><button class="btn tonal" id="biliCancel">收起</button></div>' +
+      '</div>';
+
+    html += '</div>';
+    box.innerHTML = html;
+
+    // 分组折叠(和 OneBot 卡片共用 obSecOpen, 记住用户上次展开的样子)
+    box.querySelectorAll('.ob-sec-head').forEach(function(head){
+      head.addEventListener('click', function(){
+        var s = head.parentNode;
+        if (!s) return;
+        var on = !s.classList.contains('open');
+        s.classList.toggle('open', on);
+        head.setAttribute('aria-expanded', on ? 'true' : 'false');
+        obSecOpen = obSecOpen || {};
+        obSecOpen[s.getAttribute('data-sec')] = on;
+      });
+    });
+
+    var form = $('#biliForm');
+    var editBtn = $('#biliEdit');
+    if (editBtn) editBtn.onclick = function(){
+      form.classList.toggle('hidden');
+      editBtn.textContent = form.classList.contains('hidden') ? '设置' : '收起';
+    };
+    if ($('#biliCancel')) $('#biliCancel').onclick = function(){
+      form.classList.add('hidden');
+      if (editBtn) editBtn.textContent = '设置';
+    };
+
+    if ($('#biliSave')) $('#biliSave').onclick = async function(){
+      var btn = this;
+      var sel = $('#biliKeys');
+      var picked = [];
+      if (sel) Array.prototype.forEach.call(sel.options, function(o){ if (o.selected) picked.push(o.value); });
+      var payload = {
+        watchId: wid,
+        enabled: $('#biliOn').checked,
+        // 表单里按「分钟 / MB」填, 接口收的是秒 / 字节
+        maxDuration: (Number($('#biliDur').value) || 0) * 60,
+        maxBytes: Math.min(100, Number($('#biliSize').value) || 0) * 1024 * 1024,
+        maxPerDay: Number($('#biliDay').value) || 0,
+        targets: picked,
+      };
+      btn.disabled = true;
+      btn.textContent = '保存中…';
+      try {
+        await api('/api/bili/watch', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+        toast(payload.enabled ? '已启用这块表的点播' : '已关闭这块表的点播');
+        await loadBiliCard();
+      } catch(e){
+        toast(e.message || '保存失败', true);
+        btn.disabled = false;
+        btn.textContent = '保存';
+      }
+    };
+
+    if ($('#biliTest')) $('#biliTest').onclick = async function(){
+      var btn = this;
+      var kw = ($('#biliTestKw') || {}).value || '';
+      kw = kw.trim();
+      var out = $('#biliTestOut');
+      if (!kw) { toast('先填个搜索关键词', true); return; }
+      btn.disabled = true;
+      btn.textContent = '搜索中…';
+      out.textContent = '正在搜索「' + kw + '」…';
+      try {
+        var r = await api('/api/bili/search?kw=' + encodeURIComponent(kw));
+        var ls = r.list || [];
+        out.textContent = '「' + kw + '」找到 ' + ls.length + ' 条：\n' +
+          ls.map(function(x){ return x.index + '. ' + x.title + ' · ' + (x.author || '未知'); }).join('\n');
+      } catch(e){
+        out.textContent = '搜索失败：' + (e.message || '未知错误');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '测试搜索';
+      }
+    };
+  }
+
   // ===== 实时日志 =====
   // 主通道是 SSE(/api/logs/stream), 拿不到数据就退化成 1.5 秒轮询。
   // 只保留最近 LOG_MAX 行 DOM, 否则页面开一晚上会越来越卡。
@@ -2831,6 +3000,9 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     // 对外 API: 加好友口令 + 好友管理(异步填充, 见下方 loadGeniusApiCard)
     html += '<div id="geniusApiCard" style="margin-top:12px"></div>';
 
+    // 微聊 B 站点播(异步填充, 见下方 loadBiliCard)
+    html += '<div id="biliCard" style="margin-top:12px"></div>';
+
     // 诊断: 实时日志
     html += '<div class="card" style="margin-top:12px"><div class="card-title">诊断</div>' +
       '<div class="row"><span>实时日志</span><span class="value" style="display:flex;align-items:center;gap:8px">' +
@@ -2851,6 +3023,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     $('#content').innerHTML = html;
     loadOneBotCard();
     loadGeniusApiCard();
+    loadBiliCard();
 
     var gl = $('#goLogs');
     if (gl) gl.onclick = function(){

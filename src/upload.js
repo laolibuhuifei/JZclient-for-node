@@ -7,6 +7,7 @@ const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const { ApiClient } = require('./api');
 const site = require('./site');
+const log = require('./logger');
 
 const CHAT_HOST = site.api.chatHost;
 
@@ -422,6 +423,77 @@ function cleanupSplit(res) {
   try { fs.rmSync(res.dir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
 }
 
+// 异步跑 ffmpeg。视频重编码可能要几分钟, 用 spawnSync 会把整个事件循环卡住
+// (实例里 IM 心跳/HTTP 全停), 所以这里一律异步等。
+function runFfmpeg(args, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    let err = '';
+    const finish = (code) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ code, err });
+    };
+    const p = spawn('ffmpeg', ['-y', '-loglevel', 'error'].concat(args), { stdio: ['ignore', 'ignore', 'pipe'] });
+    p.stderr.on('data', (d) => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
+    const timer = setTimeout(() => { try { p.kill('SIGKILL'); } catch (e) { /* ignore */ } }, timeoutMs || 900000);
+    p.on('error', (e) => { err = e.message; finish(-1); });
+    p.on('close', (code) => finish(code));
+  });
+}
+
+// 把超长视频切成多段 —— 微聊单条视频上限 30 秒, 超了手表端放不出来。
+//
+// 切视频比切音频麻烦: `-c copy` 只能在关键帧处断开, 所以每段实际时长会
+// **大于等于** 目标值(取决于原片的 GOP)。所以分两步:
+//   1. 先按 maxSec-2 秒用 `-c copy` 快切(几秒完事, 不掉画质), 切完逐段 ffprobe;
+//   2. 只要有一段还超过 maxSec, 就整体重编码, 并用 `-force_key_frames` 把关键帧
+//      精确钉在切点上 —— 慢, 但保证每段都不超。
+// 返回 { dir, files, reencoded }; 用完必须调 cleanupSplit()。
+async function splitVideo(file, maxSec) {
+  const limit = Math.max(5, Math.round(Number(maxSec) || 30));
+  // 留 2 秒余量给关键帧造成的溢出
+  const cut = Math.max(4, limit - 2);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'watch_vseg_'));
+  const ext = extOfMedia(file) || '.mp4';
+  const pick = () => fs.readdirSync(dir).filter((f) => /^seg_\d+\./.test(f)).sort()
+    .map((f) => path.join(dir, f));
+  const wipe = () => {
+    for (const f of pick()) { try { fs.unlinkSync(f); } catch (e) { /* ignore */ } }
+  };
+  const segOut = path.join(dir, 'seg_%03d' + ext);
+  const segArgs = (extra) => ['-i', file].concat(extra, [
+    '-f', 'segment', '-segment_time', String(cut), '-reset_timestamps', '1', segOut,
+  ]);
+  // 每段都必须在 limit 以内, 超一条就得重来
+  const allFit = () => pick().every((f) => {
+    const d = probeDuration(f);
+    return d > 0 && d <= limit;
+  });
+
+  let r = await runFfmpeg(segArgs(['-c', 'copy']), 300000);
+  let files = pick();
+  let reencoded = false;
+  if (r.code !== 0 || !files.length || !allFit()) {
+    wipe();
+    log.debug('upload', '视频快切不可用/切完仍超长, 改为重编码切分: ' + (r.err || '').slice(0, 120));
+    r = await runFfmpeg(segArgs([
+      // 把关键帧精确钉在 cut 的整数倍上, 这样 -f segment 就会正好在这里断开
+      '-force_key_frames', 'expr:gte(t,n_forced*' + cut + ')',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
+      '-c:a', 'aac', '-b:a', '96k',
+    ]), 1800000);
+    files = pick();
+    reencoded = true;
+  }
+  if (r.code !== 0 && !files.length) {
+    log.warn('upload', '视频切分失败: ' + String(r.err || '').slice(0, 200));
+  }
+  return { dir, files, reencoded };
+}
+
+
 // mp3/wav/webm/m4a -> 自定义 Opus
 function toWatchOpus(buf, ext) {
   const inPath = tmpFile(ext || '.bin');
@@ -678,6 +750,7 @@ module.exports = {
   probeDuration,
   downloadToTmp,
   splitAudio,
+  splitVideo,
   cleanupSplit,
   imageSize,
   md5Hex,

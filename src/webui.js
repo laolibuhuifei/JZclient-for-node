@@ -11,7 +11,7 @@ const sso = require('./sso');
 const { ImClient } = require('./im');
 const { chat: aiChat } = require('./ai');
 const { parseMessage, describe, mediaUrl, buildText, buildEmoji, buildLocation, buildLink, buildPhoto, buildVideo, buildVoice, buildKaomoji, EMOJI_PRESET } = require('./message');
-const { loadImageSource, uploadImage, uploadVoice, uploadVideo, directVideo, probeDuration, splitAudio, cleanupSplit, downloadToTmp } = require('./upload');
+const { loadImageSource, uploadImage, uploadVoice, uploadVideo, directVideo, probeDuration, splitAudio, splitVideo, cleanupSplit, downloadToTmp } = require('./upload');
 const { startOneBot } = require('./onebot');
 const bili = require('./bilibili');
 const biliBot = require('./bili-bot');
@@ -751,7 +751,13 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       await biliReply(key, '今天的点播次数用完了（每天 ' + c.maxPerDay + ' 条），明天再来吧');
       return;
     }
-    await biliReply(key, '[点播] 第 ' + n + ' 条：' + biliBot.clip(item.title, 30) + '\n正在下载，稍等一下…');
+    // 超过 30 秒会切成多段发, 先说明白 —— 否则用户看到一串视频会以为机器人在刷屏
+    const segs = item.duration > VIDEO_MAX_SEC ? Math.ceil(item.duration / (VIDEO_MAX_SEC - 2)) : 0;
+    await biliReply(key, '[点播] 第 ' + n + ' 条：' + biliBot.clip(item.title, 30) + '\n'
+      + (segs > 1
+        ? '这个视频 ' + bili.fmtDuration(item.duration) + '，超过 ' + VIDEO_MAX_SEC + ' 秒，'
+          + '会切成约 ' + segs + ' 段发过来，稍等…'
+        : '正在下载，稍等一下…'));
     let v;
     try {
       v = await bili.downloadVideo(item, { maxDuration: c.maxDuration, maxBytes: c.maxBytes });
@@ -1486,6 +1492,62 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     }
   }
 
+  // 微聊单条视频上限 30 秒, 超过就切开逐条发(超了手表端根本放不出来)
+  const VIDEO_MAX_SEC = 30;
+  const VIDEO_MAX_SEG = 30;
+
+  // 发一条视频, 超过 30 秒自动切段。file 可以是本地路径或 http(s) 地址, 返回实际发出的条数。
+  // 切段本身在 upload.splitVideo 里(先快切, 关键帧对不上才重编码)。
+  async function sendVideoParts(c, t, file, duration) {
+    let dl = '';
+    let split = null;
+    let sent = 0;
+    let src = String(file || '');
+    const group = t.type === 'group';
+    const dialogId = group ? t.dialogId : t.receiverId;
+    const sendOne = async (p, i, total) => {
+      const v = await uploadVideo(cfg, { src: p, group, dialogId, myImAccountId: c.imAccountId });
+      const obj = buildVideo(v);
+      const r = group
+        ? await c.sendGroupPayload(t.dialogId, c.imAccountId, obj, 1)
+        : await c.sendSinglePayload(t.receiverId, obj, 1);
+      if (!r.ok) throw new Error(r.desc || r.code || '发送失败');
+      sent++;
+      const sec = Math.round(v.videoLength || 0);
+      // 多段时标上「第几段/共几段」, 不然手表上看到一串视频不知道有没有收全
+      const label = total > 1
+        ? '[视频 ' + (i + 1) + '/' + total + '] ' + sec + '秒'
+        : '[视频' + (sec ? ' ' + sec + '秒' : '') + ']';
+      pushChat(t.key, { self: true, text: label, kind: 'video', url: (v.source && v.source.downloadUrl) || '', time: Date.now() });
+      return v;
+    };
+    try {
+      if (/^https?:\/\//i.test(src)) { dl = await downloadToTmp(src, 'video'); src = dl; }
+      const dur = Number(duration) || probeDuration(src);
+      if (!dur || dur <= VIDEO_MAX_SEC) { await sendOne(src, 0, 1); return 1; }
+      split = await splitVideo(src, VIDEO_MAX_SEC);
+      if (!split.files.length) throw new Error('视频切分失败（需要 ffmpeg）');
+      if (split.files.length > VIDEO_MAX_SEG) {
+        throw new Error(`视频 ${Math.round(dur)} 秒，切分后 ${split.files.length} 段超过上限 ${VIDEO_MAX_SEG} 段`);
+      }
+      log.info('webui', `视频 ${Math.round(dur)} 秒超过 ${VIDEO_MAX_SEC} 秒上限, 切成 ${split.files.length} 段`
+        + (split.reencoded ? '(重编码切分)' : '(直接切流)'));
+      for (let i = 0; i < split.files.length; i++) {
+        // 连发太快平台会吞消息, 视频比语音更重, 间隔给大一点
+        if (i) await new Promise((r) => setTimeout(r, 500));
+        await sendOne(split.files[i], i, split.files.length);
+      }
+      return split.files.length;
+    } catch (e) {
+      // 记下已经发出去几条, 调用方据此判断能不能退回直链兜底(别重复发)
+      e.sent = sent;
+      throw e;
+    } finally {
+      if (split) cleanupSplit(split);
+      if (dl) { try { fs.unlinkSync(dl); } catch (e) {} }
+    }
+  }
+
   async function sendChat(body) {
     const key = String(body.key || '');
     const targets = await loadChatTargets();
@@ -1561,20 +1623,18 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     } else if (kind === 'video') {
       const src = String(body.src || '').trim();
       if (!src) throw new Error('视频地址不能为空');
-      let v;
-      if (/^https?:\/\//i.test(src)) {
-        v = directVideo(src, Number(body.duration) || 0);
+      const dur = Number(body.duration) || 0;
+      // 外链且不超时长(或不知道时长): 保持原来的「不下载、直接引用」, 别平白多传一次
+      if (/^https?:\/\//i.test(src) && (!dur || dur <= VIDEO_MAX_SEC)) {
+        const v = directVideo(src, dur);
+        obj = buildVideo(v);
+        label = '[视频]';
+        url = (v.source && v.source.downloadUrl) || '';
       } else {
-        v = await uploadVideo(cfg, {
-          src,
-          group: t.type === 'group',
-          dialogId: t.type === 'group' ? t.dialogId : t.receiverId,
-          myImAccountId: c.imAccountId,
-        });
+        // 本地文件 / 超过 30 秒的外链: 走上传, 超长自动切段, 自己发完直接返回
+        const parts = await sendVideoParts(c, t, src, dur);
+        return { url: '', parts };
       }
-      obj = buildVideo(v);
-      label = '[视频]';
-      url = (v.source && v.source.downloadUrl) || '';
     } else {
       throw new Error('不支持的消息类型');
     }
@@ -2352,28 +2412,26 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         const c = await ensureIM();
         const group = t.type === 'group';
         const dialogId = group ? t.dialogId : t.receiverId;
-        let label;
-        let url;
-        if (kind === 'image') {
-          const img = await uploadImage(cfg, { buf, filename, group, dialogId, myImAccountId: c.imAccountId });
-          const obj = buildPhoto(img);
-          const r = group
-            ? await c.sendGroupPayload(t.dialogId, c.imAccountId, obj)
-            : await c.sendSinglePayload(t.receiverId, obj);
-          if (!r.ok) throw new Error(r.desc || r.code || '发送失败');
-          label = '[图片]';
-          url = (img.source && img.source.downloadUrl) || '';
-        } else {
-          const v = await uploadVideo(cfg, { buf, filename, group, dialogId, myImAccountId: c.imAccountId });
-          const obj = buildVideo(v);
-          const r = group
-            ? await c.sendGroupPayload(t.dialogId, c.imAccountId, obj)
-            : await c.sendSinglePayload(t.receiverId, obj);
-          if (!r.ok) throw new Error(r.desc || r.code || '发送失败');
-          label = '[视频]';
-          url = (v.source && v.source.downloadUrl) || '';
+        // 视频超过 30 秒要切段, 而 ffmpeg 只吃文件 —— 先落盘再交给 sendVideoParts
+        if (kind === 'video') {
+          const ext = path.extname(filename) || '.mp4';
+          const tmp = path.join(os.tmpdir(), 'watch_vid_' + crypto.randomBytes(6).toString('hex') + ext);
+          fs.writeFileSync(tmp, buf);
+          try {
+            const n = await sendVideoParts(c, t, tmp);
+            return ok(res, { result: true, parts: n });
+          } finally {
+            try { fs.unlinkSync(tmp); } catch (e) { /* ignore */ }
+          }
         }
-        pushChat(key, { self: true, text: label, kind: kind === 'image' ? 'photo' : 'video', url, time: Date.now() });
+        const img = await uploadImage(cfg, { buf, filename, group, dialogId, myImAccountId: c.imAccountId });
+        const obj = buildPhoto(img);
+        const r = group
+          ? await c.sendGroupPayload(t.dialogId, c.imAccountId, obj)
+          : await c.sendSinglePayload(t.receiverId, obj);
+        if (!r.ok) throw new Error(r.desc || r.code || '发送失败');
+        const url = (img.source && img.source.downloadUrl) || '';
+        pushChat(key, { self: true, text: '[图片]', kind: 'photo', url, time: Date.now() });
         return ok(res, { result: true, url });
       }
       const targets = await loadChatTargets();

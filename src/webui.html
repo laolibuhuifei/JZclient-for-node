@@ -2355,9 +2355,15 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         '<div class="ob-sec-body">' + body + '</div></div>';
     };
 
+    // 会话用复选框而不是 <select multiple>: 多选框不按 Ctrl 就只能选一个,
+    // 「单聊和家庭群各选一次」这种操作很容易漏
     var opts = tgts.map(function(t){
       var label = (t.type === 'group' ? '家庭群 · ' : '单聊 · ') + (t.name || t.key) + '（' + t.key + '）';
-      return '<option value="' + esc(t.key) + '"' + (keys.indexOf(t.key) >= 0 ? ' selected' : '') + '>' + esc(label) + '</option>';
+      return '<label class="row" style="cursor:pointer;padding:8px 0">' +
+        '<span style="font-size:13px">' + esc(label) + '</span>' +
+        '<input class="obw-key" type="checkbox" value="' + esc(t.key) + '"' +
+        (keys.indexOf(t.key) >= 0 ? ' checked' : '') +
+        ' style="width:18px;height:18px;flex:none"></label>';
     }).join('');
 
     var secWatch =
@@ -2368,8 +2374,11 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         '<label class="field" style="margin-bottom:0"><span>WS 端口</span>' +
           '<input id="obwWp" type="number" min="1" max="65535" value="' + esc(wsC.port ? String(wsC.port) : '') + '" placeholder="留空自动分配"></label>' +
       '</div>' +
-      '<label class="field" style="margin:10px 0 0"><span>只收这些会话（一个都不选 = 按手表自动匹配）</span>' +
-        '<select id="obwKeys" multiple size="' + Math.min(6, Math.max(2, tgts.length)) + '">' + opts + '</select></label>' +
+      '<div class="field" style="margin:10px 0 0"><span style="display:block;margin-bottom:4px">'
+        + '只收这些会话（一个都不勾 = 按手表自动匹配）</span>' +
+        '<div style="border:1px solid var(--outline-variant);border-radius:10px;padding:0 12px">'
+        + (opts || '<div class="muted" style="padding:10px 0;font-size:13px">'
+            + '还没拉到会话列表，先去「微聊」页看一眼再回来</div>') + '</div></div>' +
       '<div class="row" style="margin-top:10px"><span>反向 WS</span>' + sw('obwRevOn', !!rc.enabled) + '</div>' +
       '<div class="muted" style="font-size:12px;line-height:1.6;margin:8px 0 10px">由本程序主动连到对方，适合 AstrBot 跑在别的机器或公网。' +
         '启用后 HTTP / 正向 WS 可以全部关掉，这块表就不监听任何端口。</div>' +
@@ -2449,9 +2458,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
 
     if ($('#obwSave')) $('#obwSave').onclick = async function(){
       var btn = this;
-      var sel = $('#obwKeys');
       var picked = [];
-      if (sel) Array.prototype.forEach.call(sel.options, function(o){ if (o.selected) picked.push(o.value); });
+      box.querySelectorAll('.obw-key').forEach(function(el){ if (el.checked) picked.push(el.value); });
       var payload = {
         watchId: wid,
         enabled: $('#obwOn').checked,
@@ -2641,22 +2649,32 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       '<div class="row"><span>每天上限</span><span class="value">' + (w.maxPerDay ? w.maxPerDay + ' 条' : '不限') + '</span></div>';
 
     html += '<div class="muted" style="font-size:12px;line-height:1.75;margin-top:12px">' +
-      '在微聊里（这块表启用的会话）发送：<br>' +
-      '<code>/搜索 关键词</code> —— 回前 10 条视频，带序号<br>' +
-      '<code>/播放 序号</code> —— 把上一条搜索结果里的第 N 条下载并发过来<br>' +
+      '在微聊里（这块表勾上的会话）发送：<br>' +
+      '<code>/搜索 关键词</code> —— 回前 10 条视频，带序号（<code>搜索 关键词</code> 不带斜杠也认）<br>' +
+      '<code>/播放 序号</code> —— 把上一条搜索结果里的第 N 条下载并发过来（单聊里直接回个数字也行）<br>' +
       '搜索结果 30 分钟内有效，按会话隔离（群里搜的序号不会串到单聊）。' +
+      '单聊和家庭群是两个会话，要各勾一次。' +
       '视频走微聊自己的视频消息，手表端直接能播。</div>';
 
     // ===== 设置表单(默认收起) =====
+    // 会话用复选框而不是 <select multiple>: 多选框不按 Ctrl 就只能选一个, 而这里
+    // 恰恰要求「单聊和家庭群各勾一次」, 用户很容易只勾上一个还以为都选好了
     var opts = tgts.map(function(t){
       var label = (t.type === 'group' ? '家庭群' : '单聊 · ' + (t.name || t.key)) + '（' + t.key + '）';
-      return '<option value="' + esc(t.key) + '"' + (keys.indexOf(t.key) >= 0 ? ' selected' : '') + '>' + esc(label) + '</option>';
+      return '<label class="row" style="cursor:pointer;padding:8px 0">' +
+        '<span style="font-size:13px">' + esc(label) + '</span>' +
+        '<input class="bili-key" type="checkbox" value="' + esc(t.key) + '"' +
+        (keys.indexOf(t.key) >= 0 ? ' checked' : '') +
+        ' style="width:18px;height:18px;flex:none"></label>';
     }).join('');
 
     var secBody =
       '<div class="row"><span>启用这块表</span>' + sw('biliOn', w.enabled) + '</div>' +
-      '<label class="field" style="margin:10px 0 0"><span>只在这些会话里响应（一个都不选 = 按手表自动匹配）</span>' +
-        '<select id="biliKeys" multiple size="' + Math.min(6, Math.max(2, tgts.length)) + '">' + opts + '</select></label>' +
+      '<div class="field" style="margin:10px 0 0"><span style="display:block;margin-bottom:4px">'
+        + '只在这些会话里响应（一个都不勾 = 按手表自动匹配）</span>' +
+        '<div style="border:1px solid var(--outline-variant);border-radius:10px;padding:0 12px">'
+        + (opts || '<div class="muted" style="padding:10px 0;font-size:13px">'
+            + '还没拉到会话列表，先去「微聊」页看一眼再回来</div>') + '</div></div>' +
       '<div class="ob-w-grid" style="margin-top:10px">' +
         '<label class="field" style="margin-bottom:0"><span>时长上限（分钟，0 = 不限）</span>' +
           '<input id="biliDur" type="number" min="0" max="120" value="' + esc(String(durMin)) + '"></label>' +
@@ -2711,9 +2729,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
 
     if ($('#biliSave')) $('#biliSave').onclick = async function(){
       var btn = this;
-      var sel = $('#biliKeys');
       var picked = [];
-      if (sel) Array.prototype.forEach.call(sel.options, function(o){ if (o.selected) picked.push(o.value); });
+      box.querySelectorAll('.bili-key').forEach(function(el){ if (el.checked) picked.push(el.value); });
       var payload = {
         watchId: wid,
         enabled: $('#biliOn').checked,

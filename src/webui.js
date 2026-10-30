@@ -635,9 +635,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   // 搜索结果按「手表 + 会话」隔离: 家庭群里搜的第 3 条, 不会串到单聊里被 /播放 3 拿去用。
   const BILI_SEARCH_TTL = biliBot.SEARCH_TTL;   // 搜索结果留 30 分钟, 过期要重新搜
   const BILI_MAX_RESULTS = biliBot.MAX_RESULTS; // 一次只给 10 条, 序号好记
+  const BILI_BARE_TTL = 10 * 60 * 1000;    // 单聊里「搜完直接回个数字」的窗口, 10 分钟
   const biliSearchCache = new Map();        // `${watchId}|${chatKey}` -> { at, keyword, list }
   const biliChains = new Map();             // 同一会话串行, 免得连发 /播放 同时下几个大视频
   const biliQuota = new Map();              // watchId -> { day, n } 当天已点播条数
+  const biliMissAt = new Map();             // chatKey -> 上次提醒「没开点播」的时间(防刷屏)
 
   // 某块表实际生效的会话范围(手选优先, 没手选就按手表名自动匹配)
   function biliScopeKeys(wid) {
@@ -646,16 +648,61 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     return manual.length ? manual.slice() : autoKeysFor(wid);
   }
 
+  // 有没有任何一块表开了点播。没开就完全不去解析命令 ——
+  // 否则用户正常聊天里说「搜索 xxx」会被这个功能抢走, 而它根本没启用
+  function biliAnyEnabled() {
+    const bots = cfg.biliBots || {};
+    return Object.keys(bots).some((w) => bots[w] && bots[w].enabled);
+  }
+
   // 这条会话归哪块表管: 遍历已启用的表, 谁的会话范围里有它就归谁
+  //
+  // 兜底: 只有一块表启用、但它一个会话都没匹配上(手表没名字 / 还没拉过会话列表)时,
+  // 退化成「全都归它」。否则用户明明勾了开关却永远收不到反应, 比配错更难排查。
+  // 多块表都启用时不猜 —— 猜错就会把 A 家的视频发到 B 家的群里。
   function biliWatchOf(key) {
     const bots = cfg.biliBots || {};
-    const wids = Object.keys(bots);
-    for (const wid of wids) {
-      const c = bots[wid];
-      if (!c || !c.enabled) continue;
+    const on = Object.keys(bots).filter((w) => bots[w] && bots[w].enabled);
+    for (const wid of on) {
       if (biliScopeKeys(wid).indexOf(key) >= 0) return String(wid);
     }
+    if (on.length === 1 && !biliScopeKeys(on[0]).length) return String(on[0]);
     return '';
+  }
+
+  // 把某块表的会话范围翻成人能看懂的名字
+  function biliScopeText(wid) {
+    const keys = biliScopeKeys(wid);
+    if (!keys.length) return '';
+    return keys.map((k) => {
+      const t = (chatTargets || []).find((x) => x.key === k);
+      if (!t) return k;
+      return t.type === 'group' ? '家庭群' : ('单聊 · ' + (t.name || k));
+    }).join('、');
+  }
+
+  // 命令解析出来了, 但这条会话不归任何启用的表 —— 必须回一句, 不能静默。
+  // 同一个会话 1 分钟只提醒一次, 免得用户在群里连发几条被刷屏。
+  function biliMissReply(key) {
+    const last = biliMissAt.get(key) || 0;
+    if (Date.now() - last < 60000) return;
+    biliMissAt.set(key, Date.now());
+    if (biliMissAt.size > 500) {
+      const first = biliMissAt.keys().next();
+      if (!first.done) biliMissAt.delete(first.value);
+    }
+    // 只有一块表启用时能把「现在到底在哪生效」说清楚, 用户一眼就知道差哪一步;
+    // 多块表启用就不猜了, 用通用提示
+    let msg = biliBot.OUT_OF_SCOPE;
+    const on = Object.keys(cfg.biliBots || {}).filter((w) => cfg.biliBots[w] && cfg.biliBots[w].enabled);
+    if (on.length === 1) {
+      const s = biliScopeText(on[0]);
+      if (s) {
+        msg = '这条会话没开点播。现在只在「' + s + '」里生效，'
+          + '去「我的 → B 站点播」把本会话也勾上再发一次。';
+      }
+    }
+    biliReply(key, msg).catch(() => {});
   }
 
   async function biliReply(key, text) {
@@ -680,6 +727,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         return;
       }
       biliSearchCache.set(wid + '|' + key, { at: Date.now(), keyword: cmd.arg, list });
+      // 简单封顶: 缓存按「表 × 会话」累积, 长期运行要给它一个上限, 超过就丢最早那条
+      if (biliSearchCache.size > 200) {
+        const first = biliSearchCache.keys().next();
+        if (!first.done) biliSearchCache.delete(first.value);
+      }
       log.info('bili', `手表 ${wid} 搜索「${cmd.arg}」得到 ${list.length} 条`);
       await biliReply(key, biliBot.formatList(cmd.arg, list));
       return;
@@ -1227,11 +1279,27 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
     // 会话 key 提前算: B 站点播命令要按会话判断归属, 命中后也不能再让 AI 抢答一遍
     const key = text ? resolveChatKey(m) : null;
-    const biliCmd = (key && parsed.kind === 'text' && parsed.text) ? biliBot.parseCommand(parsed.text) : null;
-    const biliWid = biliCmd ? biliWatchOf(key) : '';
+    // 没开点播就完全不解析命令 —— 这个功能没配置时必须彻底静默
+    const biliOn = biliAnyEnabled();
+    let biliCmd = (biliOn && key && parsed.kind === 'text' && parsed.text)
+      ? biliBot.parseCommand(parsed.text) : null;
+    let biliWid = biliCmd ? biliWatchOf(key) : '';
+    // 单聊里搜完直接回一个数字也算「播放第 N 条」: 列表就摆在上面, 让人再敲一遍
+    // /播放 太别扭。只在单聊生效(群里说个数字太容易误触), 10 分钟内有效。
+    if (biliOn && !biliCmd && key && /^s:/.test(key) && parsed.kind === 'text') {
+      const bare = String(parsed.text || '').trim();
+      if (/^\d{1,2}$/.test(bare)) {
+        const wid = biliWatchOf(key);
+        const hit = wid ? biliSearchCache.get(wid + '|' + key) : null;
+        if (hit && Date.now() - hit.at < BILI_BARE_TTL) {
+          biliCmd = { kind: 'play', arg: bare };
+          biliWid = wid;
+        }
+      }
+    }
 
-    // AI 自动回复(点播命令归点播机器人管)
-    if (aiRunning && !(biliCmd && biliWid) && parsed.kind === 'text' && parsed.text) {
+    // AI 自动回复(点播命令归点播机器人管, 范围外的点播命令也不让 AI 答, 免得两边抢话)
+    if (aiRunning && !biliCmd && parsed.kind === 'text' && parsed.text) {
       const sess = findAiSession(m);
       if (sess && aiShouldTrigger(parsed.text)) queueAiReply(sess, parsed.text);
     }
@@ -1247,6 +1315,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
     // B 站点播命令: 自己处理完直接返回, 不再转给 OneBot(否则插件还会把它当普通消息回一遍)
     if (biliCmd && biliWid) { runBiliCommand(biliWid, key, biliCmd); return; }
+    // 命令认出来了, 但没有一块启用的表认领这条会话 —— 必须回一句。
+    // 线上真踩过: 用户只勾了单聊, 跑到家庭群里发, 机器人一声不响, 以为功能坏了
+    if (biliCmd && biliOn) { biliMissReply(key); return; }
 
     // 转发给 OneBot(第三方框架从这里收事件)。每个实例只收自己那块表范围内的会话
     if (onebots.size) {

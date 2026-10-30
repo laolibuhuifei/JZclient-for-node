@@ -352,6 +352,9 @@ async function downloadVideo(item, opts) {
       file = tmpPath('.mp4');
       outs.push(file);
       concatParts(files, file);
+      // 分片已经拼进成片了, 原始分片必须删掉: cleanup() 只认最终那个文件,
+      // 长视频会在临时目录里留下几份等大的残片, 攒几次就把磁盘塞满
+      for (const f of files) { try { fs.unlinkSync(f); } catch (e) { /* ignore */ } }
       size = fs.statSync(file).size;
       if (maxBytes && size > maxBytes) {
         throw new Error('合并后 ' + mb(size) + 'MB，超过大小上限 ' + mb(maxBytes) + 'MB');

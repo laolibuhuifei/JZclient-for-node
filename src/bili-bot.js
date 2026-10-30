@@ -12,20 +12,42 @@ const SEARCH_TTL = 30 * 60 * 1000;       // 搜索结果保留 30 分钟，过�
 
 const HELP = [
   'B 站点播用法：',
-  '/搜索 关键词 —— 找视频，回前 10 条并标上序号',
-  '/播放 序号 —— 把上一条搜索结果里的第 N 条发过来',
+  '/搜索 关键词 —— 找视频，回前 10 条并标上序号（/点歌 也行，不带斜杠也行）',
+  '/播放 序号 —— 把上一条搜索结果里的第 N 条发过来（单聊里直接回个数字也行）',
   '例：先发「/搜索 小猪佩奇」，再发「/播放 2」',
 ].join('\n');
 
-// 只认行首的 /命令；全角斜杠、大小写、中英文冒号都兼容。返回 null = 不是点播命令
+// 命令落在「表开了点播、但这条会话没勾」的地方时回的话。宁可多说一句，
+// 也别让人对着空气等 —— 线上真的踩过：只勾了单聊，在家庭群里发，完全没反应。
+const OUT_OF_SCOPE = '这条会话没开点播。去「我的 → B 站点播」把本会话也勾上'
+  + '（单聊和家庭群是两个会话，要各勾一次），再发一次。';
+
+// 只认行首的命令；全角斜杠、大小写、中英文冒号都兼容。返回 null = 不是点播命令
+//
+// 斜杠形式 `/搜索 猫` 和裸词形式 `搜索 猫` 都认：
+//   · 斜杠形式别名随便用（搜索/搜/点歌/search/s），也允许不带参数（回用法）
+//   · 裸词形式只认中文词，且**必须带参数** —— 「搜索」两个字太容易出现在正常聊天里，
+//     放宽到「搜索不到」也算命令的话，正常说话都会被抢走
 function parseCommand(text) {
-  const t = String(text || '').trim().replace(/^／/, '/');
-  if (t.charAt(0) !== '/') return null;
-  let m = t.match(/^\/(?:搜索|搜|search|s)(?:[\s:：]+([\s\S]*))?$/i);
-  if (m) return { kind: 'search', arg: String(m[1] || '').trim() };
-  m = t.match(/^\/(?:播放|点播|play|p)(?:[\s:：]+([\s\S]*))?$/i);
-  if (m) return { kind: 'play', arg: String(m[1] || '').trim() };
-  if (/^\/(?:b站|bili|点播帮助|help)$/i.test(t)) return { kind: 'help' };
+  const raw = String(text || '').trim().replace(/^／/, '/');
+  if (!raw) return null;
+  const slash = raw.charAt(0) === '/';
+  const body = slash ? raw.slice(1) : raw;
+
+  if (slash) {
+    let m = body.match(/^(?:搜索|搜|点歌|search|s)(?:[\s:：]+([\s\S]*))?$/i);
+    if (m) return { kind: 'search', arg: String(m[1] || '').trim() };
+    m = body.match(/^(?:播放|点播|play|p)(?:[\s:：]+([\s\S]*))?$/i);
+    if (m) return { kind: 'play', arg: String(m[1] || '').trim() };
+    if (/^(?:b站|bili|点播帮助|help)$/i.test(body)) return { kind: 'help' };
+    return null;
+  }
+
+  // 不带斜杠：必须「词 + 空格 + 参数」，播放还要参数是数字
+  let m = body.match(/^(?:搜索|搜|点歌)[\s:：]+([\s\S]+)$/);
+  if (m) return { kind: 'search', arg: m[1].trim() };
+  m = body.match(/^(?:播放|点播)[\s:：]+(\d+)[\s\S]*$/);
+  if (m) return { kind: 'play', arg: m[1] };
   return null;
 }
 
@@ -74,6 +96,6 @@ function refundQuota(store, wid, now) {
 }
 
 module.exports = {
-  MAX_RESULTS, SEARCH_TTL, HELP,
+  MAX_RESULTS, SEARCH_TTL, HELP, OUT_OF_SCOPE,
   parseCommand, clip, formatList, todayKey, takeQuota, refundQuota,
 };

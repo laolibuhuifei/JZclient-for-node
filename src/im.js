@@ -11,6 +11,8 @@
 //   cmd9  群聊发消息 {tag10=dialogId, tag11=群 imAccountId, tag12=registId, tag13=msgType, tag14=JSON, tag15=msgId, tag18=contentType}
 //   cmd11 SyncInform -> cmd12 SyncRequest {tag11 imAccountId, tag12 registId, tag13 syncKey, tag14 pageSize, tag0 platformId}
 //   cmd13 SyncResponse / cmd35 PushResponse 携带收到的消息
+//   cmd15 SyncFinishAck: 一轮同步收完要回执, 否则服务端认为消息没被消费, 会一直重发(表现为同一条消息重复到达)
+//   cmd36 PushResponseAck: 下行推送的回执, 不带会让服务端超时重发
 const tls = require('tls');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
@@ -30,11 +32,12 @@ const CMD = {
   ACCOUNT: 5, ACCOUNT_RESP: 6,
   HEARTBEAT: 7, HEARTBEAT_RESP: 8,
   MESSAGE: 9, MESSAGE_RESP: 10,
-  SYNC_INFORM: 11, SYNC: 12, SYNC_RESP: 13,
+  SYNC_INFORM: 11, SYNC: 12, SYNC_RESP: 13, SYNC_FINISH: 15,
   SYNC_TRIGGER: 25, SYNC_TRIGGER_RESP: 26,
   ENCRYPT_WRAPPER: 32,
   ENCRYPT_SET: 33, ENCRYPT_SET_RESP: 34,
   PUSH: 35,
+  PUSH_ACK: 36,
   SINGLE_MESSAGE: 40,
   PUBLIC_KEY: 22, PUBLIC_KEY_RESP: 23,
 };
@@ -117,12 +120,30 @@ class ImClient extends EventEmitter {
     this.connected = false;
     this._heartbeat = null;
     this._seen = new Map();   // msgId -> 时间戳, 去重
+    // ===== 存活检测 =====
+    // 云端实例一挂好几天, NAT/中间设备会把空闲连接悄悄掐掉, 而 TCP 层可能很久都不报错。
+    // 以前只看 connected 标志, 结果就是「界面显示已连接, 但一条新消息都收不到」。
+    this.lastRecvAt = 0;      // 最近一次收到任意帧的时间
+    this.frames = 0;          // 收到的帧数(诊断用)
+    this._hbFail = 0;         // 连续心跳失败次数
+    this._closed = false;     // 保证 close 事件只抛一次
+    this._ackTimer = null;    // 同步完成回执的合并定时器
   }
 
   nextRid() { this.rid = (this.rid + 1) & 0x7fffffff; return this.rid; }
 
+  // 连接是否还活着。心跳连续失败 + 长时间没有任何入帧 → 判定半死, 交给上层重连
+  alive() {
+    if (!this.connected || !this.sock || this.sock.destroyed) return false;
+    if (this._hbFail >= 3 && Date.now() - (this.lastRecvAt || 0) > 120000) return false;
+    return true;
+  }
+
   async connect() {
     log.debug('im', `连接 ${this.host}:${this.port}`);
+    this._closed = false;
+    this._hbFail = 0;
+    this.lastRecvAt = Date.now();
     await this._open();
     log.debug('im', 'TLS 已建立, 开始协议握手');
     await this._handshake();
@@ -145,7 +166,12 @@ class ImClient extends EventEmitter {
       this.sock.once('secureConnect', () => {
         this.sock.removeListener('error', onErr);
         this.sock.on('error', (e) => this.emit('error', e));
-        this.sock.on('close', () => { this.connected = false; this.emit('close'); });
+        this.sock.on('close', () => {
+          this.connected = false;
+          this.stopHeartbeat();
+          // _die() 主动销毁时也会走到这里, 用 _closed 保证只通知一次, 否则上层会重连两遍
+          if (!this._closed) { this._closed = true; this.emit('close'); }
+        });
         resolve();
       });
       this.sock.on('data', (d) => { this.rbuf = Buffer.concat([this.rbuf, d]); this._pump(); });
@@ -167,6 +193,10 @@ class ImClient extends EventEmitter {
   }
 
   _onFrame(cmd, payload) {
+    // 任何入帧都算「链路还活着」, 心跳失败的计数也一起清零
+    this.lastRecvAt = Date.now();
+    this.frames++;
+    this._hbFail = 0;
     if (this.encrypted && cmd === CMD.ENCRYPT_WRAPPER) {
       const w = tlvMap(payload).get(10);
       if (!w) return;
@@ -188,6 +218,10 @@ class ImClient extends EventEmitter {
         const sk = toInt(map.get(15));
         if (sk > this.syncKey) this.syncKey = sk;
       }
+      // 回执: 不回的话服务端认为消息没被消费, 会重复下发同一条(线上实测图片会成对出现),
+      // 堆积到一定量之后新消息就不再推过来了 —— 用户侧看到的就是「收不到手表消息」
+      if (cmd === CMD.PUSH) this._pushAck(map.has(16) ? map.get(16).toString('utf8') : '');
+      this._ackSoon();
     } else if (cmd === CMD.SYNC_INFORM) {
       this.sync().catch(() => {});
     }
@@ -208,30 +242,92 @@ class ImClient extends EventEmitter {
   _emitMessage(cmd, map) {
     const msgRaw = map.get(14) || Buffer.alloc(0);
     const msgId = map.has(16) ? map.get(16).toString('utf8') : '';
-    if (msgId) {
-      const now = Date.now();
-      const prev = this._seen.get(msgId);
-      if (prev && now - prev < 300000) return;
-      this._seen.set(msgId, now);
-      if (this._seen.size > 500) {
-        for (const [k, t] of this._seen) { if (now - t > 300000) this._seen.delete(k); }
-      }
+    const dialogId = map.has(10) ? toInt(map.get(10)) : 0;
+    const imAccountId = map.has(11) ? toInt(map.get(11)) : 0;
+    const msgType = map.has(13) ? toInt(map.get(13)) : 0;
+    const createTime = map.has(17) ? toInt(map.get(17)) : 0;
+    // 同一条消息可能既走 push 又走 sync(两条路径都会到 _emitMessage)。
+    // 有 msgId 时按 msgId 去重; 服务端部分消息不带 tag16, 这时按内容指纹兜底,
+    // 否则用户会看到每张图片都发了两遍。
+    const key = msgId
+      ? ('m:' + msgId)
+      : ('h:' + dialogId + ':' + imAccountId + ':' + msgType + ':' + createTime + ':'
+        + crypto.createHash('sha1').update(msgRaw).digest('hex').slice(0, 16));
+    const now = Date.now();
+    const prev = this._seen.get(key);
+    if (prev && now - prev < 300000) return;
+    this._seen.set(key, now);
+    if (this._seen.size > 500) {
+      for (const [k, t] of this._seen) { if (now - t > 300000) this._seen.delete(k); }
     }
     let body = null;
     try { body = JSON.parse(msgRaw.toString('utf8')); } catch (e) { /* 非 JSON */ }
     this.emit('message', {
       source: cmd === CMD.PUSH ? 'push' : 'sync',
-      dialogId: map.has(10) ? toInt(map.get(10)) : 0,
-      imAccountId: map.has(11) ? toInt(map.get(11)) : 0,
+      dialogId,
+      imAccountId,
       registId: map.has(12) ? toInt(map.get(12)) : 0,
-      msgType: map.has(13) ? toInt(map.get(13)) : 0,
+      msgType,
       contentType: map.has(18) ? toInt(map.get(18)) : 0,
       msgId,
-      createTime: map.has(17) ? toInt(map.get(17)) : 0,
+      createTime,
       syncKey: map.has(15) ? toInt(map.get(15)) : 0,
       raw: msgRaw,
       body,
     });
+  }
+
+  // ===== 回执 =====
+  // 一轮同步里会连推好几帧, 用 800ms 合并成一次确认, 别每帧都发
+  _ackSoon() {
+    if (this._ackTimer) return;
+    this._ackTimer = setTimeout(() => {
+      this._ackTimer = null;
+      this._syncFinish();
+    }, 800);
+    if (this._ackTimer.unref) this._ackTimer.unref();
+  }
+
+  // cmd15 同步完成确认: 告诉服务端「syncKey 之前的我都入库了」
+  _syncFinish() {
+    if (!this.imAccountId) return;
+    try {
+      const rid = this.nextRid();
+      this._request(CMD.SYNC_FINISH, Buffer.concat([
+        tlv(1, rid),
+        tlv(11, this.imAccountId),
+        tlv(12, this.registId),
+        tlv(13, this.syncKey || 1),
+      ]), rid, 4000)
+        .then((r) => {
+          if (this._ackLogged) return;
+          this._ackLogged = true;
+          const code = r && r.tags && r.tags.has(2) ? toInt(r.tags.get(2)) : 0;
+          log.debug('im', '同步完成回执 cmd15 → ' + (code || 'ok'));
+        })
+        .catch(() => {
+          if (this._ackLogged) return;
+          this._ackLogged = true;
+          // 服务端不认也不会影响收消息, 记一次就够, 别刷屏
+          log.debug('im', '同步完成回执 cmd15 无响应（服务端可能不认，不影响收消息）');
+        });
+    } catch (e) { /* 老服务端不认这个确认也无所谓, 不能因此把连接搞挂 */ }
+  }
+
+  // cmd36 下行推送回执
+  _pushAck(msgId) {
+    if (!this.imAccountId) return;
+    try {
+      const rid = this.nextRid();
+      const parts = [tlv(1, rid), tlv(11, this.imAccountId), tlv(12, this.registId)];
+      if (msgId) parts.push(tlv(15, msgId));
+      parts.push(tlv(13, this.syncKey || 1));
+      this._send(CMD.PUSH_ACK, Buffer.concat(parts));
+      if (!this._pushAckLogged) {
+        this._pushAckLogged = true;
+        log.debug('im', '已开始对下行推送回执 cmd36');
+      }
+    } catch (e) { /* ignore */ }
   }
 
   _send(cmd, payload) {
@@ -357,9 +453,30 @@ class ImClient extends EventEmitter {
   _startHeartbeat() {
     this.stopHeartbeat();
     this._heartbeat = setInterval(() => {
-      try { const rid = this.nextRid(); this._request(CMD.HEARTBEAT, tlv(1, rid), rid, 8000).catch(() => {}); } catch (e) { /* ignore */ }
+      try {
+        const rid = this.nextRid();
+        this._request(CMD.HEARTBEAT, tlv(1, rid), rid, 8000)
+          .then(() => { this._hbFail = 0; })
+          .catch(() => {
+            this._hbFail++;
+            // 半开连接: socket 不报错但再也收不到东西。连续失败 + 长时间没有入帧就直接销毁,
+            // 让上层走重连。以前这里是 .catch(() => {}) 静默吞掉, 于是永远「显示已连接、收不到消息」。
+            if (this._hbFail >= 3 && Date.now() - (this.lastRecvAt || 0) > 120000) {
+              log.warn('im', `心跳连续 ${this._hbFail} 次无响应且 ${Math.round((Date.now() - this.lastRecvAt) / 1000)} 秒没有入帧，判定连接失效，主动重连`);
+              this._die();
+            }
+          });
+      } catch (e) { /* ignore */ }
     }, 30000);
     this._heartbeat.unref && this._heartbeat.unref();
+  }
+
+  // 主动废弃一条已经半死的连接: 销毁 socket, close 事件会让上层重连
+  _die() {
+    this.connected = false;
+    this.stopHeartbeat();
+    if (this.sock) { try { this.sock.destroy(); } catch (e) { /* ignore */ } }
+    if (!this._closed) { this._closed = true; this.emit('close'); }
   }
 
   stopHeartbeat() {
@@ -451,9 +568,11 @@ class ImClient extends EventEmitter {
 
   close() {
     this.stopHeartbeat();
+    if (this._ackTimer) { clearTimeout(this._ackTimer); this._ackTimer = null; }
     if (this.sock) { try { this.sock.destroy(); } catch (e) { /* ignore */ } }
     this.sock = null;
     this.connected = false;
+    this._closed = true;   // 主动关闭不再触发上层重连
   }
 }
 

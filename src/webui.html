@@ -3583,10 +3583,33 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       '<span class="avatar" style="width:34px;height:34px;border-radius:10px;font-size:14px;background:' +
       AVATAR_COLORS[(idx < 0 ? 0 : idx) % AVATAR_COLORS.length] + '">' + esc((t.name || '会').slice(0, 1)) + '</span>' +
       '<div><div class="cname">' + esc(t.name) + '</div><div class="csub">' + esc(t.sub || '') + '</div></div></div>';
+    // IM 链路状态: 「连上了但一直没收到数据」必须能一眼看出来, 否则用户只能干等
+    html += '<div class="csub" id="imState" style="padding:0 14px 6px"></div>';
     html += '<div class="messages" id="messages"></div>';
     html += '<div class="chat-input-bar"><button class="plus" id="chatPlus">+</button>' +
       '<input id="chatText" placeholder="发消息…"><button class="send" id="sendText">发送</button></div>';
     return html;
+  }
+
+  function imStateText(im){
+    if (!im) return '';
+    if (!im.connected) return 'IM 未连接' + (im.lastError ? '（' + im.lastError + '）' : '');
+    if (!im.alive) return 'IM 连接异常，正在重连…';
+    if (im.lastRecvAgo == null) return 'IM 已连接 · 还没收到过数据';
+    if (im.lastRecvAgo <= 90) return 'IM 已连接 · ' + im.lastRecvAgo + ' 秒前收到数据';
+    return 'IM 已连接 · 已 ' + Math.round(im.lastRecvAgo / 60) + ' 分钟没有收到数据';
+  }
+
+  function paintImState(im){
+    if (!im) return;
+    var txt = imStateText(im);
+    var bad = (!im.connected || !im.alive || (im.lastRecvAgo != null && im.lastRecvAgo > 300));
+    ['#imState', '#imSide'].forEach(function(sel){
+      var el = $(sel);
+      if (!el) return;
+      el.textContent = txt;
+      el.style.color = bad ? '#c0392b' : '';
+    });
   }
 
   function wireChatPane(t) {
@@ -3596,6 +3619,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     async function refreshMessages(){
       try {
         var r = await api('/api/chats/messages?key=' + encodeURIComponent(t.key));
+        paintImState(r.im);
         var box = $('#messages');
         if (!box) return;
         var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
@@ -3703,7 +3727,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     if (desktop) {
       var cur = state.chatKey ? findChatTarget(state.chatKey) : null;
       var html = '<div class="chat-layout"><aside class="chat-side">' + chatListHtml(state.chatKey) +
-        '<div class="side-note"><span>IM ' + (d.connected ? '已连接' : '未连接') + '</span>' +
+        '<div class="side-note"><span id="imSide">' + esc(imStateText(d.im) || ('IM ' + (d.connected ? '已连接' : '未连接'))) + '</span>' +
         '<button class="btn small ' + (d.connected ? 'tonal' : '') + '" id="connectIM">' + (d.connected ? '已连接' : '连接 IM') + '</button></div>' +
         '</aside><section class="chat-main" id="chatMain">';
       if (cur) html += chatPaneHtml(cur, false);
@@ -3725,7 +3749,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     $('#content').innerHTML = chatListHtml(null) +
       '<div class="card" style="margin-top:12px"><div class="row"><span>IM 连接</span>' +
       '<button class="btn small ' + (d.connected ? 'tonal' : '') + '" id="connectIM">' + (d.connected ? '已连接' : '连接 IM') + '</button></div>' +
-      '<p class="muted">连接后可实时接收手表消息；发送消息时会自动连接</p></div>';
+      '<p class="muted" id="imSide">' + esc(imStateText(d.im) || '连接后可实时接收手表消息；发送消息时会自动连接') + '</p></div>';
     wireList();
   }
 

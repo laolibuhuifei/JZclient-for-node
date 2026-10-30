@@ -375,6 +375,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   // ===== 聊天状态 =====
   let im = null;
   let imConnecting = null;
+  let imRetry = null;                 // 断线后自己排的重连定时器
+  let imReconnects = 0;               // 重连次数(诊断)
+  let imLastError = '';               // 最近一次连接错误(诊断)
   let chatTargets = null;
   const chatLog = new Map();
   let onebots = new Map();            // watchId -> 实例(每块表一套端口/令牌/会话范围)
@@ -1190,6 +1193,10 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (!b || typeof b !== 'object') return false;
     // 新式信封: msgNewType 存在, 属于聊天消息(文本/表情/图片/语音/视频/位置/转发等)
     if (b.msgNewType != null && Number(b.msgNewType) > 0) return false;
+    // ⚠️ 带会话信息(dialogId / imAccountId)的一定是聊天消息。
+    // 业务推送是账号级的, 没有会话。以前只看 contentType>=1000 就判业务推送,
+    // 手表发来的 contentType=1000 的消息会被整条丢掉, 用户侧表现为「收不到手表消息」。
+    if (m.dialogId || m.imAccountId) return false;
     // 老式业务推送: body.type 是通知类型, content 一般是字符串 JSON
     const t = Number(b.type);
     if (t === 27) { // 电量
@@ -1243,15 +1250,22 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     device.save(cfg);
   }
 
+  // 会话列表还没拉到时进来的消息会被丢掉, 用这个计数做限流告警
+  const lastDropWarn = { at: 0, n: 0 };
+
   function onImMessage(m) {
     const b = m.body || {};
     const type = Number(b.type);
+    const biz = isBusinessMessage(m);
     if (log.isEnabled('debug')) {
       try {
         log.debug('im', 'recv ' + JSON.stringify({
           source: m.source, msgType: m.msgType, contentType: m.contentType,
           bodyType: b.type, msgNewType: b.msgNewType, textMsgType: b.textMsgType,
-          biz: isBusinessMessage(m),
+          dialogId: m.dialogId, imAccountId: m.imAccountId, createTime: m.createTime,
+          msgId: m.msgId, biz,
+          // 判成业务推送时把原文一起打出来, 否则「消息被丢掉」这件事在日志里完全看不出来
+          body: biz ? String(JSON.stringify(b)).slice(0, 400) : undefined,
         }));
       } catch (e) { /* ignore */ }
     }
@@ -1270,7 +1284,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     }
 
     // 业务推送: 更新电量/位置等状态后直接丢弃, 不写入聊天
-    if (isBusinessMessage(m)) {
+    if (biz) {
       handleBusinessPush(m);
       return;
     }
@@ -1312,11 +1326,18 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
     if (!text) return;
     if (!key) {
-      if (log.isEnabled('debug')) {
-        log.debug('im', 'drop no-chat-target ' + JSON.stringify({ msgType: m.msgType, contentType: m.contentType, bodyType: (m.body || {}).type }));
+      // 会话列表没就绪(或这条消息来自没登记过的会话)时消息会被丢掉。
+      // 静默丢弃最难排查, 这里限流告警一句
+      const now = Date.now();
+      if (now - lastDropWarn.at > 60000) {
+        lastDropWarn.at = now;
+        lastDropWarn.n++;
+        log.warn('im', `收到手表消息但找不到对应会话(已丢弃 ${lastDropWarn.n} 条): `
+          + JSON.stringify({ dialogId: m.dialogId, imAccountId: m.imAccountId, msgType: m.msgType, targets: (chatTargets || []).length }));
       }
       return;
     }
+    lastDropWarn.n = 0;
     pushChat(key, { self: false, text, kind: parsed.kind, url: messageUrl(parsed), time: m.createTime || Date.now() });
 
     // B 站点播命令: 自己处理完直接返回, 不再转给 OneBot(否则插件还会把它当普通消息回一遍)
@@ -1358,7 +1379,14 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   }
 
   async function ensureIM() {
-    if (im && im.connected) return im;
+    // alive() 而不是 connected: 云端实例挂几天之后常见「TCP 还连着但再也收不到东西」,
+    // 只看 connected 会一直复用这条死连接, 表现就是界面显示已连接、消息一条都不来
+    if (im && im.connected && (!im.alive || im.alive())) return im;
+    if (im) {
+      log.warn('im', '现有连接已失效，丢弃后重连');
+      try { im.close(); } catch (e) { /* ignore */ }
+      im = null;
+    }
     if (imConnecting) return imConnecting;
     imConnecting = (async () => {
       const prevImId = cfg.imAccountId;
@@ -1376,14 +1404,44 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       c.on('message', (m) => { try { onImMessage(m); } catch (e) { /* ignore */ } });
       c.on('close', () => {
         if (im === c) im = null;
-        log.warn('im', '连接已断开，60 秒后重连');
+        imReconnects++;
+        imLastError = '连接已断开';
+        log.warn('im', '连接已断开，5 秒后重连');
+        // 以前这里只是打一行日志, 实际要等后台 60 秒巡检才重连;
+        // 断线后这段时间里手表发的消息全都收不到, 所以自己排一次
+        if (!imRetry) {
+          imRetry = setTimeout(() => {
+            imRetry = null;
+            ensureIM().catch((e) => log.warn('im', '重连失败: ' + (e && e.message ? e.message : e)));
+          }, 5000);
+          if (imRetry.unref) imRetry.unref();
+        }
       });
-      c.on('error', (e) => log.debug('im', '连接错误: ' + (e && e.message ? e.message : e)));
+      c.on('error', (e) => {
+        imLastError = (e && e.message) ? e.message : String(e);
+        log.debug('im', '连接错误: ' + imLastError);
+      });
       im = c;
       await c.sync().catch(() => {});
       return c;
     })();
     try { return await imConnecting; } finally { imConnecting = null; }
+  }
+
+  // IM 连接状态快照(聊天页展示 + 排查用)
+  function imStatus() {
+    const last = im && im.lastRecvAt ? im.lastRecvAt : 0;
+    return {
+      connected: !!(im && im.connected),
+      alive: !!(im && im.connected && (!im.alive || im.alive())),
+      imAccountId: (im && im.imAccountId) || cfg.imAccountId || 0,
+      syncKey: (im && im.syncKey) || cfg.imSyncKey || 0,
+      frames: (im && im.frames) || 0,
+      lastRecvAt: last,
+      lastRecvAgo: last ? Math.round((Date.now() - last) / 1000) : null,
+      reconnects: imReconnects,
+      lastError: imLastError,
+    };
   }
 
   // 后台常驻 IM: 登录后自动连接并保持在线, 断线时定时重连
@@ -2370,8 +2428,13 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         const c = await ensureIM();
         return ok(res, { connected: true, imAccountId: c.imAccountId });
       }
+      if (parts[2] === 'status') {
+        return ok(res, imStatus());
+      }
       if (parts[2] === 'messages') {
-        return ok(res, { messages: chatLog.get(query.get('key') || '') || [] });
+        // 顺带把连接状态捎回去: 前端每 3 秒轮询这一个接口就够了,
+        // 「连上了但一直没收到数据」要能在页面上看出来, 否则只能干等
+        return ok(res, { messages: chatLog.get(query.get('key') || '') || [], im: imStatus() });
       }
       if (parts[2] === 'send' && req.method === 'POST') {
         const r = await sendChat(await readBody(req));
@@ -2435,11 +2498,13 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         return ok(res, { result: true, url });
       }
       const targets = await loadChatTargets();
+      const st = imStatus();
       return ok(res, {
         targets: targets.map((t) => ({
           key: t.key, type: t.type, name: t.name, sub: t.sub, count: (chatLog.get(t.key) || []).length,
         })),
-        connected: !!(im && im.connected),
+        connected: st.alive,
+        im: st,
       });
     }
 
@@ -3495,6 +3560,13 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   log.info('webui', `服务已启动 http://${host}:${port}`);
   log.info('webui', `访问令牌 ${AUTH_TOKEN}`);
   log.info('webui', `日志级别 ${log.levelName()}（WP_LOG=debug 看请求体细节，WP_LOG=warn 只看告警）`);
+
+  // 会话列表必须先拉到: 收消息时要靠它把 dialogId/imAccountId 映射成会话 key,
+  // 没拉到时进来的消息会被直接丢掉, 而且日志里完全看不出来。
+  // 以前只靠 refreshBiliScope() 顺带拉一次, 没配置 B 站点播(或开关全关)时就一直是空的。
+  await loadChatTargets().catch((e) => {
+    log.warn('im', '会话列表拉取失败，收到的手表消息会暂时无法归档: ' + (e && e.message ? e.message : e));
+  });
 
   startImBackground();
   // 对外 API 令牌: 启用状态下确保已生成

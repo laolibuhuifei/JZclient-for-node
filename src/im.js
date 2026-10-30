@@ -254,8 +254,11 @@ class ImClient extends EventEmitter {
       : ('h:' + dialogId + ':' + imAccountId + ':' + msgType + ':' + createTime + ':'
         + crypto.createHash('sha1').update(msgRaw).digest('hex').slice(0, 16));
     const now = Date.now();
+    // 有 msgId 时窗口给足(服务端补发可能很晚); 只靠内容指纹时窗口必须短,
+    // 否则孩子连发两条「在吗」会被当成重复吞掉一条
+    const ttl = msgId ? 300000 : 10000;
     const prev = this._seen.get(key);
-    if (prev && now - prev < 300000) return;
+    if (prev && now - prev < ttl) return;
     this._seen.set(key, now);
     if (this._seen.size > 500) {
       for (const [k, t] of this._seen) { if (now - t > 300000) this._seen.delete(k); }

@@ -13,6 +13,7 @@ const { chat: aiChat } = require('./ai');
 const { parseMessage, describe, mediaUrl, buildText, buildEmoji, buildLocation, buildLink, buildPhoto, buildVideo, buildVoice, buildKaomoji, EMOJI_PRESET, LINK_APP_NAME } = require('./message');
 const { loadImageSource, uploadImage, uploadVoice, uploadVideo, directVideo, probeDuration, splitAudio, splitVideo, cleanupSplit, downloadToTmp } = require('./upload');
 const { fetchFavicon } = require('./favicon');
+const LINK_PRESETS = require('./link-presets');
 const { startOneBot } = require('./onebot');
 const bili = require('./bilibili');
 const biliBot = require('./bili-bot');
@@ -2510,6 +2511,10 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
             url: emojiAsset(e.code),
           })),
         });
+      }
+      if (parts[2] === 'link-presets') {
+        // 手表端 H5 白名单链接, 发链接卡片时可以直接挑, 不用手打长 URL
+        return ok(res, { links: LINK_PRESETS });
       }
       if (parts[2] === 'connect' && req.method === 'POST') {
         const c = await ensureIM();

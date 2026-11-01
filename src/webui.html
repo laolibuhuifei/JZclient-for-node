@@ -3612,6 +3612,9 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     });
   }
 
+  // 手表端 H5 白名单链接(服务端 src/link-presets.js), 发链接时可以直接挑
+  var linkPresetsCache = null;
+
   function wireChatPane(t) {
     var back = $('#chatBack');
     if (back) back.onclick = function(){ state.chatKey = null; load(); };
@@ -3689,6 +3692,50 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       });
     }
 
+    // 白名单链接的短标题: 去掉 /p/、末尾 index.html 这些没信息量的部分,
+    // 有 query/hash 的截一段跟在后面, 否则一堆 yuyan/数字 的链接肉眼分不清
+    function presetLabel(u){
+      try {
+        var x = new URL(u);
+        var p = x.pathname.replace(/^\/+/, '')
+          .replace(/\/(index|default)\.html?$/i, '')
+          .replace(/\.html?$/i, '')
+          .replace(/\/+$/, '')
+          .replace(/^p\//, '');
+        if (!p) p = '/';
+        var q = x.search ? '?' + x.search.slice(1) : '';
+        var h = x.hash || '';
+        if (q.length > 16) q = q.slice(0, 16) + '…';
+        if (h.length > 16) h = h.slice(0, 16) + '…';
+        return p + q + h;
+      } catch(e){ return u; }
+    }
+
+    // 按域名分组渲染白名单下拉; kw 非空时只留下 url 里含关键字的
+    function paintPresets(sel, kw, keep){
+      var q = String(kw || '').trim().toLowerCase();
+      var groups = {}, order = [], total = 0;
+      (linkPresetsCache || []).forEach(function(u){
+        if (q && u.toLowerCase().indexOf(q) < 0) return;
+        var host = '';
+        try { host = new URL(u).host; } catch(e){ host = '其它'; }
+        if (!groups[host]) { groups[host] = []; order.push(host); }
+        groups[host].push(u);
+        total++;
+      });
+      var html = '<option value="">' + (total ? '— 不使用预设 —' : '— 没有匹配的白名单链接 —') + '</option>';
+      order.forEach(function(host){
+        html += '<optgroup label="' + esc(host + '（' + groups[host].length + '）') + '">';
+        groups[host].forEach(function(u){
+          html += '<option value="' + esc(u) + '"' + (u === keep ? ' selected' : '') + '>' + esc(presetLabel(u)) + '</option>';
+        });
+        html += '</optgroup>';
+      });
+      sel.innerHTML = html;
+      if (keep && sel.value !== keep) sel.value = '';
+      return total;
+    }
+
     // 发送链接卡片: 标题/封面/应用名/图标都能留空
     // 封面留空 → 后端自动抓网页图标; 图标留空 → 用 jzclient 自带图标
     function openLinkForm(){
@@ -3705,6 +3752,11 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       var hint = 'margin:0;font-size:12px';
 
       $('#modalCard').innerHTML = '<h2>发送链接</h2>' +
+        '<div class="field"><span>白名单链接</span>' +
+          '<input id="lkPresetKw" placeholder="搜索白名单链接（域名或路径关键字）" autocomplete="off">' +
+          '<select id="lkPreset"><option value="">加载中…</option></select>' +
+          '<p class="muted" id="lkPresetTip" style="' + hint + '"></p>' +
+        '</div>' +
         '<label class="field"><span>链接地址</span>' +
           '<input id="lkUrl" placeholder="https://" value="' + esc(saved.url || '') + '"></label>' +
         '<label class="field"><span>标题</span>' +
@@ -3739,6 +3791,34 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         '</div>';
       $('#modal').classList.remove('hidden');
       $('#lkCancel').onclick = closeModal;
+
+      // ===== 白名单链接预设 =====
+      var presetSel = $('#lkPreset');
+      var presetTip = $('#lkPresetTip');
+      function showPresets(kw, keep){
+        var n = paintPresets(presetSel, kw, keep);
+        if (!presetTip) return;
+        var all = (linkPresetsCache || []).length;
+        if (!all) { presetTip.textContent = ''; return; }
+        presetTip.textContent = n === all
+          ? '共 ' + all + ' 条，选中后自动填入下面的链接地址'
+          : '匹配 ' + n + ' / ' + all + ' 条';
+      }
+      $('#lkPresetKw').oninput = function(){ showPresets(this.value, presetSel.value); };
+      presetSel.onchange = function(){ if (this.value) $('#lkUrl').value = this.value; };
+      // 列表只拉一次, 之后切换手表/重开表单都复用
+      if (linkPresetsCache) {
+        showPresets('', $('#lkUrl').value || '');
+      } else {
+        api('/api/chats/link-presets').then(function(d){
+          linkPresetsCache = (d && d.links) || [];
+          showPresets('', $('#lkUrl').value || '');
+        }).catch(function(e){
+          linkPresetsCache = [];
+          presetSel.innerHTML = '<option value="">白名单加载失败</option>';
+          toast('白名单链接加载失败：' + e.message, true);
+        });
+      }
 
       // 封面: 空着时显示占位灰块, 选了图立刻预览
       function paintCover(){

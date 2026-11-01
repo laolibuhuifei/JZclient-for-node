@@ -1276,7 +1276,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     'var(--surface-variant)', 'var(--surface-variant)', 'var(--surface-variant)'
   ];
   var SUB_TABS = ['overview','friends','profile','contacts','guard','settings','health','apps','wifi','alarms','ai','hidden','bind','account','announcements','logs'];
-  var state = { watches: [], id: null, tab: 'home', chatKey: null, chatTargets: [], chatPoll: null, homePoll: null, bindData: null, map: null, noticeId: null, backTo: null };
+  var state = { watches: [], id: null, tab: 'home', loggedIn: false, tokenInvalid: false, watchError: '',
+    chatKey: null, chatTargets: [], chatPoll: null, homePoll: null, bindData: null, map: null, noticeId: null, backTo: null };
   var $ = function(s){ return document.querySelector(s); };
 
   function esc(v){
@@ -1627,6 +1628,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         });
         closeModal();
         toast('登录成功');
+        markLoggedIn();
         var w = await api('/api/watches?refresh=1');
         state.watches = w.watches || [];
         if (state.watches.length) state.id = state.watches[0].watchId;
@@ -1639,6 +1641,40 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
   function currentWatch(){
     for (var i = 0; i < state.watches.length; i++) if (state.watches[i].watchId === state.id) return state.watches[i];
     return null;
+  }
+
+  // ===== 家长端账号状态 =====
+  // 「没登录」和「登录了但没绑表」是两回事, 页面上必须分开说 ——
+  // 没登录时提示「未绑定手表」会让人以为自己绑过、只是丢了, 实际是压根没登录。
+  //   state.loggedIn      /api/account 说有没有 token
+  //   state.tokenInvalid  /api/watches 回了 000003 之类, 说明 token 已经失效
+  //   state.watchError    其它失败原因(网络/平台超时), 有值时说明"不知道有没有表"
+  function accountOk(){ return state.loggedIn && !state.tokenInvalid; }
+
+  // 需要登录时给用户看的那句话
+  function loginHint(){
+    return state.tokenInvalid
+      ? '登录状态已失效，请重新登录家长端账号'
+      : '请先登录家长端账号';
+  }
+
+  // 没有手表时, 到底是"没登录"还是"登录了没绑表"
+  function noWatchHint(){
+    if (!accountOk()) return loginHint();
+    if (state.watchError) return '手表列表加载失败：' + state.watchError;
+    return '没有已绑定的手表，请先在「绑定」页添加手表';
+  }
+
+  function markLoggedIn(){
+    state.loggedIn = true;
+    state.tokenInvalid = false;
+    state.watchError = '';
+  }
+
+  function markLoggedOut(){
+    state.loggedIn = false;
+    state.tokenInvalid = false;
+    state.watchError = '';
   }
 
   function renderStrip(){
@@ -1783,7 +1819,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     destroyMap();
     setLoading();
     if (!state.id && ['home', 'announcements', 'account', 'bind', 'ai', 'chat', 'more', 'me', 'logs'].indexOf(state.tab) < 0) {
-      $('#content').innerHTML = '<div class="empty">没有已绑定的手表，请先在「绑定」页添加手表</div>';
+      $('#content').innerHTML = '<div class="empty">' + esc(noWatchHint()) + '</div>';
       return;
     }
     var id = state.id ? encodeURIComponent(state.id) : '';
@@ -2226,13 +2262,16 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     });
     html += '</div>';
     html += '<aside class="panel device-panel"><h3>当前设备</h3>' +
-      '<div class="row"><span>手表</span><span class="value">' + esc(w.name || '未选择') + '</span></div>' +
+      '<div class="row"><span>手表</span><span class="value">' + esc(w.name || (accountOk() ? '未选择' : '未登录')) + '</span></div>' +
       '<div class="row"><span>号码</span><span class="value">' + esc(w.number || '-') + '</span></div>' +
       '<div class="row"><span>型号</span><span class="value">' + esc(w.model || '-') + '</span></div>' +
       '<div class="row"><span>固件</span><span class="value">' + esc(w.firmware || '-') + '</span></div>' +
       '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">' +
-      '<button class="btn small tonal" id="moreBind">绑定手表</button>' +
-      '<button class="btn small" id="moreAccount">账号设置</button></div></aside></div>';
+      (accountOk()
+        ? '<button class="btn small tonal" id="moreBind">绑定手表</button>' +
+          '<button class="btn small" id="moreAccount">账号设置</button>'
+        : '<button class="btn small" id="moreAccount">登录家长端账号</button>') +
+      '</div></aside></div>';
     $('#content').innerHTML = html;
     Array.prototype.forEach.call(document.querySelectorAll('[data-fn]'), function(btn){
       btn.onclick = function(){
@@ -2277,7 +2316,11 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     var cw = currentWatch() || {};
     if (!wid) {
       box.innerHTML = '<div class="card"><div class="card-title">OneBot v11 接入</div>' +
-        '<div class="muted" style="font-size:12.5px">还没有手表。先在「我的 → 绑定手表」里绑一块，再回来配置。</div></div>';
+        '<div class="muted" style="font-size:12.5px">' +
+        (accountOk()
+          ? '还没有手表。先在「我的 → 绑定手表」里绑一块，再回来配置。'
+          : esc(loginHint()) + '，登录后才能为手表配置接入。') +
+        '</div></div>';
       return;
     }
     var list = ob.watches || [];
@@ -2975,26 +3018,38 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     var a = (ov && ov.account) || {};
     var st = (ov && ov.status) || {};
     var w = currentWatch() || {};
-    var name = a.name || w.name || '未绑定手表';
-    var battery = a.battery != null ? a.battery : st.battery;
+    var ok = accountOk();
+    var hasWatch = !!state.id;
+    // 没登录时 hero 上不能写「未绑定手表」—— 用户会以为自己绑过、只是数据丢了
+    var name = ok ? (a.name || w.name || '未绑定手表') : '未登录';
+    // 登录了但一块表都没有: 标题写「未绑定手表」是对的, 但要紧跟一句下一步该干什么
+    var sub = !ok ? esc(loginHint())
+      : (hasWatch
+        ? esc(a.model || w.model || '') + (w.number ? ' · ' + esc(w.number) : '')
+        : '没有已绑定的手表，点下面的「绑定手表」添加');
+    var battery = ok ? (a.battery != null ? a.battery : st.battery) : null;
     var html = '<div class="hero card"><div style="display:flex;align-items:center;gap:14px">' +
       '<span class="avatar hero-avatar">' +
       (ov && ov.avatarUrl ? '<img src="' + esc(ov.avatarUrl) + '" alt="">' : esc(name.slice(0, 1))) + '</span>' +
       '<div style="flex:1;min-width:0"><div class="watch-name">' + esc(name) + '</div>' +
-      '<div class="muted">' + esc(a.model || w.model || '') + (w.number ? ' · ' + esc(w.number) : '') + '</div></div>' +
+      '<div class="muted">' + sub + '</div></div>' +
       '<div class="battery js-battery">' + (battery != null ? battery : '-') + '<span>%</span></div></div></div>';
 
     html += '<div class="card"><div class="card-title">账号</div>' +
       '<div class="row"><span>账号</span><span class="value">' + esc(d.userName || '-') + '</span></div>' +
-      '<div class="row"><span>登录状态</span><span class="value">' + (d.loggedIn ? '已登录' : '未登录') + '</span></div>' +
+      '<div class="row"><span>登录状态</span><span class="value">' + (ok ? '已登录' : '未登录') + '</span></div>' +
       '<div class="row"><span>mobileId</span><span class="value">' + esc(d.mobileId || '-') + '</span></div>' +
       '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">' +
-      (d.loggedIn ? '<button class="btn tonal small" id="showConfig">查看配置</button>' +
-        '<button class="btn danger small" id="logoutBtn">退出登录</button>' : '') +
-      '<button class="btn small tonal" id="goBind">绑定手表</button>' +
-      '<button class="btn small" id="switchAccount">' + (d.loggedIn ? '切换账号' : '登录') + '</button></div></div>';
+      (ok
+        ? '<button class="btn tonal small" id="showConfig">查看配置</button>' +
+          '<button class="btn danger small" id="logoutBtn">退出登录</button>' +
+          '<button class="btn small tonal" id="goBind">绑定手表</button>' +
+          '<button class="btn small" id="switchAccount">切换账号</button>'
+        : '<button class="btn small" id="switchAccount">' +
+          (state.tokenInvalid ? '重新登录家长端账号' : '登录家长端账号') + '</button>') +
+      '</div></div>';
 
-    if (a.imei || st.lastLat != null || st.batteryAt) {
+    if (hasWatch && (a.imei || st.lastLat != null || st.batteryAt)) {
       html += '<div class="card" style="margin-top:12px"><div class="card-title">设备状态</div>' +
         '<div class="row"><span>IMEI</span><span class="value">' + esc(a.imei || '-') + '</span></div>' +
         '<div class="row"><span>在线状态</span><span class="value">' + ((a.online || a.watchOnline) ? '在线' : '离线') + '</span></div>' +
@@ -3132,6 +3187,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       if (!(await confirmDialog('确认退出当前账号？'))) return;
       try {
         await api('/api/account/logout', { method:'POST' });
+        markLoggedOut();
         state.watches = []; state.id = null;
         renderStrip(); state.tab = 'account'; renderNav(); updateTitle(); load();
         toast('已退出');
@@ -4309,6 +4365,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
           return;
         }
         toast('登录成功');
+        markLoggedIn();
         var w = await api('/api/watches?refresh=1');
         state.watches = w.watches || [];
         if (state.watches.length) state.id = state.watches[0].watchId;
@@ -4321,6 +4378,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       if (!(await confirmDialog('确认退出当前账号？'))) return;
       try {
         await api('/api/account/logout', { method:'POST' });
+        markLoggedOut();
         state.watches = []; state.id = null;
         renderStrip();
         toast('已退出');
@@ -4339,6 +4397,16 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
 
   // ===== 绑定 =====
   function renderBind(){
+    // 没登录时查询绑定号必然失败, 与其让用户填完再报错, 不如直接把话说清楚
+    if (!accountOk()) {
+      $('#content').innerHTML = '<div class="card"><div class="card-title">绑定手表</div>' +
+        '<div class="empty">' + esc(loginHint()) + '，登录后才能绑定手表。</div>' +
+        '<div style="display:flex;justify-content:center;margin-top:6px">' +
+        '<button class="btn small" id="bindToLogin">去登录</button></div></div>';
+      var bl = $('#bindToLogin');
+      if (bl) bl.onclick = function(){ state.tab = 'account'; renderNav(); updateTitle(); load(); };
+      return;
+    }
     var html = '<div class="card"><div class="card-title">绑定手表</div>' +
       '<label class="field"><span>绑定号</span><input id="bindNumber" placeholder="输入 16 位绑定号"></label>' +
       '<div class="modal-actions" style="justify-content:flex-start"><button class="btn" id="bindLookup">查询绑定号</button></div>' +
@@ -5397,29 +5465,50 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     try {
       renderNav(); updateTitle();
       loadBackground();
+      // 先问一句账号状态: 没登录和"登录了但没绑表"在页面上要分开说
+      var acc0 = await tryApi('/api/account');
+      state.loggedIn = !!(acc0 && acc0.loggedIn);
+      state.tokenInvalid = false;
+      state.watchError = '';
+      var an0 = $('#accountName');
+      if (an0) an0.textContent = state.loggedIn ? (acc0.userName || '') : '未登录';
       // 这里单独收紧超时: 默认 30 秒对首屏来说太久了, 平台接口卡住时用户就是干等。
       // 拿不到就落到「我的」页(能看到登录/绑定入口), 别把整页卡在转圈上。
       var d = await api('/api/watches', { timeout: 12000 });
       state.watches = d.watches || [];
+      state.watchError = '';
       if (state.watches.length) state.id = state.watches[0].watchId;
       renderStrip();
       if (!state.watches.length && ['home', 'announcements', 'account', 'bind', 'chat', 'more', 'me', 'logs'].indexOf(state.tab) < 0) {
         state.tab = 'me';
       }
-      var acc = await tryApi('/api/account');
+      var acc = acc0 || (await tryApi('/api/account'));
       var an = $('#accountName');
       if (an && acc && acc.userName) an.textContent = acc.userName;
       renderNav(); updateTitle(); load();
     } catch(e){
       // 手表列表拿不到(未登录 000003 / 平台接口超时 / 网络不通)都落到「我的」页,
       // 那里至少有登录、绑定、查看配置的入口 —— 比甩一行报错有用得多
+      var msg = String((e && e.message) || e);
+      // 平台对「没登录」和「token 过期」都回 000003, 光看错误分不出来 ——
+      // 只有 boot 里 /api/account 说的 loggedIn 能区分, 所以这里按它决定话术。
+      if (!state.loggedIn) {
+        state.watchError = '';                 // 压根没登录, 不需要再说"加载失败"
+      } else if (/000003|token is invalid|未登录/i.test(msg)) {
+        state.tokenInvalid = true;             // 有 token 但被拒, 属于登录已失效
+        state.watchError = '';
+      } else {
+        state.watchError = msg;
+      }
       state.tab = 'me';
       state.watches = [];
       state.id = null;
       renderStrip(); renderNav(); updateTitle();
       await load();
-      var msg = String((e && e.message) || e);
-      toast(/000003|token is invalid/i.test(msg) ? '请先登录家长端账号' : '手表列表加载失败：' + msg, true);
+      var an2 = $('#accountName');
+      if (an2 && !state.loggedIn) an2.textContent = '未登录';
+      toast(state.tokenInvalid ? '登录状态已失效，请重新登录家长端账号'
+        : (state.loggedIn ? '手表列表加载失败：' + msg : '请先登录家长端账号'), true);
     }
   }
 

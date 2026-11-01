@@ -10,8 +10,9 @@ const device = require('./device');
 const sso = require('./sso');
 const { ImClient } = require('./im');
 const { chat: aiChat } = require('./ai');
-const { parseMessage, describe, mediaUrl, buildText, buildEmoji, buildLocation, buildLink, buildPhoto, buildVideo, buildVoice, buildKaomoji, EMOJI_PRESET } = require('./message');
+const { parseMessage, describe, mediaUrl, buildText, buildEmoji, buildLocation, buildLink, buildPhoto, buildVideo, buildVoice, buildKaomoji, EMOJI_PRESET, LINK_APP_NAME } = require('./message');
 const { loadImageSource, uploadImage, uploadVoice, uploadVideo, directVideo, probeDuration, splitAudio, splitVideo, cleanupSplit, downloadToTmp } = require('./upload');
+const { fetchFavicon } = require('./favicon');
 const { startOneBot } = require('./onebot');
 const bili = require('./bilibili');
 const biliBot = require('./bili-bot');
@@ -143,6 +144,52 @@ function messageUrl(parsed) {
     if (local) return local;
   }
   return mediaUrl(parsed);
+}
+
+// ===== 链接卡片的封面 / 来源图标 =====
+// 链接消息(RelayH5Message)能带三样装饰: 封面 source、来源小图标 icon、来源文字 appName。
+// 全都可留空 —— 封面留空就抓网页图标, 图标留空就用项目自带的图标。
+// 来源图标在手表上只是个圆角小图, 所以默认用 64x64 的 icon-link.png:
+// 它要 base64 塞进每条消息的 msgNewContent 里, 用 180x180 那张会白多背 26KB。
+const LINK_ICON_FILES = ['icon-link.png', 'icon-180.png', 'icon.png'];
+const LINK_COVER_MAX = 4 * 1024 * 1024;   // 封面原图上限(前端已压到 2MB 以内, 这里兜底)
+const LINK_ICON_MAX = 256 * 1024;         // 来源图标是卡片角落的小图, 别塞大图
+let linkIconCache;                        // undefined=未读, null=读不到
+
+// 项目自带的默认来源图标
+function defaultLinkIcon() {
+  if (linkIconCache !== undefined) return linkIconCache;
+  for (const name of LINK_ICON_FILES) {
+    try {
+      linkIconCache = fs.readFileSync(path.join(__dirname, 'assets', name));
+      return linkIconCache;
+    } catch (e) { /* 换下一个 */ }
+  }
+  log.warn('chat', '默认链接图标读取失败, 这条消息不带来源图标');
+  linkIconCache = null;
+  return linkIconCache;
+}
+
+// 前端传上来的图片: 支持 data URL(网页选图) / http(s) / 本地路径
+function tooBig(limit) {
+  return limit >= 1024 * 1024
+    ? '图片超过 ' + Math.round(limit / 1024 / 1024) + 'MB'
+    : '图片超过 ' + Math.round(limit / 1024) + 'KB';
+}
+
+async function loadLinkImage(src, limit) {
+  const s = String(src || '').trim();
+  if (!s) return null;
+  const m = /^data:([^;,]*)(;base64)?,([\s\S]*)$/i.exec(s);
+  if (m) {
+    const buf = m[2] ? Buffer.from(m[3], 'base64') : Buffer.from(decodeURIComponent(m[3]), 'binary');
+    if (!buf.length) throw new Error('图片内容为空');
+    if (buf.length > limit) throw new Error(tooBig(limit));
+    return { buf, filename: 'image' + (String(m[1]).indexOf('png') >= 0 ? '.png' : '.jpg') };
+  }
+  const loaded = await loadImageSource(s);
+  if (loaded.buf.length > limit) throw new Error(tooBig(limit));
+  return loaded;
 }
 
 async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSecret } = {}) {
@@ -1640,8 +1687,48 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       const url2 = String(body.url || '').trim();
       if (!/^https?:\/\//i.test(url2)) throw new Error('链接格式不正确');
       const biz = Number(body.businessType || 0);
-      obj = buildLink({ url: url2, desc: biz ? (body.desc || '业务链接') : url2, appName: '家长客户端', businessType: biz });
-      label = '[链接] ' + url2;
+      const title = String(body.desc || '').trim() || url2;
+      const appName = String(body.appName || '').trim() || LINK_APP_NAME;
+
+      // 封面: 手选/手填的图 > 自动抓网页图标 > 不带封面
+      // 封面只是锦上添花, 任何一步失败都只记日志, 不能把整条消息堵掉
+      let source = null;
+      try {
+        let cover = await loadLinkImage(body.cover, LINK_COVER_MAX);
+        if (!cover) cover = await fetchFavicon(url2);
+        if (cover && cover.buf) {
+          const img = await uploadImage(cfg, {
+            buf: cover.buf,
+            filename: cover.filename,
+            group: t.type === 'group',
+            dialogId: t.type === 'group' ? t.dialogId : t.receiverId,
+            myImAccountId: c.imAccountId,
+          });
+          source = img.source;
+        }
+      } catch (e) {
+        log.warn('chat', '链接封面处理失败(消息照发): ' + e.message);
+      }
+
+      // 来源小图标: 手选的图 > 项目自带图标
+      let iconBuf = null;
+      try {
+        const picked = await loadLinkImage(body.icon, LINK_ICON_MAX);
+        iconBuf = picked ? picked.buf : defaultLinkIcon();
+      } catch (e) {
+        log.warn('chat', '链接图标处理失败(改用默认图标): ' + e.message);
+        iconBuf = defaultLinkIcon();
+      }
+
+      obj = buildLink({
+        url: url2,
+        desc: title,
+        appName,
+        businessType: biz,
+        source,
+        icon: iconBuf,
+      });
+      label = '[链接] ' + title;
       url = url2;
     } else if (kind === 'kaomoji') {
       const content = String(body.text || '').trim();

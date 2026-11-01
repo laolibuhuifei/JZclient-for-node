@@ -3636,6 +3636,9 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
           } else if (m.url && m.kind === 'voice') {
             body = '<audio class="media" src="' + esc(m.url) + '" controls preload="metadata"></audio>' +
               '<div class="media-note">' + esc(m.text) + '</div>';
+          } else if (m.url && (m.kind === 'link' || m.kind === 'relay_h5')) {
+            body = '<a href="' + esc(m.url) + '" target="_blank" rel="noopener">' + esc(m.text) + '</a>';
+            open = '';
           } else {
             body = esc(m.text);
             open = '';
@@ -3654,6 +3657,150 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         await refreshMessages();
         return true;
       } catch (e) { toast(e.message, true); return false; }
+    }
+
+    // 读本地图片并缩到指定边长, 免得把几 MB 原图塞进消息
+    // mime 用 image/jpeg 时质量可调; 图标要保留透明所以用 png
+    function pickImageData(file, maxSide, mime, quality){
+      return new Promise(function(resolve, reject){
+        var rd = new FileReader();
+        rd.onerror = function(){ reject(new Error('读取图片失败')); };
+        rd.onload = function(){
+          var raw = String(rd.result);
+          var img = new Image();
+          img.onerror = function(){ reject(new Error('这不是一张有效的图片')); };
+          img.onload = function(){
+            try {
+              var w = img.naturalWidth || img.width;
+              var h = img.naturalHeight || img.height;
+              if (!w || !h) { resolve(raw); return; }
+              var scale = Math.min(1, maxSide / Math.max(w, h));
+              var cw = Math.max(1, Math.round(w * scale));
+              var ch = Math.max(1, Math.round(h * scale));
+              var cv = document.createElement('canvas');
+              cv.width = cw; cv.height = ch;
+              cv.getContext('2d').drawImage(img, 0, 0, cw, ch);
+              resolve(cv.toDataURL(mime, quality));
+            } catch(e){ resolve(raw); }   // 没有 canvas 就退回原图
+          };
+          img.src = raw;
+        };
+        rd.readAsDataURL(file);
+      });
+    }
+
+    // 发送链接卡片: 标题/封面/应用名/图标都能留空
+    // 封面留空 → 后端自动抓网页图标; 图标留空 → 用 jzclient 自带图标
+    function openLinkForm(){
+      var saved = {};
+      try { saved = JSON.parse(localStorage.getItem('jz_link_form') || '{}') || {}; } catch(e){ saved = {}; }
+      var coverData = '';
+      var iconData = '';
+      var DEFAULT_ICON = '/assets/icon-180.png';
+      // 1x1 透明像素: 没选封面时占着位置, 不然 <img> 会显示成裂图
+      var EMPTY_PX = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+      var thumb = 'border-radius:8px;border:1px solid var(--outline-variant);background:var(--surface-variant);object-fit:cover;display:block';
+      var col = 'display:flex;flex-direction:column;gap:6px';
+      var hint = 'margin:0;font-size:12px';
+
+      $('#modalCard').innerHTML = '<h2>发送链接</h2>' +
+        '<label class="field"><span>链接地址</span>' +
+          '<input id="lkUrl" placeholder="https://" value="' + esc(saved.url || '') + '"></label>' +
+        '<label class="field"><span>标题</span>' +
+          '<input id="lkTitle" placeholder="留空则显示链接地址" value="' + esc(saved.title || '') + '"></label>' +
+        '<div class="field"><span>封面图</span>' +
+          '<div style="display:flex;gap:10px;align-items:center">' +
+            '<img id="lkCoverImg" src="' + EMPTY_PX + '" alt="" style="width:104px;height:58px;' + thumb + '">' +
+            '<div style="' + col + '">' +
+              '<button type="button" class="btn small text" id="lkCoverPick">选择图片</button>' +
+              '<button type="button" class="btn small text" id="lkCoverClear">清除</button>' +
+            '</div>' +
+          '</div>' +
+          '<p class="muted" style="' + hint + '">留空会自动抓取网页图标当封面</p>' +
+          '<input type="file" id="lkCoverFile" accept="image/*" style="display:none">' +
+        '</div>' +
+        '<label class="field"><span>应用名称</span>' +
+          '<input id="lkApp" placeholder="jzclient" value="' + esc(saved.appName || '') + '"></label>' +
+        '<div class="field"><span>应用图标</span>' +
+          '<div style="display:flex;gap:10px;align-items:center">' +
+            '<img id="lkIconImg" src="' + DEFAULT_ICON + '" alt="" style="width:40px;height:40px;' + thumb + '">' +
+            '<div style="' + col + '">' +
+              '<button type="button" class="btn small text" id="lkIconPick">选择图片</button>' +
+              '<button type="button" class="btn small text" id="lkIconClear">恢复默认</button>' +
+            '</div>' +
+          '</div>' +
+          '<p class="muted" style="' + hint + '">留空使用 jzclient 自带图标</p>' +
+          '<input type="file" id="lkIconFile" accept="image/*" style="display:none">' +
+        '</div>' +
+        '<div class="modal-actions">' +
+          '<button type="button" class="btn text" id="lkCancel">取消</button>' +
+          '<button type="button" class="btn" id="lkSend">发送</button>' +
+        '</div>';
+      $('#modal').classList.remove('hidden');
+      $('#lkCancel').onclick = closeModal;
+
+      // 封面: 空着时显示占位灰块, 选了图立刻预览
+      function paintCover(){
+        var el = $('#lkCoverImg');
+        if (coverData) { el.src = coverData; el.style.opacity = '1'; el.title = '已选封面'; }
+        else { el.src = EMPTY_PX; el.style.opacity = '.45'; el.title = '未选封面，发送时自动抓取网页图标'; }
+      }
+      paintCover();
+
+      $('#lkCoverPick').onclick = function(){ $('#lkCoverFile').click(); };
+      $('#lkCoverFile').onchange = async function(){
+        var f = this.files && this.files[0];
+        if (!f) return;
+        if (f.size > 8 * 1024 * 1024) { toast('图片请控制在 8MB 以内', true); this.value = ''; return; }
+        try {
+          coverData = await pickImageData(f, 640, 'image/jpeg', 0.82);
+          paintCover();
+        } catch(e){ toast(e.message, true); }
+        this.value = '';
+      };
+      $('#lkCoverClear').onclick = function(){ coverData = ''; paintCover(); };
+
+      $('#lkIconPick').onclick = function(){ $('#lkIconFile').click(); };
+      $('#lkIconFile').onchange = async function(){
+        var f = this.files && this.files[0];
+        if (!f) return;
+        if (f.size > 4 * 1024 * 1024) { toast('图标请控制在 4MB 以内', true); this.value = ''; return; }
+        try {
+          iconData = await pickImageData(f, 96, 'image/png');
+          $('#lkIconImg').src = iconData;
+        } catch(e){ toast(e.message, true); }
+        this.value = '';
+      };
+      $('#lkIconClear').onclick = function(){ iconData = ''; $('#lkIconImg').src = DEFAULT_ICON; };
+
+      $('#lkSend').onclick = async function(){
+        var url = ($('#lkUrl').value || '').trim();
+        if (!/^https?:\/\//i.test(url)) { toast('链接地址要以 http:// 或 https:// 开头', true); return; }
+        var title = ($('#lkTitle').value || '').trim();
+        var appName = ($('#lkApp').value || '').trim();
+        // 记住填过的值, 下次不用重打(图片太大就不存了)
+        try {
+          localStorage.setItem('jz_link_form', JSON.stringify({ url: url, title: title, appName: appName }));
+        } catch(e){ /* 隐私模式下写不进去, 忽略 */ }
+
+        var btn = this;
+        btn.disabled = true;
+        btn.textContent = '发送中…';
+        var ok2 = await send('link', {
+          url: url,
+          desc: title,
+          appName: appName,
+          cover: coverData,
+          icon: iconData,
+          businessType: 0
+        });
+        if (ok2) closeModal();
+        else { btn.disabled = false; btn.textContent = '发送'; }
+      };
+
+      var u = $('#lkUrl');
+      if (u) { try { u.focus(); } catch(e){} }
     }
 
     var st = $('#sendText');
@@ -3694,11 +3841,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
           { name:'poi', label:'地点名称' }
         ], '发送', async function(v){ await send('location', v); });
       };
-      $('#mLink').onclick = function(){
-        openForm('发送链接', [
-          { name:'url', label:'链接地址', required:true }
-        ], '发送', async function(v){ await send('link', { url: v.url, businessType: 0 }); });
-      };
+      $('#mLink').onclick = openLinkForm;
       $('#mImg').onclick = function(){ pickAndSend('image', t.key); };
       $('#mVoice').onclick = function(){ openRecorder(t.key); };
       $('#mVideo').onclick = function(){ pickAndSend('video', t.key); };
@@ -3711,7 +3854,10 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
   function renderChat(d){
     state.chatTargets = d.targets || [];
     if (state.chatKey && !findChatTarget(state.chatKey)) state.chatKey = null;
-    var desktop = window.matchMedia('(min-width: 901px)').matches;
+    // 有些内嵌 webview / 老浏览器没有 matchMedia, 直接调会抛错把整页打白, 所以兜底看 innerWidth
+    var desktop = window.matchMedia
+      ? window.matchMedia('(min-width: 901px)').matches
+      : (window.innerWidth || 0) >= 901;
 
     function wireList(){
       Array.prototype.forEach.call(document.querySelectorAll('[data-chat]'), function(btn){

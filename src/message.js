@@ -343,19 +343,29 @@ function buildKaomoji(content, description) {
   });
 }
 
-// 链接卡片(H5 转发, msgType 26)
-// opts: { url, desc, appName, businessType }
-// 业务链接只传 businessType, 不传 extInfo/args/封面
+// 链接卡片(H5 转发, msgNewType 26) —— 字段按原版 RelayH5Message 对齐:
+//   RelayH5Message extends PhotoMessage, 所以 type / sourceType / source 都继承自父类。
+//   卡片四要素: 标题=desc, 封面=source.downloadUrl, 来源小图标=icon(byte[], JSON 里是 base64),
+//   来源文字=appName。
+// opts: { url, desc, appName, businessType, source, icon, packageName }
+//   source: CloudFileResource { key, downloadUrl, width, height, urlDeadline }
+//   icon:   Buffer(原始图片字节), 这里转成 base64 交给 Gson 反序列化回 byte[]
+//   业务链接只传 businessType, 不传 extInfo/args
+const LINK_APP_NAME = 'jzclient';
+
 function buildLink(opts) {
   const url = opts.url || '';
   const title = opts.desc || url;
   const h5 = {
     url,
     desc: title,
-    appName: opts.appName || '家长客户端',
+    appName: opts.appName || LINK_APP_NAME,
     type: '1',
     sourceType: 6,
   };
+  if (opts.source && opts.source.downloadUrl) h5.source = opts.source;
+  if (opts.icon && opts.icon.length) h5.icon = Buffer.from(opts.icon).toString('base64');
+  if (opts.packageName) h5.packageName = opts.packageName;
   if (opts.businessType) h5.businessType = opts.businessType;
   return envelope({
     content: title,
@@ -368,6 +378,7 @@ function buildLink(opts) {
 
 module.exports = {
   EMOJI_PRESET,
+  LINK_APP_NAME,
   TYPE_NAME,
   parseMessage,
   describe,

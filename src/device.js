@@ -114,7 +114,8 @@ function normalizeExtApi(raw) {
 // 单块手表的 B 站点播默认值
 //   maxDuration 秒, 0 = 不限; maxBytes 字节, 上限卡在 100MB(微聊视频上传本身就卡这个数);
 //   maxPerDay 每天最多点播几条, 0 = 不限 —— 防小孩一口气刷十几条大视频把带宽和磁盘打满;
-//   commentImage 点播时先发一张评论区长图(默认开, 关掉就只发视频)
+//   commentImage 点播时先发一张评论区长图(默认开, 关掉就只发视频);
+//   searchImage 搜索结果画成带封面的图(默认开, 关掉回纯文字列表 —— 老手表看图慢的话可以关)
 function biliWatchDefaults() {
   return {
     enabled: false,
@@ -123,6 +124,7 @@ function biliWatchDefaults() {
     maxBytes: 100 * 1024 * 1024, // 100MB
     maxPerDay: 20,
     commentImage: true,
+    searchImage: true,
   };
 }
 
@@ -145,8 +147,9 @@ function normalizeBiliWatch(raw) {
     maxDuration: biliInt(r.maxDuration, 0, 7200, d.maxDuration),
     maxBytes: biliInt(r.maxBytes, 0, d.maxBytes, d.maxBytes),
     maxPerDay: biliInt(r.maxPerDay, 0, 999, d.maxPerDay),
-    // 老配置里没有这个字段, 默认当开 —— 新功能上线后不用挨个手表去点一遍
+    // 老配置里没有这两个字段, 默认当开 —— 新功能上线后不用挨个手表去点一遍
     commentImage: r.commentImage !== false,
+    searchImage: r.searchImage !== false,
   };
 }
 

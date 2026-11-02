@@ -11,6 +11,7 @@
 'use strict';
 
 const bili = require('./bilibili');
+const image = require('./image');
 const { Canvas } = require('./canvas');
 const log = require('./logger');
 
@@ -32,6 +33,11 @@ const COLOR = {
 };
 const FONT = { name: 25, body: 26, sub: 23, meta: 22, small: 20, title: 30 };
 const LINE = { body: 36, sub: 32, name: 26 };
+
+// 头像在图上画成 44×44（半径 22），向图床要 2 倍尺寸，缩下来才不糊。
+// 要 88×88 的 PNG 大约 6KB，比原图（通常是几百 KB 的 jpg）省得多。
+const AVATAR_SIZE = 44;
+const AVATAR_REQ = AVATAR_SIZE * 2;
 
 // 头像底色：按用户名哈希取一个，同一个人每次都是同一个颜色
 const AVATAR_COLORS = [
@@ -115,6 +121,8 @@ function normalizeReply(r, ownerMid) {
     rpid: String(r.rpid || ''),
     mid: String(m.mid || r.mid || ''),
     uname: String(m.uname || '匿名用户'),
+    // 头像地址：拿不到就留空，渲染时退回「首字色块」
+    avatar: String(m.avatar || m.face || ''),
     isUp: ownerMid != null && String(r.mid || '') === String(ownerMid),
     like: Number(r.like) || 0,
     ctime: Number(r.ctime) || 0,
@@ -180,7 +188,8 @@ async function fetchSubs(aid, root, cookie, want) {
 }
 
 // 主入口：拿一个视频的全部（能拿到的）评论
-// opts: { maxComments, maxPages, subLimit, sessdata }
+// opts: { maxComments, maxPages, subLimit, sessdata, avatars }
+// avatars=false 时跳过头像下载（只要文字的场景能省一两秒）
 async function fetchComments(bvid, opts) {
   const o = opts || {};
   const maxComments = clampInt(o.maxComments, 1, 300, 60);
@@ -261,6 +270,21 @@ async function fetchComments(bvid, opts) {
     if (c.subs.length > subLimit) c.subs = c.subs.slice(0, subLimit);
   }
 
+  // 头像：一次并行拉完，拿不到的那几条保持「首字色块」。
+  // 放在这里而不是 renderComments 里，是为了让渲染保持同步（纯排版），
+  // 也方便「只要文字不要图」的调用方传 avatars:false 直接跳过。
+  if (o.avatars !== false && list.length) {
+    const imgs = await image.loadMany(
+      list.map((c) => ({ url: c.avatar, w: AVATAR_REQ, h: AVATAR_REQ })),
+      { concurrency: 6 }
+    );
+    let got = 0;
+    for (let i = 0; i < list.length; i++) {
+      if (imgs[i]) { list[i].avatarImg = imgs[i]; got++; }
+    }
+    log.debug('bili', '评论头像 ' + got + '/' + list.length + ' 张取到');
+  }
+
   return {
     bvid,
     aid,
@@ -305,12 +329,19 @@ function layoutComment(m, item, topY) {
   const avatarCx = PAD + 22;
   const avatarR = 22;
 
-  // 头像：圆底 + 名字首字
-  const initial = Array.from(item.uname)[0] || '?';
-  const bg = avatarColor(item.uname);
-  ops.push((c) => c.circle(avatarCx, topY + 26, avatarR, bg));
-  const iw = m.measure(initial, 26, false);
-  ops.push((c) => c.text(initial, avatarCx - iw / 2, topY + 36, { size: 26, color: '#ffffff' }));
+  // 头像：有真头像就画图（裁成圆），没有就退回「首字色块」
+  // 色块照画 —— 图床的头像可能带透明通道，底下垫一层同色圆边不会露白
+  const avatarCy = topY + 26;
+  ops.push((c) => c.circle(avatarCx, avatarCy, avatarR, avatarColor(item.uname)));
+  if (item.avatarImg) {
+    const img = item.avatarImg;
+    ops.push((c) => c.drawImage(img, avatarCx - avatarR, avatarCy - avatarR,
+      avatarR * 2, avatarR * 2, { circle: true }));
+  } else {
+    const initial = Array.from(item.uname)[0] || '?';
+    const iw = m.measure(initial, 26, false);
+    ops.push((c) => c.text(initial, avatarCx - iw / 2, topY + 36, { size: 26, color: '#ffffff' }));
+  }
 
   // 昵称（太长就按实际字宽截断，别压到右边的点赞数上）
   const nameBase = topY + 26;

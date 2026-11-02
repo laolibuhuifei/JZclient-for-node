@@ -18,6 +18,7 @@ const { startOneBot } = require('./onebot');
 const bili = require('./bilibili');
 const biliBot = require('./bili-bot');
 const biliComment = require('./bili-comment');
+const biliSearch = require('./bili-search');
 const log = require('./logger');
 const SITE = require('./site.config');
 
@@ -784,10 +785,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     return { png: r.png, data, width: r.width, height: r.height, shown: r.shown };
   }
 
-  // 长图落盘 -> 走 sendChat 的 image 分支(和网页上手动发图同一条路径) -> 删临时文件
-  async function sendCommentPng(key, cmt) {
-    const file = path.join(os.tmpdir(), 'bili_cmt_' + Date.now() + '_' + process.pid + '.png');
-    fs.writeFileSync(file, cmt.png);
+  // 图落盘 -> 走 sendChat 的 image 分支(和网页上手动发图同一条路径) -> 删临时文件
+  // tag 只用来区分临时文件名, 出问题时一眼能看出是哪张图
+  async function sendBiliPng(key, png, tag) {
+    const file = path.join(os.tmpdir(),
+      'bili_' + (tag || 'img') + '_' + Date.now() + '_' + process.pid + '.png');
+    fs.writeFileSync(file, png);
     try {
       await sendChat({ key, kind: 'image', src: file });
     } finally {
@@ -795,10 +798,22 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     }
   }
 
+  function sendCommentPng(key, cmt) {
+    return sendBiliPng(key, cmt.png, 'cmt');
+  }
+
   async function sendCommentImage(key, bvid) {
     const cmt = await buildCommentImage(bvid);
     await sendCommentPng(key, cmt);
     return cmt;
+  }
+
+  // ===== B 站搜索结果图 =====
+  // 一张图里带封面/标题/UP主/播放/弹幕/时长, 比十行文字好认得多。
+  // 出图失败不影响搜索本身, 调用方会回退成文字列表。
+  async function buildSearchImage(keyword, list) {
+    const r = await biliSearch.renderSearch(list, { keyword });
+    return { png: r.png, width: r.width, height: r.height, count: r.count };
   }
 
   async function biliHandle(wid, key, cmd) {
@@ -824,6 +839,18 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         if (!first.done) biliSearchCache.delete(first.value);
       }
       log.info('bili', `手表 ${wid} 搜索「${cmd.arg}」得到 ${list.length} 条`);
+      // 默认发图；关掉开关或出图失败就退回文字列表（文字列表永远可用，是兜底）
+      if (c.searchImage) {
+        try {
+          const img = await buildSearchImage(cmd.arg, list);
+          await sendBiliPng(key, img.png, 'search');
+          log.info('bili', `手表 ${wid} 已发出搜索结果图 ${img.width}x${img.height}（${img.count} 条）`);
+          return;
+        } catch (e) {
+          log.warn('bili', `手表 ${wid} 搜索结果图失败，回退文字列表: `
+            + (e && e.message ? e.message : e));
+        }
+      }
       await biliReply(key, biliBot.formatList(cmd.arg, list));
       return;
     }
@@ -984,6 +1011,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           maxBytes: c.maxBytes,
           maxPerDay: c.maxPerDay,
           commentImage: c.commentImage,
+          searchImage: c.searchImage,
         };
       }),
       targets: targets.map((t) => ({ key: t.key, name: t.name, type: t.type })),
@@ -2326,6 +2354,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         if (b.maxBytes != null) c.maxBytes = clampInt(b.maxBytes, 0, 100 * 1024 * 1024, c.maxBytes);
         if (b.maxPerDay != null) c.maxPerDay = clampInt(b.maxPerDay, 0, 999, c.maxPerDay);
         if (b.commentImage != null) c.commentImage = !!b.commentImage;
+        if (b.searchImage != null) c.searchImage = !!b.searchImage;
         if (b.targets != null) {
           const arr = Array.isArray(b.targets) ? b.targets : [];
           c.targets = arr.map((x) => String(x)).filter((x) => /^[sg]:.+/.test(x));
@@ -2339,11 +2368,27 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       }
 
       // 测试搜索: 网页上点一下就能确认 B 站通不通, 不用真去手表上发命令
-      if (parts[2] === 'search' && req.method === 'GET') {
+      if (parts[2] === 'search' && !parts[3] && req.method === 'GET') {
         const kw = String(query.get('kw') || '').trim();
         if (!kw) throw new Error('缺少搜索关键词');
         const list = await bili.search(kw, { limit: BILI_MAX_RESULTS });
         return ok(res, { keyword: kw, list });
+      }
+
+      // 预览搜索结果图: 和手表上收到的是同一张图, 直接回 PNG(前端用 <img src> 打开)
+      if (parts[2] === 'search' && parts[3] === 'preview' && req.method === 'GET') {
+        const kw = String(query.get('kw') || '').trim();
+        if (!kw) throw new Error('缺少搜索关键词');
+        const list = await bili.search(kw, { limit: BILI_MAX_RESULTS });
+        const img = await buildSearchImage(kw, list);
+        log.info('bili', `预览搜索结果图「${kw}」：${img.width}x${img.height}（${img.count} 条）`);
+        res.writeHead(200, {
+          'Content-Type': 'image/png',
+          'Content-Length': img.png.length,
+          'Cache-Control': 'no-store',
+          'X-Search-Count': String(img.count),
+        });
+        return res.end(img.png);
       }
 
       // 评论长图的全局设置(账号级的 SESSDATA + 抓多少条 / 图多高)

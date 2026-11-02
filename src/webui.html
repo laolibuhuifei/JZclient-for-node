@@ -2691,11 +2691,13 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         (durMin ? durMin + ' 分钟' : '不限时长') + ' · ' + (mb ? mb + 'MB' : '不限大小') + '</span></div>' +
       '<div class="row"><span>每天上限</span><span class="value">' + (w.maxPerDay ? w.maxPerDay + ' 条' : '不限') + '</span></div>' +
       '<div class="row"><span>评论长图</span><span class="value">' +
-        (w.commentImage === false ? '关（只发视频）' : '开（先发评论区，再发视频）') + '</span></div>';
+        (w.commentImage === false ? '关（只发视频）' : '开（先发评论区，再发视频）') + '</span></div>' +
+      '<div class="row"><span>搜索图</span><span class="value">' +
+        (w.searchImage === false ? '关（回文字列表）' : '开（带封面和播放量）') + '</span></div>';
 
     html +=       '<div class="muted" style="font-size:12px;line-height:1.75;margin-top:12px">' +
       '在微聊里（这块表勾上的会话）发送：<br>' +
-      '<code>/搜索 关键词</code> —— 回前 10 条视频，带序号（<code>搜索 关键词</code> 不带斜杠也认）<br>' +
+      '<code>/搜索 关键词</code> —— 回一张带封面的图，前 10 条视频都标了序号（<code>搜索 关键词</code> 不带斜杠也认）<br>' +
       '<code>/播放 序号</code> —— 把上一条搜索结果里的第 N 条下载并发过来（单聊里直接回个数字也行）<br>' +
       '<code>/评论</code> —— 把刚点播那个视频的评论区画成长图再发一次（<code>/评论 序号</code> 也行）<br>' +
       '搜索结果 30 分钟内有效，按会话隔离（群里搜的序号不会串到单聊）。' +
@@ -2732,12 +2734,18 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       '<div class="row" style="margin-top:10px"><span>点播时先发评论区长图</span>' + sw('biliCmt', w.commentImage !== false) + '</div>' +
       '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:6px">' +
         '发视频之前，先把这个视频的评论区画成一张长图发过来。关掉就只发视频。</div>' +
+      '<div class="row" style="margin-top:10px"><span>搜索结果画成带封面的图</span>' + sw('biliSearchImg', w.searchImage !== false) + '</div>' +
+      '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:6px">' +
+        '发 /搜索 时回一张图（封面 + 标题 + UP主 + 播放/弹幕/时长），比十行文字好认。' +
+        '关掉就回纯文字列表。出图失败会自动退回文字列表。</div>' +
       '<label class="field" style="margin-top:10px"><span>测试搜索（只查不下载，验证 B 站通不通）</span>' +
         '<input id="biliTestKw" placeholder="例如 小猪佩奇"></label>' +
       '<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">' +
         '<button class="btn small" id="biliSave">保存</button>' +
-        '<button class="btn small tonal" id="biliTest">测试搜索</button></div>' +
-      '<div id="biliTestOut" class="muted" style="font-size:12px;line-height:1.7;margin-top:10px;white-space:pre-wrap;word-break:break-word"></div>';
+        '<button class="btn small tonal" id="biliTest">测试搜索</button>' +
+        '<button class="btn small tonal" id="biliTestImg">预览搜索图</button></div>' +
+      '<div id="biliTestOut" class="muted" style="font-size:12px;line-height:1.7;margin-top:10px;white-space:pre-wrap;word-break:break-word"></div>' +
+      '<div id="biliTestImgOut" class="muted" style="font-size:12px;line-height:1.7;margin-top:10px;word-break:break-word"></div>';
 
     var isOpen = obSecOpen ? !!obSecOpen['B 站点播'] : true;
     // ===== 评论长图的全局设置（账号级，不跟手表走）=====
@@ -2817,6 +2825,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         maxBytes: Math.min(100, Number($('#biliSize').value) || 0) * 1024 * 1024,
         maxPerDay: Number($('#biliDay').value) || 0,
         commentImage: $('#biliCmt') ? $('#biliCmt').checked : true,
+        searchImage: $('#biliSearchImg') ? $('#biliSearchImg').checked : true,
         targets: picked,
       };
       btn.disabled = true;
@@ -2880,25 +2889,21 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       }
     };
 
-    // 预览：直接请求 PNG，塞进 <img>，顺便给出「新窗口打开」的入口
-    if ($('#biliPrev')) $('#biliPrev').onclick = function(){
-      var btn = this;
-      var bv = String((($('#biliPrevBv') || {}).value) || '').trim();
-      var out = $('#biliPrevOut');
-      if (!/^BV[0-9A-Za-z]{8,12}$/.test(bv)) { toast('先填个 BV 号（BV 开头的那个）', true); return; }
-      var url = '/api/bili/comment/preview?bvid=' + encodeURIComponent(bv) + '&t=' + Date.now();
+    // 预览图：请求 PNG -> 塞进 <img> -> 附一个「新窗口打开」的入口。
+    // 评论长图和搜索图共用这一段，省得同样的 Image onload 写两遍。
+    function previewPng(url, out, btn, busyText, doneText, label, failMsg) {
       btn.disabled = true;
-      btn.textContent = '生成中…';
-      out.textContent = '正在抓评论区并画长图，可能要几秒…';
+      btn.textContent = busyText;
+      out.textContent = '正在生成，可能要几秒…';
       var img = new Image();
       img.onload = function(){
         btn.disabled = false;
-        btn.textContent = '生成预览';
+        btn.textContent = doneText;
         out.textContent = '';
-        var shown = document.createElement('div');
-        shown.className = 'muted';
-        shown.style.cssText = 'font-size:12px;margin-bottom:8px';
-        shown.textContent = '长图 ' + img.naturalWidth + '×' + img.naturalHeight + ' 像素';
+        var head = document.createElement('div');
+        head.className = 'muted';
+        head.style.cssText = 'font-size:12px;margin-bottom:8px';
+        head.textContent = label + ' ' + img.naturalWidth + '×' + img.naturalHeight + ' 像素';
         var a = document.createElement('a');
         a.href = url; a.target = '_blank'; a.rel = 'noopener';
         a.textContent = '在新窗口打开';
@@ -2907,16 +2912,32 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         wrap.style.cssText = 'margin-top:8px;border:1px solid var(--outline-variant);border-radius:10px;overflow:hidden';
         img.style.cssText = 'display:block;width:100%;height:auto';
         wrap.appendChild(img);
-        out.appendChild(shown);
-        shown.appendChild(a);
+        out.appendChild(head);
+        head.appendChild(a);
         out.appendChild(wrap);
       };
       img.onerror = function(){
         btn.disabled = false;
-        btn.textContent = '生成预览';
-        out.textContent = '生成失败：可能是视频编号不对、B 站风控，或者这个视频没有评论区。看日志里的 bili 行。';
+        btn.textContent = doneText;
+        out.textContent = failMsg;
       };
       img.src = url;
+    }
+
+    if ($('#biliPrev')) $('#biliPrev').onclick = function(){
+      var bv = String((($('#biliPrevBv') || {}).value) || '').trim();
+      if (!/^BV[0-9A-Za-z]{8,12}$/.test(bv)) { toast('先填个 BV 号（BV 开头的那个）', true); return; }
+      previewPng('/api/bili/comment/preview?bvid=' + encodeURIComponent(bv) + '&t=' + Date.now(),
+        $('#biliPrevOut'), this, '生成中…', '生成预览', '长图',
+        '生成失败：可能是视频编号不对、B 站风控，或者这个视频没有评论区。看日志里的 bili 行。');
+    };
+
+    if ($('#biliTestImg')) $('#biliTestImg').onclick = function(){
+      var kw = String((($('#biliTestKw') || {}).value) || '').trim();
+      if (!kw) { toast('先填个搜索关键词', true); return; }
+      previewPng('/api/bili/search/preview?kw=' + encodeURIComponent(kw) + '&t=' + Date.now(),
+        $('#biliTestImgOut'), this, '生成中…', '预览搜索图', '搜索图',
+        '生成失败：可能是关键词没搜到、B 站风控，或者图床连不上。看日志里的 bili / img 行。');
     };
   }
 

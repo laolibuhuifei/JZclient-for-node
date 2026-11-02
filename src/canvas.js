@@ -14,17 +14,40 @@ const { encodePNG } = require('./png');
 const ttf = require('./ttf');
 
 // ---------- 颜色 ----------
-
+//
+// 统一解析成 [r, g, b, a]（a 是 0~255）。带 alpha 是为了在封面图上压半透明的
+// 时长角标、给「没有封面的条目」铺一层淡色底 —— 不支持 alpha 就只能画实色块，
+// 盖在照片上非常脏。
 function parseColor(c) {
-  if (Array.isArray(c)) return [c[0] | 0, c[1] | 0, c[2] | 0];
-  const s = String(c || '#000').trim();
+  if (Array.isArray(c)) {
+    return [c[0] | 0, c[1] | 0, c[2] | 0, c.length > 3 ? Math.max(0, Math.min(255, c[3] | 0)) : 255];
+  }
+  const s = String(c == null ? '#000' : c).trim();
   if (s.charAt(0) === '#') {
     let h = s.slice(1);
-    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
-    const n = parseInt(h.slice(0, 6), 16);
-    if (Number.isFinite(n)) return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    if (h.length === 3 || h.length === 4) {
+      h = h.split('').map((ch) => ch + ch).join('');
+    }
+    if (h.length === 6) h += 'ff';
+    if (h.length === 8) {
+      const n = parseInt(h.slice(0, 6), 16);
+      const a = parseInt(h.slice(6, 8), 16);
+      if (Number.isFinite(n) && Number.isFinite(a)) {
+        return [(n >> 16) & 255, (n >> 8) & 255, n & 255, a];
+      }
+    }
+    return [0, 0, 0, 255];
   }
-  return [0, 0, 0];
+  const m = s.match(/^rgba?\(([^)]+)\)$/i);
+  if (m) {
+    const p = m[1].split(',').map((x) => Number(x.trim()));
+    if (p.length >= 3 && p.slice(0, 3).every((x) => Number.isFinite(x))) {
+      const a = p.length > 3 && Number.isFinite(p[3])
+        ? Math.round(Math.max(0, Math.min(1, p[3])) * 255) : 255;
+      return [p[0] | 0, p[1] | 0, p[2] | 0, a];
+    }
+  }
+  return [0, 0, 0, 255];
 }
 
 // ---------- 字形轮廓 -> 折线 ----------
@@ -280,21 +303,24 @@ class Canvas {
     return null;
   }
 
-  // 单像素混色（内部用）
-  _blend(x, y, r, g, b, a) {
-    if (x < 0 || y < 0 || x >= this.width || y >= this.height || a <= 0) return;
+  // 单像素混色（内部用）。a 是覆盖率 0~1，会再乘上颜色自带的 alpha
+  _blend(x, y, c, a) {
+    if (x < 0 || y < 0 || x >= this.width || y >= this.height) return;
+    let av = a * (c[3] == null ? 1 : c[3] / 255);
+    if (av <= 0) return;
+    if (av > 1) av = 1;
     const i = (y * this.width + x) * 4;
     const d = this.data;
-    if (a >= 1) {
-      d[i] = r;
-      d[i + 1] = g;
-      d[i + 2] = b;
+    if (av >= 1) {
+      d[i] = c[0];
+      d[i + 1] = c[1];
+      d[i + 2] = c[2];
       return;
     }
-    const ia = 1 - a;
-    d[i] = d[i] * ia + r * a;
-    d[i + 1] = d[i + 1] * ia + g * a;
-    d[i + 2] = d[i + 2] * ia + b * a;
+    const ia = 1 - av;
+    d[i] = d[i] * ia + c[0] * av;
+    d[i + 1] = d[i + 1] * ia + c[1] * av;
+    d[i + 2] = d[i + 2] * ia + c[2] * av;
   }
 
   fillRect(x, y, w, h, color) {
@@ -304,12 +330,27 @@ class Canvas {
     const x1 = Math.min(this.width, Math.round(x + w));
     const y1 = Math.min(this.height, Math.round(y + h));
     const d = this.data;
+    // 不透明是最常见的情况，走原来的直写；半透明才逐像素混
+    if (c[3] >= 255) {
+      for (let yy = y0; yy < y1; yy++) {
+        let i = (yy * this.width + x0) * 4;
+        for (let xx = x0; xx < x1; xx++) {
+          d[i] = c[0];
+          d[i + 1] = c[1];
+          d[i + 2] = c[2];
+          i += 4;
+        }
+      }
+      return;
+    }
+    const a = c[3] / 255;
+    const ia = 1 - a;
     for (let yy = y0; yy < y1; yy++) {
       let i = (yy * this.width + x0) * 4;
       for (let xx = x0; xx < x1; xx++) {
-        d[i] = c[0];
-        d[i + 1] = c[1];
-        d[i + 2] = c[2];
+        d[i] = d[i] * ia + c[0] * a;
+        d[i + 1] = d[i + 1] * ia + c[1] * a;
+        d[i + 2] = d[i + 2] * ia + c[2] * a;
         i += 4;
       }
     }
@@ -340,7 +381,7 @@ class Canvas {
         const dist = Math.sqrt(dx * dx + dy * dy);
         const a = r + 0.5 - dist;
         if (a <= 0) continue;
-        this._blend(xx, yy, c[0], c[1], c[2], a > 1 ? 1 : a);
+        this._blend(xx, yy, c, a > 1 ? 1 : a);
       }
     }
   }
@@ -358,7 +399,7 @@ class Canvas {
         const d = Math.sqrt(dx * dx + dy * dy);
         const a = radius + 0.5 - d;
         if (a <= 0) continue;
-        this._blend(xx, yy, c[0], c[1], c[2], a > 1 ? 1 : a);
+        this._blend(xx, yy, c, a > 1 ? 1 : a);
       }
     }
   }
@@ -382,6 +423,7 @@ class Canvas {
   _blit(mask, x, y, c) {
     const { w, h, alpha } = mask;
     const d = this.data;
+    const ca = c[3] == null ? 1 : c[3] / 255;     // 颜色自带的透明度
     for (let yy = 0; yy < h; yy++) {
       const ty = y + yy;
       if (ty < 0 || ty >= this.height) continue;
@@ -390,7 +432,7 @@ class Canvas {
       for (let xx = 0; xx < w; xx++) {
         const tx = x + xx;
         if (tx >= 0 && tx < this.width) {
-          const a = alpha[srow + xx];
+          const a = alpha[srow + xx] * ca;
           if (a) {
             if (a >= 255) {
               d[i] = c[0];
@@ -406,6 +448,117 @@ class Canvas {
           }
         }
         i += 4;
+      }
+    }
+  }
+
+  // 画一张位图（image.js 解码出来的 { width, height, rgba }）
+  //
+  // opt:
+  //   fit    'cover'（默认，按目标比例裁中间那块）| 'stretch'（直接拉伸）
+  //   round  圆角半径（封面缩略图用）
+  //   circle true = 裁成圆（头像用）
+  //   alpha  0~1 整体透明度
+  //
+  // 采样用双线性：封面从 240 缩到 200 这种幅度，最近邻会明显出锯齿。
+  drawImage(img, dx, dy, dw, dh, opt) {
+    const o = opt || {};
+    if (!img || !img.rgba || !img.width || !img.height) return;
+    if (!(dw >= 0.5) || !(dh >= 0.5)) return;
+    const sw = img.width;
+    const sh = img.height;
+    const src = img.rgba;
+    const alphaMul = o.alpha == null ? 1 : Math.max(0, Math.min(1, o.alpha));
+
+    // 源矩形：cover 时按目标宽高比裁掉多出来的两边
+    let sx = 0;
+    let sy = 0;
+    let sW = sw;
+    let sH = sh;
+    if ((o.fit || 'cover') === 'cover') {
+      const dAsp = dw / dh;
+      if (sw / sh > dAsp) { sW = sh * dAsp; sx = (sw - sW) / 2; }
+      else { sH = sw / dAsp; sy = (sh - sH) / 2; }
+    }
+
+    const radius = o.circle ? Math.min(dw, dh) / 2 : Math.max(0, o.round || 0);
+    const x0 = Math.max(0, Math.floor(dx));
+    const y0 = Math.max(0, Math.floor(dy));
+    const x1 = Math.min(this.width, Math.ceil(dx + dw));
+    const y1 = Math.min(this.height, Math.ceil(dy + dh));
+    if (x1 <= x0 || y1 <= y0) return;
+    const cols = x1 - x0;
+
+    // 每一列的源坐标只跟 x 有关，先在循环外算好（每行再算一遍纯属浪费）
+    const ix0 = new Int32Array(cols);
+    const ix1 = new Int32Array(cols);
+    const fx = new Float32Array(cols);
+    for (let i = 0; i < cols; i++) {
+      let f = sx + (((x0 + i + 0.5) - dx) / dw) * sW - 0.5;
+      if (f < 0) f = 0;
+      if (f > sw - 1) f = sw - 1;
+      const i0 = Math.floor(f);
+      ix0[i] = i0;
+      ix1[i] = i0 + 1 < sw ? i0 + 1 : i0;
+      fx[i] = f - i0;
+    }
+
+    const d = this.data;
+    const W = this.width;
+    for (let yy = y0; yy < y1; yy++) {
+      const py = yy + 0.5;
+      let f = sy + ((py - dy) / dh) * sH - 0.5;
+      if (f < 0) f = 0;
+      if (f > sh - 1) f = sh - 1;
+      const i0 = Math.floor(f);
+      const i1 = i0 + 1 < sh ? i0 + 1 : i0;
+      const fy = f - i0;
+      const row0 = i0 * sw * 4;
+      const row1 = i1 * sw * 4;
+      for (let i = 0; i < cols; i++) {
+        const xx = x0 + i;
+        const px = xx + 0.5;
+        // 覆盖率：圆角/圆的边缘自带抗锯齿
+        let cov = 1;
+        if (radius > 0) {
+          const nx = px < dx + radius ? dx + radius
+            : (px > dx + dw - radius ? dx + dw - radius : px);
+          const ny = py < dy + radius ? dy + radius
+            : (py > dy + dh - radius ? dy + dh - radius : py);
+          const ddx = px - nx;
+          const ddy = py - ny;
+          cov = radius + 0.5 - Math.sqrt(ddx * ddx + ddy * ddy);
+          if (cov <= 0) continue;
+          if (cov > 1) cov = 1;
+        }
+        const a = ix0[i];
+        const b = ix1[i];
+        const t = fx[i];
+        const p00 = row0 + a * 4;
+        const p01 = row0 + b * 4;
+        const p10 = row1 + a * 4;
+        const p11 = row1 + b * 4;
+        const w00 = (1 - t) * (1 - fy);
+        const w01 = t * (1 - fy);
+        const w10 = (1 - t) * fy;
+        const w11 = t * fy;
+        // 源图自己的 alpha 也要参与（图床返回的 PNG 可能带透明通道）
+        const sa = (src[p00 + 3] * w00 + src[p01 + 3] * w01
+          + src[p10 + 3] * w10 + src[p11 + 3] * w11) / 255;
+        const av = cov * alphaMul * sa;
+        if (av <= 0) continue;
+        const r = src[p00] * w00 + src[p01] * w01 + src[p10] * w10 + src[p11] * w11;
+        const g = src[p00 + 1] * w00 + src[p01 + 1] * w01 + src[p10 + 1] * w10 + src[p11 + 1] * w11;
+        const bl = src[p00 + 2] * w00 + src[p01 + 2] * w01 + src[p10 + 2] * w10 + src[p11 + 2] * w11;
+        const o4 = (yy * W + xx) * 4;
+        if (av >= 1) {
+          d[o4] = r; d[o4 + 1] = g; d[o4 + 2] = bl;
+        } else {
+          const ia = 1 - av;
+          d[o4] = d[o4] * ia + r * av;
+          d[o4 + 1] = d[o4 + 1] * ia + g * av;
+          d[o4 + 2] = d[o4 + 2] * ia + bl * av;
+        }
       }
     }
   }

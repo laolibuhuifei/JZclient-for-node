@@ -206,6 +206,13 @@ async function search(keyword, opts) {
       duration: parseDuration(it.duration),
       play: Number(it.play) || 0,
       pubdate: Number(it.pubdate) || 0,
+      // 下面几个是「搜索结果画成图」才用的：封面、UP 头像、弹幕数、点赞、简介
+      // pic 是协议相对的写法（//i1.hdslb.com/...），image.js 会补上 https:
+      pic: String(it.pic || ''),
+      uface: String(it.uface || ''),
+      danmaku: Number(it.danmaku) || 0,
+      like: Number(it.like) || 0,
+      desc: cleanText(it.description || ''),
     });
   }
   if (!out.length) throw new Error('没搜到视频：' + kw);

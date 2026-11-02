@@ -60,6 +60,13 @@ const DEFAULTS = {
   // 按手表分开的微聊 B 站点播: watchId -> { enabled, targets, maxDuration, maxBytes, maxPerDay }
   // 每块表单独开关、单独会话范围、单独限额 —— 家里两块表, 一块给老大开一块不给, 互不影响
   biliBots: {},
+  // B 站评论长图的公共设置。sessdata 是账号级的(B 站登录 Cookie), 不按手表分:
+  // 不填只能拿到热门的前 3 条评论, 填了才能翻页拿全
+  biliComment: {
+    sessdata: '',
+    maxComments: 60,     // 最多抓多少条主楼评论
+    maxHeight: 12000,    // 长图最高多少像素(再高微聊那边看着也费劲, 还费内存)
+  },
   // 公告服务地址写死在 src/site.config.js 的 notice.baseUrl, 不放进用户配置
 };
 
@@ -106,7 +113,8 @@ function normalizeExtApi(raw) {
 
 // 单块手表的 B 站点播默认值
 //   maxDuration 秒, 0 = 不限; maxBytes 字节, 上限卡在 100MB(微聊视频上传本身就卡这个数);
-//   maxPerDay 每天最多点播几条, 0 = 不限 —— 防小孩一口气刷十几条大视频把带宽和磁盘打满
+//   maxPerDay 每天最多点播几条, 0 = 不限 —— 防小孩一口气刷十几条大视频把带宽和磁盘打满;
+//   commentImage 点播时先发一张评论区长图(默认开, 关掉就只发视频)
 function biliWatchDefaults() {
   return {
     enabled: false,
@@ -114,6 +122,7 @@ function biliWatchDefaults() {
     maxDuration: 600,            // 10 分钟
     maxBytes: 100 * 1024 * 1024, // 100MB
     maxPerDay: 20,
+    commentImage: true,
   };
 }
 
@@ -136,6 +145,19 @@ function normalizeBiliWatch(raw) {
     maxDuration: biliInt(r.maxDuration, 0, 7200, d.maxDuration),
     maxBytes: biliInt(r.maxBytes, 0, d.maxBytes, d.maxBytes),
     maxPerDay: biliInt(r.maxPerDay, 0, 999, d.maxPerDay),
+    // 老配置里没有这个字段, 默认当开 —— 新功能上线后不用挨个手表去点一遍
+    commentImage: r.commentImage !== false,
+  };
+}
+
+// B 站评论长图的公共设置(全局一份)
+function normalizeBiliComment(raw) {
+  const d = DEFAULTS.biliComment;
+  const r = raw && typeof raw === 'object' ? raw : {};
+  return {
+    sessdata: String(r.sessdata || '').trim(),
+    maxComments: biliInt(r.maxComments, 10, 300, d.maxComments),
+    maxHeight: biliInt(r.maxHeight, 2000, 20000, d.maxHeight),
   };
 }
 
@@ -172,6 +194,7 @@ function load() {
       cfg.onebotWatches = normalizeOnebotWatches(cfg.onebotWatches);
       cfg.extApi = normalizeExtApi(cfg.extApi);
       cfg.biliBots = normalizeBiliBots(cfg.biliBots);
+      cfg.biliComment = normalizeBiliComment(cfg.biliComment);
       if (!Array.isArray(cfg.ai.sessions)) cfg.ai.sessions = [];
       if (!Array.isArray(cfg.ai.keywords)) cfg.ai.keywords = [];
       return cfg;
@@ -181,6 +204,7 @@ function load() {
     webui: Object.assign({}, DEFAULTS.webui),
     onebot: Object.assign({}, DEFAULTS.onebot),
     ai: Object.assign({}, DEFAULTS.ai),
+    biliComment: Object.assign({}, DEFAULTS.biliComment),
     onebotWatches: {},
     extApi: {},
     biliBots: {},
@@ -229,5 +253,5 @@ module.exports = {
   load, save, ensureIdentity, CONFIG_FILE,
   // 按手表配置的归一化工具(webui 保存单个手表的 OneBot / 点播配置时要用)
   onebotWatchDefaults, normalizeOnebotWatch, normalizeExtApi,
-  biliWatchDefaults, normalizeBiliWatch, normalizeBiliBots,
+  biliWatchDefaults, normalizeBiliWatch, normalizeBiliBots, normalizeBiliComment,
 };

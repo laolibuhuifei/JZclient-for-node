@@ -14,6 +14,7 @@ const HELP = [
   'B 站点播用法：',
   '/搜索 关键词 —— 找视频，回前 10 条并标上序号（/点歌 也行，不带斜杠也行）',
   '/播放 序号 —— 把上一条搜索结果里的第 N 条发过来（单聊里直接回个数字也行）',
+  '/评论 —— 把刚点播的那个视频的评论区画成长图发过来（/评论 序号 也行）',
   '例：先发「/搜索 小猪佩奇」，再发「/播放 2」',
 ].join('\n');
 
@@ -39,6 +40,8 @@ function parseCommand(text) {
     if (m) return { kind: 'search', arg: String(m[1] || '').trim() };
     m = body.match(/^(?:播放|点播|play|p)(?:[\s:：]+([\s\S]*))?$/i);
     if (m) return { kind: 'play', arg: String(m[1] || '').trim() };
+    m = body.match(/^(?:评论|评论区|comment|cmt)(?:[\s:：]+([\s\S]*))?$/i);
+    if (m) return { kind: 'comments', arg: String(m[1] || '').trim() };
     if (/^(?:b站|bili|点播帮助|help)$/i.test(body)) return { kind: 'help' };
     return null;
   }

@@ -17,6 +17,7 @@ const LINK_PRESETS = require('./link-presets');
 const { startOneBot } = require('./onebot');
 const bili = require('./bilibili');
 const biliBot = require('./bili-bot');
+const biliComment = require('./bili-comment');
 const log = require('./logger');
 const SITE = require('./site.config');
 
@@ -691,6 +692,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   const biliChains = new Map();             // 同一会话串行, 免得连发 /播放 同时下几个大视频
   const biliQuota = new Map();              // watchId -> { day, n } 当天已点播条数
   const biliMissAt = new Map();             // chatKey -> 上次提醒「没开点播」的时间(防刷屏)
+  const biliLastPlay = new Map();           // `${watchId}|${chatKey}` -> { bvid, title, at } 供 /评论 用
 
   // 某块表实际生效的会话范围(手选优先, 没手选就按手表名自动匹配)
   function biliScopeKeys(wid) {
@@ -761,6 +763,44 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     catch (e) { log.warn('bili', '回复失败: ' + (e && e.message ? e.message : e)); }
   }
 
+  // ===== B 站评论长图 =====
+  // 抓评论 -> 排版 -> PNG。全程零依赖(见 bili-comment.js / canvas.js / png.js),
+  // 所以云端那些没有 canvas 模块的 Linux 实例也能跑。
+  //
+  // SESSDATA 是**账号级**的(B 站登录 Cookie), 全局一份, 不按手表分:
+  // 不填只能拿到热门的前 3 条评论(B 站对未登录请求就是这么回的), 填了才能翻页拿全。
+  function biliCommentCfg() {
+    return device.normalizeBiliComment(cfg.biliComment);
+  }
+
+  async function buildCommentImage(bvid) {
+    const cc = biliCommentCfg();
+    const data = await biliComment.fetchComments(bvid, {
+      maxComments: cc.maxComments,
+      sessdata: cc.sessdata,
+      subLimit: 3,
+    });
+    const r = biliComment.renderComments(data, { maxHeight: cc.maxHeight });
+    return { png: r.png, data, width: r.width, height: r.height, shown: r.shown };
+  }
+
+  // 长图落盘 -> 走 sendChat 的 image 分支(和网页上手动发图同一条路径) -> 删临时文件
+  async function sendCommentPng(key, cmt) {
+    const file = path.join(os.tmpdir(), 'bili_cmt_' + Date.now() + '_' + process.pid + '.png');
+    fs.writeFileSync(file, cmt.png);
+    try {
+      await sendChat({ key, kind: 'image', src: file });
+    } finally {
+      try { fs.unlinkSync(file); } catch (e) { /* ignore */ }
+    }
+  }
+
+  async function sendCommentImage(key, bvid) {
+    const cmt = await buildCommentImage(bvid);
+    await sendCommentPng(key, cmt);
+    return cmt;
+  }
+
   async function biliHandle(wid, key, cmd) {
     const c = device.normalizeBiliWatch((cfg.biliBots || {})[wid] || {});
     if (cmd.kind === 'help') { await biliReply(key, biliBot.HELP); return; }
@@ -788,6 +828,40 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       return;
     }
 
+    // /评论 [序号|BV号] —— 单独把评论区画成长图发过来(点播时已经自动发过一张)
+    if (cmd.kind === 'comments') {
+      const arg = String(cmd.arg || '').trim();
+      let bvid = '';
+      if (arg) {
+        if (/^BV[0-9A-Za-z]{8,12}$/i.test(arg)) {
+          bvid = arg;
+        } else {
+          const idx = Number(arg.replace(/[^0-9]/g, ''));
+          const hit2 = biliSearchCache.get(wid + '|' + key);
+          const it2 = (idx && hit2 && Date.now() - hit2.at <= BILI_SEARCH_TTL)
+            ? hit2.list.find((x) => x.index === idx) : null;
+          if (it2) bvid = it2.bvid;
+        }
+      } else {
+        const last = biliLastPlay.get(wid + '|' + key);
+        // 2 小时内点播过的那个视频；再久就当用户不记得了，让他重新搜
+        if (last && Date.now() - last.at < 2 * 3600e3) bvid = last.bvid;
+      }
+      if (!bvid) {
+        await biliReply(key, '还没有可用的视频。先 /搜索 关键词 → /播放 序号，之后直接发 /评论 就行');
+        return;
+      }
+      await biliReply(key, '[评论] 正在抓评论区并画长图，稍等…');
+      try {
+        const cmt = await sendCommentImage(key, bvid);
+        log.info('bili', `手表 ${wid} 已发出评论长图 ${cmt.width}x${cmt.height}（画了 ${cmt.shown} 条）`);
+      } catch (e) {
+        log.warn('bili', `手表 ${wid} 评论长图失败: ` + (e && e.message ? e.message : e));
+        await biliReply(key, '[评论] 生成失败：' + e.message);
+      }
+      return;
+    }
+
     // /播放 序号
     const n = Number(String(cmd.arg).replace(/[^0-9]/g, ''));
     if (!n) { await biliReply(key, '用法：/播放 序号（要先 /搜索 关键词）'); return; }
@@ -808,7 +882,20 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       + (segs > 1
         ? '这个视频 ' + bili.fmtDuration(item.duration) + '，超过 ' + VIDEO_MAX_SEC + ' 秒，'
           + '会切成约 ' + segs + ' 段发过来，稍等…'
-        : '正在下载，稍等一下…'));
+        : '正在下载，稍等一下…')
+      + (c.commentImage ? '\n先把评论区画成长图发过来。' : ''));
+
+    // 评论长图和视频下载**并行**跑: 抓评论只要几百毫秒, 别让它排在几分钟的下载后面。
+    // 抓失败不能影响看视频, 所以这里把错误吞成 null。
+    let cmtPromise = null;
+    if (c.commentImage) {
+      cmtPromise = buildCommentImage(item.bvid).catch((e) => {
+        log.warn('bili', `手表 ${wid} 抓第 ${n} 条评论失败(视频照发): `
+          + (e && e.message ? e.message : e));
+        return null;
+      });
+    }
+
     let v;
     try {
       v = await bili.downloadVideo(item, { maxDuration: c.maxDuration, maxBytes: c.maxBytes });
@@ -819,10 +906,29 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       await biliReply(key, '[点播] 下载失败：' + e.message);
       return;
     }
+
+    // 顺序要求: 先评论长图, 再视频。长图发失败也只是少一张图, 视频照发
+    if (cmtPromise) {
+      const cmt = await cmtPromise;
+      if (cmt) {
+        try {
+          await sendCommentPng(key, cmt);
+          log.info('bili', `手表 ${wid} 已发出评论长图 ${cmt.width}x${cmt.height}（画了 ${cmt.shown} 条）`);
+        } catch (e) {
+          log.warn('bili', '评论长图发送失败(视频照发): ' + (e && e.message ? e.message : e));
+        }
+      }
+    }
+
     try {
       // 走 sendChat 的 video 分支: 上传 -> buildVideo -> 发送, 和网页上手动发视频同一条路径
       await sendChat({ key, kind: 'video', src: v.file, duration: v.duration });
       log.info('bili', `手表 ${wid} 点播第 ${n} 条已发出 ${Math.round(v.size / 1024)}KB ${v.quality}`);
+      biliLastPlay.set(wid + '|' + key, { bvid: item.bvid, title: item.title, at: Date.now() });
+      if (biliLastPlay.size > 200) {
+        const first = biliLastPlay.keys().next();
+        if (!first.done) biliLastPlay.delete(first.value);
+      }
     } catch (e) {
       biliBot.refundQuota(biliQuota, wid);
       await biliReply(key, '[点播] 发送失败：' + e.message);
@@ -877,9 +983,13 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           maxDuration: c.maxDuration,
           maxBytes: c.maxBytes,
           maxPerDay: c.maxPerDay,
+          commentImage: c.commentImage,
         };
       }),
       targets: targets.map((t) => ({ key: t.key, name: t.name, type: t.type })),
+      // 评论长图的全局设置。sessdata 是敏感 Cookie, 界面上用密码框显示, 但既然本机
+      // 服务已经要访问令牌了, 这里照实返回, 否则用户改不了自己填过的值
+      comment: biliCommentCfg(),
     };
   }
 
@@ -2215,6 +2325,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         if (b.maxDuration != null) c.maxDuration = clampInt(b.maxDuration, 0, 7200, c.maxDuration);
         if (b.maxBytes != null) c.maxBytes = clampInt(b.maxBytes, 0, 100 * 1024 * 1024, c.maxBytes);
         if (b.maxPerDay != null) c.maxPerDay = clampInt(b.maxPerDay, 0, 999, c.maxPerDay);
+        if (b.commentImage != null) c.commentImage = !!b.commentImage;
         if (b.targets != null) {
           const arr = Array.isArray(b.targets) ? b.targets : [];
           c.targets = arr.map((x) => String(x)).filter((x) => /^[sg]:.+/.test(x));
@@ -2233,6 +2344,43 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         if (!kw) throw new Error('缺少搜索关键词');
         const list = await bili.search(kw, { limit: BILI_MAX_RESULTS });
         return ok(res, { keyword: kw, list });
+      }
+
+      // 评论长图的全局设置(账号级的 SESSDATA + 抓多少条 / 图多高)
+      if (parts[2] === 'comment' && !parts[3]) {
+        if (req.method === 'GET') return ok(res, biliCommentCfg());
+        if (req.method === 'POST') {
+          const b = await readBody(req);
+          const cur = biliCommentCfg();
+          cfg.biliComment = device.normalizeBiliComment({
+            sessdata: b.sessdata != null ? String(b.sessdata) : cur.sessdata,
+            maxComments: b.maxComments != null ? b.maxComments : cur.maxComments,
+            maxHeight: b.maxHeight != null ? b.maxHeight : cur.maxHeight,
+          });
+          device.save(cfg);
+          log.info('bili', '评论长图设置已更新（'
+            + (cfg.biliComment.sessdata ? '已填 SESSDATA' : '没填 SESSDATA，只能取热门评论') + '）');
+          return ok(res, biliCommentCfg());
+        }
+      }
+
+      // 预览: 网页上填个 BV 号就能直接看到长图长什么样, 不用真去手表上点播一遍
+      // 直接回 PNG(不是 JSON), 前端用 <img src> 打开就行
+      if (parts[2] === 'comment' && parts[3] === 'preview' && req.method === 'GET') {
+        const bvid = String(query.get('bvid') || '').trim();
+        if (!/^BV[0-9A-Za-z]{8,12}$/.test(bvid)) throw new Error('视频编号不对（要 BV 开头的那种）');
+        const cmt = await buildCommentImage(bvid);
+        log.info('bili', `预览评论长图 ${bvid}：${cmt.width}x${cmt.height}（画了 ${cmt.shown} 条）`);
+        res.writeHead(200, {
+          'Content-Type': 'image/png',
+          'Content-Length': cmt.png.length,
+          'Cache-Control': 'no-store',
+          // 顺手把统计塞进响应头, 前端不用再多调一次接口
+          'X-Comment-Shown': String(cmt.shown),
+          'X-Comment-Total': String(cmt.data.total || 0),
+          'X-Comment-Complete': cmt.data.complete ? '1' : '0',
+        });
+        return res.end(cmt.png);
       }
 
       throw new Error('接口不存在');

@@ -212,6 +212,20 @@ async function search(keyword, opts) {
   return out;
 }
 
+// ---------- 视频信息 ----------
+
+// 取标题 / UP主 / 播放量 / 评论数, 评论长图的表头要用; 顺便换出 aid(评论接口只认 aid)
+async function getVideoInfo(bvid) {
+  const cookie = await getCookie();
+  const r = await httpJson(API + '/x/web-interface/view?bvid=' + encodeURIComponent(bvid), {
+    headers: { Cookie: cookie },
+  });
+  if (!r || r.code !== 0) {
+    throw new Error('取视频信息失败：' + (r ? (r.message || ('code=' + r.code)) : '无响应'));
+  }
+  return r.data || {};
+}
+
 // ---------- 播放地址 ----------
 
 async function getPages(bvid) {
@@ -382,7 +396,7 @@ function cleanup(v) {
 }
 
 module.exports = {
-  search, getPages, getPlayUrl, downloadVideo, cleanup,
-  parseDuration, fmtDuration, cleanText, wbiSign,
-  QN_NAME, REFERER,
+  search, getPages, getPlayUrl, downloadVideo, cleanup, getVideoInfo,
+  parseDuration, fmtDuration, cleanText, wbiSign, getMixinKey, getCookie, httpJson,
+  QN_NAME, REFERER, API, UA,
 };

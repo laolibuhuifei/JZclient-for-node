@@ -999,7 +999,8 @@ module.exports = {
 完整签名、参数限制、`jz.fetch` / `jz.store` / `jz.timers` 的细节，
 以及平台接口逃生舱（`jz.watches.read/write`）的方法名规则，
 见 **[插件开发文档.md](插件开发文档.md#6-jz-对象完全参考)**。
-官网也有一份精简版：[插件章节](https://jzd.laolibuhuifei.com/docs.html#plugin)。
+官网在线版：[插件开发文档](https://jzd.laolibuhuifei.com/plugin.html)（同一份内容，带目录和搜索锚点）·
+[快速上手](https://jzd.laolibuhuifei.com/docs.html#plugin)。
 
 ### 给插件加自己的界面
 

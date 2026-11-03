@@ -1,0 +1,32 @@
+{
+  "id": "watch-stats",
+  "name": "手表数据",
+  "version": "1.0.0",
+  "author": "laolibuhuifei",
+  "description": "把每块手表的步数、运动、睡眠、心率、体温整理成一个自己的页面：上面看今天，下面看最近几天。只读数据，不改任何设置。",
+  "homepage": "https://github.com/laolibuhuifei/JZclient-for-node",
+  "main": "main.js",
+  "cover": "cover.png",
+  "icon": "chart",
+  "permissions": ["watch.read"],
+  "config": [
+    {
+      "key": "days",
+      "label": "最近几天",
+      "type": "number",
+      "default": 7,
+      "hint": "1 到 30。每天要调 5 个接口，天数越多第一次打开越慢。"
+    },
+    {
+      "key": "cacheHours",
+      "label": "历史数据缓存",
+      "type": "number",
+      "default": 24,
+      "hint": "过去的日子多久重新拉一次（小时）。当天的数据永远现拉，不缓存。"
+    }
+  ],
+  "ui": {
+    "title": "手表数据",
+    "entry": "ui/index.html"
+  }
+}

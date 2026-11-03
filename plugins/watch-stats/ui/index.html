@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>手表数据</title>
+<style>
+/* 插件界面跑在 iframe 里，样式得自己带一份。
+   变量名和 WebUI 保持一致，父页面把 data-theme 塞过来就能自动跟上深浅色。 */
+:root{
+  --primary:#0b57d0; --on-primary:#fff;
+  --primary-container:#d3e3fd; --on-primary-container:#041e49;
+  --surface:#fdfcff; --on-surface:#1a1c1e;
+  --card:#f4f3fa; --surface-variant:#e1e2ec; --on-surface-variant:#43474e;
+  --outline-variant:#d6d8e0; --error:#ba1a1a; --success:#1a7f37;
+  --bar:#0b57d0; --bar-weak:#c3d5f5;
+}
+:root[data-theme="dark"]{
+  --primary:#a8c7fa; --on-primary:#062e6f;
+  --primary-container:#0842a0; --on-primary-container:#d3e3fd;
+  --surface:#111318; --on-surface:#e2e2e9;
+  --card:#1d2025; --surface-variant:#2b2f36; --on-surface-variant:#c4c6d0;
+  --outline-variant:#3a3d44; --error:#ffb4ab; --success:#7bd88f;
+  --bar:#a8c7fa; --bar-weak:#2f3d55;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--surface); color:var(--on-surface);
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+  font-size:14px; line-height:1.6; -webkit-font-smoothing:antialiased;
+  padding:16px 16px 40px;
+}
+.wrap{max-width:680px;margin:0 auto}
+h1{font-size:18px;margin:0 0 2px}
+.sub{color:var(--on-surface-variant);font-size:12.5px;margin-bottom:14px;min-height:19px}
+.card{
+  background:var(--card); border-radius:16px; padding:16px;
+  margin-bottom:14px; border:1px solid var(--outline-variant);
+}
+.card > h2{font-size:13px;margin:0 0 12px;color:var(--on-surface-variant);font-weight:600;letter-spacing:.02em}
+.card-head{display:flex;align-items:baseline;gap:10px;margin-bottom:12px}
+.card-head h2{font-size:13px;margin:0;color:var(--on-surface-variant);font-weight:600;letter-spacing:.02em;flex:1}
+.link{color:var(--primary);font-size:12.5px;cursor:pointer;background:none;border:none;padding:0;font-family:inherit}
+.link:hover{text-decoration:underline}
+
+/* 手表切换 */
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.chip{
+  padding:6px 13px;border-radius:999px;font-size:13px;cursor:pointer;
+  background:var(--surface-variant);color:var(--on-surface-variant);
+  border:1px solid transparent;font-family:inherit;
+}
+.chip.on{background:var(--primary-container);color:var(--on-primary-container);border-color:var(--primary);font-weight:600}
+
+/* 指标格 */
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:4px}
+.stat{background:var(--surface);border:1px solid var(--outline-variant);border-radius:12px;padding:11px 12px}
+.stat b{display:block;font-size:21px;line-height:1.25;font-variant-numeric:tabular-nums;font-weight:700}
+.stat b i{font-size:12px;font-style:normal;font-weight:500;color:var(--on-surface-variant);margin-left:2px}
+.stat span{display:block;font-size:12px;color:var(--on-surface-variant);margin-top:1px}
+.stat.na b{color:var(--on-surface-variant);font-weight:500;font-size:17px}
+
+/* 明细分段 */
+.sect{border-top:1px solid var(--outline-variant);margin-top:14px;padding-top:13px}
+.sect:first-child{border-top:none;margin-top:0;padding-top:0}
+.sect h3{font-size:12.5px;margin:0 0 8px;color:var(--on-surface-variant);font-weight:600}
+.kv{display:flex;gap:10px;padding:5px 0;font-size:13.5px}
+.kv .k{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kv .v{color:var(--on-surface-variant);font-variant-numeric:tabular-nums;text-align:right}
+.note{font-size:12.5px;color:var(--on-surface-variant);line-height:1.65;margin:0 0 6px}
+.note:last-child{margin-bottom:0}
+.pills{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.pill{font-size:12px;padding:3px 9px;border-radius:8px;background:var(--surface-variant);color:var(--on-surface-variant);font-variant-numeric:tabular-nums}
+.pill.warn{background:var(--primary-container);color:var(--on-primary-container)}
+
+/* 柱状图 */
+.trend{margin-bottom:18px}
+.trend:last-child{margin-bottom:0}
+.trend-head{display:flex;align-items:baseline;gap:8px;margin-bottom:6px}
+.trend-head .t{font-size:12.5px;color:var(--on-surface-variant);flex:1}
+.trend-head .a{font-size:12.5px;color:var(--on-surface-variant);font-variant-numeric:tabular-nums}
+.bars{display:flex;gap:4px;align-items:flex-end}
+.bar{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;border-radius:8px;padding:3px 0 2px;background:none;border:none;font-family:inherit;color:inherit}
+.bar:hover{background:var(--surface-variant)}
+.bar.on{background:var(--primary-container)}
+.bar b{font-size:10.5px;font-weight:600;color:var(--on-surface-variant);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.bar .track{width:100%;height:62px;display:flex;align-items:flex-end;justify-content:center}
+.bar .track i{display:block;width:78%;max-width:22px;border-radius:4px 4px 2px 2px;background:var(--bar);min-height:0}
+.bar.na .track i{background:var(--bar-weak);height:3px !important;opacity:.6}
+.bar.on .track i{background:var(--primary)}
+.bar span{font-size:10.5px;color:var(--on-surface-variant);font-variant-numeric:tabular-nums;white-space:nowrap}
+
+/* 其它 */
+.empty{color:var(--on-surface-variant);font-size:13px;padding:6px 0}
+.err{color:var(--error);font-size:12.5px;line-height:1.7}
+.foot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:16px}
+.btn{padding:9px 18px;border-radius:12px;font:inherit;font-weight:600;cursor:pointer;background:var(--primary);color:var(--on-primary);border:none}
+.btn.tonal{background:var(--primary-container);color:var(--on-primary-container)}
+.btn:disabled{opacity:.55;cursor:default}
+.hint{color:var(--on-surface-variant);font-size:12px}
+.skel{height:14px;border-radius:7px;background:var(--surface-variant);margin-bottom:9px;animation:sk 1.2s ease-in-out infinite}
+@keyframes sk{0%,100%{opacity:.5}50%{opacity:1}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>手表数据</h1>
+  <div class="sub" id="sub">读取中…</div>
+
+  <div class="chips" id="watchBar" hidden></div>
+
+  <div class="card" id="dayCard">
+    <div class="skel" style="width:40%"></div>
+    <div class="skel" style="width:100%;height:64px"></div>
+    <div class="skel" style="width:70%"></div>
+  </div>
+
+  <div class="card" id="trendCard" hidden></div>
+
+  <div class="foot">
+    <button class="btn tonal" id="refresh">重新读取</button>
+    <span class="hint" id="footMsg"></span>
+  </div>
+</div>
+
+<script>
+(function(){
+  // 父页面会注入 JZ_PLUGIN（插件 id 和接口前缀）。直接双击打开这个文件时没有，
+  // 就按目录名猜一个，至少不至于整页白屏。
+  var P = window.JZ_PLUGIN || { id: 'watch-stats', api: '/api/plugin/watch-stats/api' };
+  if (P.theme) document.documentElement.setAttribute('data-theme', P.theme);
+
+  var $ = function(s){ return document.querySelector(s); };
+
+  // days: 日期数组（从旧到新）
+  // byDate: { '2026-11-04': 那天的数据 }
+  var S = { watches: [], watchId: '', dates: [], byDate: {}, sel: '', loading: {} };
+
+  // 趋势要画的指标。scale='range' 表示数值本身都在一个小范围里（心率、体温），
+  // 从 0 起画的话柱子一样高，看不出变化，所以改成按当天的最小~最大拉伸。
+  var TRENDS = [
+    { key:'steps',       title:'步数',     scale:'zero',  fmt:fmtSteps },
+    // 运动时长存的是秒，趋势图上按分钟看（pick 里已经换成分钟，所以 fmt 用 fmtMin）
+    { key:'activeSec',   title:'运动时长', scale:'zero',  fmt:fmtMin, pick:function(m){ return m.activeSec == null ? null : Math.round(m.activeSec / 60); } },
+    { key:'calorie',     title:'消耗',     scale:'zero',  fmt:fmtCal },
+    { key:'sleepMin',    title:'睡眠',     scale:'zero',  fmt:fmtMin },
+    { key:'heartRateAvg',title:'平均心率', scale:'range', fmt:fmtInt },
+    { key:'temperatureMax', title:'最高体温', scale:'range', fmt:fmtTemp }
+  ];
+
+  // ---------- 小工具 ----------
+
+  function esc(v){
+    return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+
+  function fmtSteps(v){
+    if (v == null) return '—';
+    v = Math.round(v);
+    return v >= 10000 ? (v / 10000).toFixed(1) + '万' : String(v);
+  }
+  function fmtInt(v){ return v == null ? '—' : String(Math.round(v)); }
+  function fmtCal(v){ return v == null ? '—' : String(Math.round(v)); }
+  function fmtTemp(v){ return v == null ? '—' : Number(v).toFixed(1); }
+  function fmtMin(v){
+    if (v == null) return '—';
+    v = Math.round(v);
+    if (v < 60) return v + '分';
+    var h = Math.floor(v / 60), m = v % 60;
+    return h + '时' + (m ? m + '分' : '');
+  }
+
+  function fmtClock(ts){
+    var n = Number(ts);
+    if (!isFinite(n) || !n) return '';
+    if (n < 1e12) n = n * 1000;
+    var d = new Date(n);
+    var p = function(x){ return String(x).padStart(2, '0'); };
+    return p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function md(dateStr){
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ''));
+    if (!m) return dateStr || '';
+    return Number(m[2]) + '月' + Number(m[3]) + '日';
+  }
+  function shortDate(dateStr){
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ''));
+    if (!m) return dateStr || '';
+    return Number(m[2]) + '/' + Number(m[3]);
+  }
+  var WEEK = ['周日','周一','周二','周三','周四','周五','周六'];
+  function weekday(dateStr){
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ''));
+    if (!m) return '';
+    return WEEK[new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getDay()];
+  }
+
+  function metric(rec, t){
+    if (!rec) return null;
+    var m = rec.metrics || {};
+    if (t.pick) return t.pick(m);
+    var v = m[t.key];
+    return v === undefined ? null : v;
+  }
+
+  // ---------- 请求 ----------
+
+  async function call(path, opts){
+    var r = await fetch(P.api + path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}));
+    var t = await r.text();
+    var j = null;
+    try { j = JSON.parse(t); } catch (e) {}
+    if (!r.ok) throw new Error((j && (j.error || j.message)) || ('HTTP ' + r.status));
+    return j;
+  }
+
+  // ---------- 渲染：指标格 ----------
+
+  function statBox(label, main, unit, na){
+    return '<div class="stat' + (na ? ' na' : '') + '"><b>' + esc(main)
+      + (unit ? '<i>' + esc(unit) + '</i>' : '') + '</b><span>' + esc(label) + '</span></div>';
+  }
+
+  function statsHtml(rec){
+    var m = (rec && rec.metrics) || {};
+    var steps = m.steps == null ? null : m.steps;
+    var active = m.activeSec == null ? null : Math.round(m.activeSec / 60);
+    var cal = m.calorie;
+    var sleep = m.sleepMin;
+    var hr = m.heartRateAvg;
+    var temp = m.temperatureLast != null ? m.temperatureLast : m.temperatureMax;
+
+    var h = '<div class="stats">';
+    h += statBox('步数', steps == null ? '暂无' : fmtSteps(steps), steps == null ? '' : '步', steps == null);
+    h += statBox('运动', active == null ? '暂无' : fmtMin(active), '', active == null);
+    h += statBox('消耗', cal == null ? '暂无' : fmtCal(cal), cal == null ? '' : '千卡', cal == null);
+    h += statBox('睡眠', sleep == null ? '暂无' : fmtMin(sleep), '', sleep == null);
+    h += statBox('平均心率', hr == null ? '暂无' : String(hr), hr == null ? '' : '次/分', hr == null);
+    h += statBox('体温', temp == null ? '暂无' : fmtTemp(temp), temp == null ? '' : '°C', temp == null);
+    h += '</div>';
+    return h;
+  }
+
+  // ---------- 渲染：明细 ----------
+
+  function sportSect(rec){
+    var list = rec.sport || [];
+    if (!list.length) return '';
+    var rows = list.map(function(x){
+      var name = x.name || (x.type ? '运动类型 ' + x.type : '运动');
+      var bits = [];
+      if (x.seconds) bits.push(Math.round(x.seconds / 60) + ' 分钟');
+      if (x.calorie) bits.push(Math.round(x.calorie) + ' 千卡');
+      if (x.count > 1) bits.push(x.count + ' 次');
+      return '<div class="kv"><span class="k">' + esc(name) + '</span><span class="v">'
+        + esc(bits.join(' · ') || '—') + '</span></div>';
+    }).join('');
+    return '<div class="sect"><h3>运动明细</h3>' + rows + '</div>';
+  }
+
+  function sleepSect(rec){
+    var s = rec.sleep;
+    if (!s) return '';
+    var bits = [];
+    if (s.deepMin) bits.push('深睡 ' + fmtMin(s.deepMin));
+    if (s.lightMin) bits.push('浅睡 ' + fmtMin(s.lightMin));
+    if (s.wakeMin) bits.push('醒着 ' + fmtMin(s.wakeMin));
+    var has = s.text || s.totalMin || bits.length;
+    if (!has) return '';
+    var h = '<div class="sect"><h3>睡眠</h3>';
+    if (s.text) h += '<p class="note">' + esc(s.text) + '</p>';
+    if (s.totalMin) {
+      var range = (s.start && s.end) ? fmtClock(s.start) + ' → ' + fmtClock(s.end) : '';
+      h += '<div class="kv"><span class="k">总时长' + (range ? '（' + esc(range) + '）' : '') + '</span>'
+        + '<span class="v">' + esc(fmtMin(s.totalMin)) + '</span></div>';
+    }
+    if (bits.length) h += '<div class="pills">' + bits.map(function(b){
+      return '<span class="pill">' + esc(b) + '</span>';
+    }).join('') + '</div>';
+    h += '</div>';
+    return h;
+  }
+
+  function heartSect(rec){
+    var h = rec.heartRate;
+    if (!h || (!h.count && h.avg == null)) return '';
+    var bits = [];
+    if (h.avg != null) bits.push('平均 ' + h.avg);
+    if (h.max != null) bits.push('最高 ' + h.max);
+    if (h.min != null) bits.push('最低 ' + h.min);
+    var h2 = '<div class="sect"><h3>心率</h3>';
+    h2 += '<div class="pills">' + bits.map(function(b){
+      return '<span class="pill">' + esc(b) + '</span>';
+    }).join('') + (h.count ? '<span class="pill">共 ' + h.count + ' 条记录</span>' : '') + '</div>';
+    if (h.points && h.points.length) {
+      var last = h.points.slice(-6).reverse().map(function(p){
+        return fmtClock(p.t) + ' ' + p.v;
+      }).filter(Boolean);
+      if (last.length) h2 += '<p class="note" style="margin-top:8px">最近：' + esc(last.join(' · ')) + '</p>';
+    }
+    h2 += '</div>';
+    return h2;
+  }
+
+  function tempSect(rec){
+    var t = rec.temperature;
+    if (!t || !t.count) return '';
+    var bits = [];
+    if (t.max != null) bits.push('最高 ' + fmtTemp(t.max) + '°C');
+    if (t.min != null) bits.push('最低 ' + fmtTemp(t.min) + '°C');
+    var h = '<div class="sect"><h3>体温</h3>';
+    h += '<div class="pills">' + bits.map(function(b){
+      return '<span class="pill">' + esc(b) + '</span>';
+    }).join('') + '<span class="pill">共 ' + t.count + ' 次</span></div>';
+    if (t.points && t.points.length) {
+      var last = t.points.slice(-5).reverse().map(function(p){
+        return (p.t ? fmtClock(p.t) + ' ' : '') + fmtTemp(p.v) + '°C';
+      });
+      h += '<p class="note" style="margin-top:8px">最近：' + esc(last.join(' · ')) + '</p>';
+    }
+    if (t.explain) h += '<p class="note">' + esc(t.explain) + '</p>';
+    h += '</div>';
+    return h;
+  }
+
+  function summarySect(rec){
+    var list = rec.summary || [];
+    if (!list.length) return '';
+    return '<div class="sect"><h3>健康摘要</h3>' + list.map(function(t){
+      return '<p class="note">' + esc(t) + '</p>';
+    }).join('') + '</div>';
+  }
+
+  function dayHtml(rec, dateStr){
+    var isToday = dateStr === S.today;
+    var title = isToday ? '今天 · ' + md(dateStr) : md(dateStr) + ' · ' + weekday(dateStr);
+    var h = '<div class="card-head"><h2>' + esc(title) + '</h2>';
+    if (!isToday) h += '<button class="link" data-today="1">回到今天</button>';
+    h += '</div>';
+
+    if (S.loading[dateStr]) {
+      h += '<div class="skel" style="width:100%;height:64px"></div>';
+      h += '<div class="skel" style="width:60%;margin-top:12px"></div>';
+      return h;
+    }
+    if (!rec) {
+      h += '<div class="empty">还没有取到这一天的数据。</div>';
+      return h;
+    }
+
+    h += statsHtml(rec);
+    var body = sportSect(rec) + sleepSect(rec) + heartSect(rec) + tempSect(rec) + summarySect(rec);
+    if (body) h += body;
+    else if (!rec.errors || !rec.errors.length) h += '<div class="sect"><div class="empty">这一天没有记录到数据。</div></div>';
+
+    if (rec.errors && rec.errors.length) {
+      h += '<div class="sect"><h3>没读到的部分</h3><div class="err">'
+        + rec.errors.map(esc).join('<br>') + '</div></div>';
+    }
+    return h;
+  }
+
+  // ---------- 渲染：趋势 ----------
+
+  function barHeights(values, scale){
+    var nums = values.filter(function(v){ return v != null; });
+    if (!nums.length) return values.map(function(){ return 0; });
+    if (scale === 'range') {
+      var lo = Math.min.apply(null, nums);
+      var hi = Math.max.apply(null, nums);
+      if (hi - lo < 0.5) return values.map(function(v){ return v == null ? 0 : 62; });
+      return values.map(function(v){
+        return v == null ? 0 : Math.round(34 + (v - lo) / (hi - lo) * 66);
+      });
+    }
+    var max = Math.max.apply(null, nums);
+    if (max <= 0) return values.map(function(){ return 0; });
+    return values.map(function(v){ return v == null ? 0 : Math.max(5, Math.round(v / max * 100)); });
+  }
+
+  function trendHtml(t){
+    var recs = S.dates.map(function(d){ return S.byDate[d] || null; });
+    var values = recs.map(function(r){ return metric(r, t); });
+    var heights = barHeights(values, t.scale);
+
+    var nums = values.filter(function(v){ return v != null; });
+    var avg = null;
+    if (nums.length) {
+      var sum = 0;
+      nums.forEach(function(v){ sum += v; });
+      avg = sum / nums.length;
+    }
+
+    // 天数多的时候柱子上方的数字会挤成一团，就只在选中那天显示
+    var showTop = S.dates.length <= 10;
+
+    var bars = S.dates.map(function(d, i){
+      var v = values[i];
+      var cls = 'bar' + (d === S.sel ? ' on' : '') + (v == null ? ' na' : '');
+      var top = (v == null) ? '—' : (showTop || d === S.sel ? t.fmt(v) : '');
+      return '<button class="' + cls + '" data-date="' + esc(d) + '" title="' + esc(md(d) + ' ' + t.title + '：' + t.fmt(v)) + '">'
+        + '<b>' + esc(top) + '</b>'
+        + '<span class="track"><i style="height:' + heights[i] + '%"></i></span>'
+        + '<span>' + esc(shortDate(d)) + '</span>'
+        + '</button>';
+    }).join('');
+
+    return '<div class="trend">'
+      + '<div class="trend-head"><span class="t">' + esc(t.title) + '</span>'
+      + '<span class="a">' + (avg == null ? '暂无数据' : '平均 ' + esc(t.fmt(avg))) + '</span></div>'
+      + '<div class="bars">' + bars + '</div></div>';
+  }
+
+  function trendCardHtml(){
+    var box = $('#trendCard');
+    if (S.dates.length < 2) { box.hidden = true; return; }
+    box.hidden = false;
+    box.innerHTML = '<h2>最近 ' + S.dates.length + ' 天</h2>'
+      + TRENDS.map(trendHtml).join('');
+  }
+
+  // ---------- 主流程 ----------
+
+  function renderWatchBar(){
+    var bar = $('#watchBar');
+    if (S.watches.length < 2) { bar.hidden = true; bar.innerHTML = ''; return; }
+    bar.hidden = false;
+    bar.innerHTML = S.watches.map(function(w){
+      return '<button class="chip' + (w.watchId === S.watchId ? ' on' : '') + '" data-watch="'
+        + esc(w.watchId) + '">' + esc(w.name || w.watchId) + '</button>';
+    }).join('');
+  }
+
+  function renderDay(){
+    $('#dayCard').innerHTML = dayHtml(S.byDate[S.sel] || null, S.sel);
+  }
+
+  function renderSub(){
+    var w = null;
+    for (var i = 0; i < S.watches.length; i++) if (S.watches[i].watchId === S.watchId) w = S.watches[i];
+    if (!w) { $('#sub').textContent = ''; return; }
+    var bits = [w.name || w.watchId];
+    if (w.model) bits.push(w.model);
+    if (w.battery != null && w.battery >= 0) bits.push('电量 ' + Math.round(w.battery) + '%');
+    bits.push(w.online ? '在线' : '离线');
+    $('#sub').textContent = bits.join(' · ');
+  }
+
+  function renderAll(){
+    renderSub();
+    renderWatchBar();
+    renderDay();
+    trendCardHtml();
+  }
+
+  // 一天一天地拉。同时最多两个请求，别把家长端接口打太猛
+  async function loadDays(list){
+    var queue = list.slice();
+    var running = 0;
+    var done = 0;
+    var total = queue.length;
+
+    function setFoot(){
+      $('#footMsg').textContent = total ? '读取中 ' + done + '/' + total : '';
+    }
+    setFoot();
+
+    await new Promise(function(resolve){
+      function pump(){
+        if (!queue.length && running === 0) return resolve();
+        while (running < 2 && queue.length) {
+          var date = queue.shift();
+          running++;
+          S.loading[date] = true;
+          call('/day?watchId=' + encodeURIComponent(S.watchId) + '&date=' + encodeURIComponent(date))
+            .then(function(rec){
+              S.byDate[date] = rec;
+            })
+            .catch(function(e){
+              S.byDate[date] = { date: date, metrics: {}, errors: ['读取失败：' + e.message], sport: [], summary: [] };
+            })
+            .then(function(){
+              delete S.loading[date];
+              running--;
+              done++;
+              setFoot();
+              // 只重画受影响的块，别整页闪
+              if (date === S.sel) renderDay();
+              trendCardHtml();
+              pump();
+            });
+        }
+      }
+      pump();
+    });
+    setFoot();
+  }
+
+  async function boot(force){
+    $('#footMsg').textContent = '';
+    var st = await call('/status');
+    S.today = st.today;
+    S.watches = st.watches || [];
+    S.dates = st.dates || [];
+    S.cacheHours = st.cacheHours;
+
+    if (!S.watches.length) {
+      $('#sub').textContent = '';
+      $('#dayCard').innerHTML = '<div class="empty">还没有绑定手表。先在家长端绑定一块手表，这里就有数据了。</div>';
+      $('#trendCard').hidden = true;
+      return;
+    }
+
+    // 手表换了就把已有数据清掉，免得串台
+    var exists = S.watches.some(function(w){ return w.watchId === S.watchId; });
+    if (!exists) {
+      S.watchId = S.watches[0].watchId;
+      S.byDate = {};
+    }
+    if (!S.sel || S.dates.indexOf(S.sel) < 0) S.sel = S.today;
+
+    S.loading = {};
+    renderAll();
+
+    // 已经有缓存的先画出来，剩下的再补
+    var need = S.dates.filter(function(d){ return !S.byDate[d]; });
+    if (force) {
+      need = S.dates.slice();
+      S.byDate = {};
+      renderAll();
+      try { await call('/refresh', { method: 'POST', body: JSON.stringify({ watchId: S.watchId }) }); } catch (e) {}
+    }
+    await loadDays(need);
+    renderAll();
+  }
+
+  // ---------- 交互 ----------
+
+  document.addEventListener('click', function(e){
+    var t = e.target.closest ? e.target.closest('[data-date],[data-watch],[data-today]') : null;
+    if (!t) return;
+
+    if (t.hasAttribute('data-today')) { S.sel = S.today; renderAll(); return; }
+
+    if (t.hasAttribute('data-watch')) {
+      var wid = t.getAttribute('data-watch');
+      if (wid === S.watchId) return;
+      S.watchId = wid;
+      S.byDate = {};
+      S.sel = S.today;
+      renderAll();
+      loadDays(S.dates.slice()).then(renderAll);
+      return;
+    }
+
+    var date = t.getAttribute('data-date');
+    if (date) { S.sel = date; renderDay(); trendCardHtml(); }
+  });
+
+  $('#refresh').onclick = async function(){
+    var btn = this;
+    btn.disabled = true;
+    try {
+      await boot(true);
+      $('#footMsg').textContent = '已刷新';
+    } catch (e) {
+      $('#footMsg').textContent = '刷新失败：' + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  boot(false).catch(function(e){
+    $('#dayCard').innerHTML = '<div class="err">读取失败：' + esc(e.message) + '</div>';
+    $('#sub').textContent = '';
+  });
+})();
+</script>
+</body>
+</html>

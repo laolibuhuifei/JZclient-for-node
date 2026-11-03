@@ -49,6 +49,7 @@
 - [型号能力门控](#型号能力门控)
 - [AI 自动回复](#ai-自动回复)
 - [微聊 B 站点播](#微聊-b-站点播)
+- [插件系统](#插件系统)
 - [数据与隐私](#数据与隐私)
 - [已知限制](#已知限制)
 - [常见问题](#常见问题)
@@ -72,6 +73,7 @@
 | 增强能力 | 型号能力门控、后台 IM 常驻监听、自定义字体与背景、AI 自动回复、WebUI 实时日志（SSE 推送）、本地配置持久化、升级不覆盖已有数据 |
 | B 站点播 | 微聊里 `/搜索` 找视频（**回一张带封面的结果图**）、`/播放 序号` 下载并发送（超过 30 秒自动切段）、**点播时先把评论区画成长图发过来**（`/评论` 可单独再发），**按手表分开配置（开关 / 会话范围 / 时长·大小·每日限额）** |
 | 公告 | 主页置顶公告卡、独立公告页、Markdown 渲染、图片查看大图、离线缓存降级 |
+| 插件 | **用 JS 写插件**：zip 上传或直接放目录、`plugin.json` 声明（简介/作者/封面/权限/配置项）、可调聊天与手表接口、**可申请导航栏界面**、独立沙箱与超时保护 |
 
 ## 目录结构
 
@@ -102,6 +104,8 @@ JZClientForNode/
 │   ├── ttf.js                 # TrueType/TTC 字形轮廓解析（评论长图用）
 │   ├── canvas.js              # 极简画布：字形栅格化 + 文字/矩形/圆形/位图绘制
 │   ├── png.js                 # PNG 编解码器（零依赖）
+│   ├── zip.js                 # ZIP 解压（插件安装用，零依赖）
+│   ├── plugin.js              # 插件管理器：扫描/安装/沙箱/注入 API
 │   ├── mask.js                # 日志脱敏
 │   ├── logger.js              # 分级彩色日志
 │   ├── webui.js               # 本地 HTTP 服务
@@ -109,11 +113,14 @@ JZClientForNode/
 │   ├── emoji_preset.json      # 表情清单
 │   ├── site.js                # 配置加载器
 │   └── site.config.js         # 服务端地址与客户端参数
+├── plugins/
+│   └── watch-daily/           # 内置示例插件（手表日报）
 ├── .gitattributes
 ├── .gitignore
 ├── LICENSE
 ├── package.json
-└── README.md
+├── README.md
+└── 插件开发文档.md             # 插件开发完整参考（字段/接口/沙箱/调试/FAQ）
 ```
 
 ## 环境要求
@@ -862,11 +869,235 @@ WebUI 每 30 秒同步一次电量与上报时间，不需要手动刷新页面�
 
 > 仅用于个人学习与家庭自用。视频版权归原作者与 B 站所有，请勿用于分发或商业用途。
 
+## 插件系统
+
+用 JavaScript 写一个小插件，就能让程序多出你自己想要的能力：定时发日报、把消息转发到别处、
+把手表数据存下来做统计、给 WebUI 加一个自己的管理页面……插件能调聊天接口和手表接口，
+不需要改主程序，也不需要重新打包。
+
+> 📖 这一节是快速上手。完整参考（声明文件全字段、`jz` 对象每个方法、
+> 沙箱里能用什么、外部界面的通信协议、调试与常见报错、FAQ）见
+> **[插件开发文档.md](插件开发文档.md)**。
+
+### 装插件
+
+两种方式，效果一样：
+
+**1. 上传 zip**（推荐）
+
+WebUI →「我的」→「插件」→「上传插件（.zip）」。压缩包里要有 `plugin.json` 和入口 js，
+根目录直接是插件，或者外面多套一层文件夹都认。
+
+**2. 直接放文件夹**
+
+把插件文件夹放进：
+
+```text
+~/.watch-parent-cli/plugins/<插件 id>/
+```
+
+然后点「重新扫描目录」，不用重启程序。
+
+程序自带的插件在 `plugins/` 下（目前有一个示例：**手表日报**）。
+
+### 写一个最小插件
+
+一个插件最少两个文件：
+
+```text
+my-plugin/
+├── plugin.json
+└── main.js
+```
+
+`plugin.json`：
+
+```json
+{
+  "id": "my-plugin",
+  "name": "我的插件",
+  "version": "1.0.0",
+  "author": "你的名字",
+  "description": "一句话说明这个插件干什么。",
+  "main": "main.js",
+  "permissions": ["chat.send"]
+}
+```
+
+`main.js`：
+
+```js
+module.exports = {
+  // 插件被启用 / 程序启动时调用
+  async onLoad(jz) {
+    jz.log.info('我的插件启动了');
+  },
+
+  // 每收到一条手表或群消息都会进来
+  async onMessage(jz, msg) {
+    if (String(msg.text || '').trim() !== '你好') return;
+    await jz.chat.send({ key: msg.key, kind: 'text', text: '你好呀' });
+  },
+};
+```
+
+把这两个文件打成 zip 传上去，插件就开始工作了。
+
+### 声明文件字段
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `id` | ✅ | 唯一标识，小写字母/数字/`.`/`_`/`-`，用来当文件夹名 |
+| `name` | ✅ | 显示名 |
+| `version` | | 像 `1.0.0` 这样，界面上显示用 |
+| `author` | | 作者信息 |
+| `description` | | 简介，插件卡片上显示 |
+| `homepage` | | 主页地址 |
+| `main` | | 入口文件，默认 `main.js` |
+| `cover` | | 封面图，相对路径或 `https://` 直链，卡片顶部显示 |
+| `icon` | | 导航栏图标：`plug` `star` `bell` `chart` `gift` `game` `book` `camera` `music` `robot` |
+| `permissions` | | 要用的能力，见下表。没声明的能力调不动 |
+| `config` | | 配置项，界面上自动生成表单 |
+| `ui` | | 申请一个导航栏界面，见「给插件加自己的界面」 |
+
+**权限**：
+
+| 权限 | 能干什么 |
+| --- | --- |
+| `chat.send` | 往微聊发消息 |
+| `chat.read` | 读会话列表和聊天记录 |
+| `watch.read` | 读手表信息、位置、健康数据、通讯录、闹钟 |
+| `watch.write` | 改手表设置（改名、加闹钟、加联系人、加安全区域…） |
+| `http` | 访问外部网络（`jz.fetch`） |
+
+解绑手表、删好友、迁移账号这几类不可逆操作**任何插件都调不了**，声明了权限也不行。
+
+### 插件能用的接口
+
+`onLoad` / `onMessage` / `onRequest` 里拿到的 `jz` 对象：
+
+| 接口 | 说明 |
+| --- | --- |
+| `jz.watches.list()` | 手表列表（`watchId` / `name` / `model` / `battery` / `online` / `lastLocation`） |
+| `jz.watches.get(id)` | 单块手表 |
+| `jz.watches.location(id)` | 实时位置 `{ latitude, longitude, address, time }` |
+| `jz.watches.health(id, date)` / `.sport(id, date)` | 健康 / 运动数据 |
+| `jz.watches.contacts(id)` / `.alarms(id)` | 通讯录 / 闹钟 |
+| `jz.watches.read(方法, ...参数)` | 直接调平台接口的读方法，如 `jz.watches.read('getVolume', id)` |
+| `jz.watches.write(方法, ...参数)` | 调写方法，如 `jz.watches.write('addAlarm', {...})` |
+| `jz.chat.targets()` | 会话列表（`key` / `type` / `name`） |
+| `jz.chat.send({ key, kind, ... })` | 发消息，`kind` 支持 `text` / `image` / `voice` / `location` / `link` |
+| `jz.chat.text(key, 文本)` / `.image(key, 路径)` | 发消息的简写 |
+| `jz.chat.history(key, 条数)` | 最近消息 |
+| `jz.config.get/set/all()` | 声明文件里定义的配置项 |
+| `jz.store.get/set/delete/all()` | 插件自己的键值存储，存在插件目录的 `data/` 里 |
+| `jz.timers.after(ms, fn)` / `.every(ms, fn)` | 定时器，插件卸载时自动清掉 |
+| `jz.timers.daily('08:30', fn)` | 每天某个时刻跑一次 |
+| `jz.fetch(url, opts)` | 发 HTTP 请求（需要 `http` 权限） |
+| `jz.log.info/warn/error/debug` | 写日志，日志里带 `plugin:<id>` 前缀 |
+
+完整签名、参数限制、`jz.fetch` / `jz.store` / `jz.timers` 的细节，
+以及平台接口逃生舱（`jz.watches.read/write`）的方法名规则，
+见 **[插件开发文档.md](插件开发文档.md#6-jz-对象完全参考)**。
+官网也有一份精简版：[插件章节](https://jzd.laolibuhuifei.com/docs.html#plugin)。
+
+### 给插件加自己的界面
+
+在声明文件里加一段 `ui`，插件就会在 WebUI 的导航栏里多出一个入口：
+
+```json
+"ui": {
+  "title": "手表日报",
+  "entry": "ui/index.html"
+}
+```
+
+- `entry` 指向插件目录里的一个 HTML 文件，它所在的目录就是插件页面的根
+- 页面跑在 iframe 里，CSS 和脚本跟主界面隔离，不会把 WebUI 搞乱
+- 页面里直接 `fetch('/api/plugin/<id>/api/xxx')` 就能调插件自己的接口，
+  也可以读 `window.JZ_PLUGIN`（`{ id, api }`）拿到前缀
+- 页面高度会自动同步给父页面，不用自己算滚动
+
+插件这一侧的接口就是导出一个 `onRequest`：
+
+```js
+module.exports = {
+  async onRequest(jz, req) {
+    // req: { method, path, query, body, headers, ip }
+    if (req.method === 'GET' && req.path === '/status') {
+      return { watches: await jz.watches.list() };   // 返回对象就是 JSON
+    }
+    if (req.method === 'POST' && req.path === '/say') {
+      await jz.chat.send({ key: req.body.key, kind: 'text', text: req.body.text });
+      return { ok: true };
+    }
+    throw new Error('没有这个接口');
+  },
+};
+```
+
+也可以返回 `{ status, type, body }` 自己控制状态码和内容类型。
+
+导航栏最多显示 4 个插件入口，多出来的只在插件管理页里能打开。
+
+### 生命周期
+
+| 钩子 | 什么时候调用 |
+| --- | --- |
+| `onLoad(jz)` | 插件加载 / 被启用 / 程序启动 |
+| `onUnload(jz)` | 插件被禁用 / 重载 / 程序退出 |
+| `onMessage(jz, msg)` | 收到手表或群消息 |
+| `onRequest(jz, req)` | 有人调 `/api/plugin/<id>/api/*` |
+| `onConfig(jz)` | 配置在界面上被改了 |
+
+`msg` 的结构：
+
+```js
+{
+  key: 's:123456',      // 会话标识，回消息时原样传回去
+  type: 'single',       // single / group
+  name: '小明的表',      // 会话名
+  text: '你好',          // 文本内容（非文本消息这里是描述文字）
+  kind: 'text',         // text / image / voice / video / emoji / location / link ...
+  sender: '123456',     // 发送者的 IM 账号
+  time: 1793600000000,
+}
+```
+
+### 打包
+
+插件目录里执行：
+
+```bash
+cd my-plugin
+zip -r ../my-plugin.zip . -x '.*' -x '__MACOSX/*'
+```
+
+macOS 用 Finder 右键压缩也行，装的时候会自动跳过 `__MACOSX/` 和 `._*`。
+
+### 安全边界
+
+插件跑在 Node 内置的 `vm` 沙箱里：
+
+- 拿不到 `require('fs')`、`child_process`、`net`，读不到 `~/.watch-parent-cli/config.json`
+- 只能用 `jz` 对象上那些接口，用别的会报错并写进日志
+- 加载和每次调用都有超时（加载 8 秒、接口 20 秒、消息 6 秒），插件里写死循环不会把程序卡死
+- 插件之间互不影响，一个抛错不影响别的收消息
+
+但要说清楚：**`vm` 不是安全边界**。它防的是「插件写错了误伤主程序」，不是「有人故意写恶意插件」。
+插件本来就是你自己的账号权限，能读你的手表位置和聊天记录。**只装自己写的或者信得过的插件。**
+
+另外，插件里的同步死循环如果发生在 `onMessage` / `onRequest` 里，超时是掐不断的
+（Node 的单线程限制），这种情况只能重启程序。写的时候别在消息回调里做重活。
+
 ## 数据与隐私
 
 - 仓库中不包含任何账号、密码、登录票据、手机号、设备标识、手表 ID 或推送密钥；README 示例里的令牌、手表 ID 与名称均为占位符
 - 服务地址、版本参数与签名盐集中在内置的 `src/site.config.js`
 - 登录票据与设备标识只保存在 `~/.watch-parent-cli/config.json`
+- 插件代码放在 `~/.watch-parent-cli/plugins/<id>/`（或程序自带的 `plugins/`），
+  插件自己的数据和配置存在同目录的 `data/` 里；内置插件的数据在 `plugins/.data/<id>/`。
+  **插件能读你的手表位置和聊天记录**，装之前先看清楚它要了哪些权限
 - 终端输出默认对手机号、身份证、邮箱、银行卡等做脱敏
 - WebUI 默认监听 `0.0.0.0`（局域网可访问），但所有接口都要求访问令牌
 - 目录里那几份第三方素材的版权情况见[第三方资源](#第三方资源)
@@ -888,6 +1119,9 @@ WebUI 每 30 秒同步一次电量与上报时间，不需要手动刷新页面�
   会交给 `ffmpeg` 转一次 PNG；`ffmpeg` 也没有就退回占位块，不影响出图
 - 一张搜索图约 600KB（十张封面），评论长图最长约 1.5MB。老手表如果加载吃力，
   把「搜索图」关掉、或把「长图最高」调小
+- 插件：`vm` 沙箱只防误伤、不防恶意，**只装自己写的或信得过的插件**；插件在
+  `onMessage` / `onRequest` 里的同步死循环掐不断（Node 单线程），只能重启程序；
+  导航栏最多显示 4 个插件入口
 
 **需要真机验证**
 

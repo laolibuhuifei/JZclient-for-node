@@ -19,6 +19,7 @@ const bili = require('./bilibili');
 const biliBot = require('./bili-bot');
 const biliComment = require('./bili-comment');
 const biliSearch = require('./bili-search');
+const { PluginManager, normalizeManifest } = require('./plugin');
 const log = require('./logger');
 const SITE = require('./site.config');
 
@@ -203,6 +204,54 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
   const api = new ApiClient(cfg);
   let cache = { at: 0, list: [] };
+
+  // ===== 插件系统 =====
+  // 插件能用的能力全部从下面这个 host 走，插件本身拿不到 api / cfg / fs。
+  // 想给插件多开一个口子，就在这里加一个方法，而不是把内部对象整个递出去。
+  cfg.plugins = device.normalizePlugins(cfg.plugins);
+  const pluginMgr = new PluginManager({
+    cfg,
+    host: {
+      // 手表列表：只挑插件用得上的字段。relationId / imei 这类不该给第三方插件
+      watches: async () => {
+        const list = await watchList();
+        return list.map((w) => ({
+          watchId: String(w.watchId),
+          name: w.name || '',
+          model: w.model || '',
+          number: w.number || '',
+          battery: w.battery == null ? null : Number(w.battery),
+          online: w.online !== false && w.watchOnline !== false,
+          lastLocation: w.lastLocation || null,
+        }));
+      },
+      chatTargets: async () => {
+        const list = await loadChatTargets();
+        return list.map((t) => ({ key: t.key, type: t.type, name: t.name, sub: t.sub || '' }));
+      },
+      history: (key, limit) => (chatLog.get(key) || []).slice(-limit),
+      location: async (watchId) => {
+        const loc = ensure(await api.getWatchLocation(watchId)) || {};
+        const lat = loc.latitude != null ? loc.latitude : loc.lat;
+        const lng = loc.longitude != null ? loc.longitude : loc.lng;
+        if (lat == null || lng == null) return null;
+        return {
+          latitude: Number(lat),
+          longitude: Number(lng),
+          address: String(loc.address || loc.poi || loc.addr || ''),
+          time: Number(loc.createTime || loc.time || loc.locationTime || 0) || null,
+        };
+      },
+      sendChat: (body) => sendChat(body),
+      // 平台接口的逃生舱。方法名的白名单和读写分类在 plugin.js 里做
+      apiCall: async (method, args) => {
+        const fn = api[method];
+        if (typeof fn !== 'function') throw new Error('平台接口不存在: ' + method);
+        return fn.apply(api, args || []);
+      },
+      saveConfig: () => { try { device.save(cfg); } catch (e) { log.warn('plugin', '配置保存失败: ' + e.message); } },
+    },
+  });
 
   // ===== 访问令牌(参考 NapCat): 局域网默认可访问, 但必须持令牌才能调接口 =====
   const AUTH_COOKIE = 'wp_auth';
@@ -1526,6 +1575,21 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     lastDropWarn.n = 0;
     pushChat(key, { self: false, text, kind: parsed.kind, url: messageUrl(parsed), time: m.createTime || Date.now() });
 
+    // 插件也收一份。放在 B 站命令和 OneBot 转发之前：插件可能就是个关键词机器人，
+    // 让它先看到原文。dispatchMessage 内部逐个 catch，一个插件炸不影响别的
+    if (cfg.plugins.enabled !== false && pluginMgr.plugins.size) {
+      const tg = (chatTargets || []).find((x) => x.key === key) || {};
+      pluginMgr.dispatchMessage({
+        key,
+        type: tg.type || 'single',
+        name: tg.name || '',
+        text,
+        kind: parsed.kind,
+        sender: String(m.imAccountId || ''),
+        time: m.createTime || Date.now(),
+      }).catch(() => {});
+    }
+
     // B 站点播命令: 自己处理完直接返回, 不再转给 OneBot(否则插件还会把它当普通消息回一遍)
     if (biliCmd && biliWid) { runBiliCommand(biliWid, key, biliCmd); return; }
     // 命令认出来了, 但没有一块启用的表认领这条会话 —— 必须回一句。
@@ -2208,7 +2272,223 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     res.on('close', cleanup);
   }
 
+  // ===== 插件：管理接口 + 插件自己的接口 =====
+
+  const MIME = {
+    '.html': 'text/html; charset=utf-8',
+    '.htm': 'text/html; charset=utf-8',
+    '.js': 'text/javascript; charset=utf-8',
+    '.mjs': 'text/javascript; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.svg': 'image/svg+xml',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+    '.ico': 'image/x-icon',
+    '.woff': 'font/woff',
+    '.woff2': 'font/woff2',
+    '.txt': 'text/plain; charset=utf-8',
+    '.map': 'application/json; charset=utf-8',
+  };
+
+  function mimeOf(file) {
+    return MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
+  }
+
+  // 插件页面是独立文档（跑在 iframe 里），得让它知道自己的 id 和接口前缀。
+  // 顺手做两件事：把主题塞进去（iframe 里没有父页面的 CSS 变量，不告诉它就会在
+  // 深色模式下白得刺眼）；把自身高度报给父页面（否则要么出现双层滚动条，
+  // 要么底部被截掉一截）。
+  function injectPluginBridge(html, id) {
+    const cfgObj = JSON.stringify({ id, api: '/api/plugin/' + encodeURIComponent(id) + '/api' });
+    const bridge = '<script>window.JZ_PLUGIN=' + cfgObj + ';'
+      + 'try{var t=localStorage.getItem("jz_theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}'
+      + '(function(){'
+      + 'function report(){try{var h=Math.ceil(document.documentElement.getBoundingClientRect().height);'
+      + 'parent.postMessage({__jzPluginHeight:h},"*");}catch(e){}}'
+      + 'window.addEventListener("load",function(){report();'
+      + 'if(window.ResizeObserver){new ResizeObserver(report).observe(document.documentElement);}'
+      + 'setInterval(report,1200);});'
+      + '})();'
+      + '<\/script>';
+    if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => m + bridge);
+    return bridge + html;
+  }
+
+  async function handlePlugins(req, res, parts, query) {
+    const sub = parts[2] || '';
+
+    // 列表。前端拿这个渲染插件卡片 + 生成导航栏里那些插件入口
+    if (!sub && req.method === 'GET') {
+      return ok(res, {
+        enabled: cfg.plugins.enabled !== false,
+        dirs: { user: require('./plugin').USER_DIR, builtin: require('./plugin').BUILTIN_DIR },
+        list: pluginMgr.list(),
+      });
+    }
+
+    // 上传 zip：body 就是文件原始字节（前端 File.arrayBuffer() 直接塞进来），
+    // 文件名走 query。不用 multipart 是因为解析器得自己写，而我们只需要一个文件
+    if (sub === 'upload' && req.method === 'POST') {
+      const buf = await readRawBody(req, 16 * 1024 * 1024);
+      const name = String(query.get('name') || 'plugin.zip');
+      const r = await pluginMgr.install(buf, name);
+      log.info('plugin', `已安装插件 ${r.id} v${r.version}` + (r.loaded ? '' : '（加载失败: ' + r.error + '）'));
+      return ok(res, { result: r, plugins: pluginMgr.list() });
+    }
+
+    // 总开关：关掉后所有插件都不加载、也不收消息
+    if (sub === 'toggle' && req.method === 'POST') {
+      const b = await readBody(req);
+      cfg.plugins.enabled = !!b.enabled;
+      device.save(cfg);
+      if (!cfg.plugins.enabled) {
+        pluginMgr.closeAll();
+        pluginMgr.plugins.clear();
+        log.info('plugin', '插件系统已关闭，所有插件停止运行');
+      } else {
+        await pluginMgr.init();
+        log.info('plugin', '插件系统已开启');
+      }
+      return ok(res, { enabled: cfg.plugins.enabled, list: pluginMgr.list() });
+    }
+
+    // 重新扫描目录。用户直接往 ~/.watch-parent-cli/plugins 里丢文件夹时用这个，
+    // 不用重启程序
+    if (sub === 'rescan' && req.method === 'POST') {
+      pluginMgr.closeAll();
+      pluginMgr.plugins.clear();
+      pluginMgr.lastError.clear();
+      await pluginMgr.init();
+      return ok(res, { list: pluginMgr.list() });
+    }
+
+    const id = decodeURIComponent(sub);
+    const action = parts[3] || '';
+    const p = pluginMgr.get(id);
+
+    // 封面图
+    if (action === 'cover' && req.method === 'GET') {
+      const c = pluginMgr.coverFile(id);
+      if (c.url) { res.writeHead(302, { Location: c.url }); return res.end(); }
+      const buf = fs.readFileSync(c.file);
+      res.writeHead(200, { 'Content-Type': mimeOf(c.file), 'Cache-Control': 'no-cache', 'Content-Length': buf.length });
+      return res.end(buf);
+    }
+
+    if (action === 'enable' && req.method === 'POST') {
+      if (!p) throw new Error('插件不存在');
+      if (!cfg.plugins.enabled) throw new Error('插件系统总开关是关的，先打开它');
+      const list = await pluginMgr.enable(id);
+      log.info('plugin', `已启用插件 ${id}`);
+      return ok(res, { list });
+    }
+
+    if (action === 'disable' && req.method === 'POST') {
+      if (!p) throw new Error('插件不存在');
+      const list = await pluginMgr.disable(id);
+      log.info('plugin', `已禁用插件 ${id}`);
+      return ok(res, { list });
+    }
+
+    if (action === 'reload' && req.method === 'POST') {
+      if (!p) throw new Error('插件不存在');
+      const list = await pluginMgr.reload(id);
+      return ok(res, { list });
+    }
+
+    if (action === 'config' && req.method === 'GET') {
+      if (!p) throw new Error('插件不存在');
+      return ok(res, { config: p.configAll(), fields: p.manifest.config });
+    }
+
+    if (action === 'config' && req.method === 'POST') {
+      if (!p) throw new Error('插件不存在');
+      const b = await readBody(req);
+      const vals = p.configSet(b.values || b);
+      log.info('plugin', `插件 ${id} 的配置已更新`);
+      return ok(res, { config: vals, list: pluginMgr.list() });
+    }
+
+    // 卸载：不可逆（插件目录连数据一起删），确认值必须和 id 一致
+    if (action === 'uninstall' && req.method === 'POST') {
+      if (!p) throw new Error('插件不存在');
+      const b = await readBody(req);
+      if (String(b.confirm || '') !== id) {
+        throw new Error('卸载需要二次确认：confirm 字段要填插件的 id（' + id + '）');
+      }
+      const list = await pluginMgr.uninstall(id);
+      return ok(res, { list });
+    }
+
+    throw new Error('接口不存在');
+  }
+
+  // 插件自己的东西：/api/plugin/<id>/ui/* 静态页面、/api/plugin/<id>/api/* 自定义接口
+  async function handlePluginSelf(req, res, parts, query) {
+    const id = decodeURIComponent(parts[2]);
+    const rest = parts.slice(3);
+
+    if (rest[0] === 'ui') {
+      const rel = rest.slice(1).join('/');
+      const { file } = pluginMgr.uiFile(id, rel);
+      const buf = fs.readFileSync(file);
+      const type = mimeOf(file);
+      // 插件页每次都重新读，改完刷新就生效，不用重启（插件页面本来就是调试期改动最频繁的）
+      if (type.indexOf('text/html') === 0) {
+        const html = injectPluginBridge(buf.toString('utf8'), id);
+        return send(res, 200, type, html);
+      }
+      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache', 'Content-Length': buf.length });
+      return res.end(buf);
+    }
+
+    if (rest[0] === 'api') {
+      const q = {};
+      query.forEach((v, k) => { q[k] = v; });
+
+      let body = null;
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        const raw = await readRawBody(req, 4 * 1024 * 1024);
+        const ct = String(req.headers['content-type'] || '');
+        if (/json/i.test(ct)) {
+          try { body = raw.length ? JSON.parse(raw.toString('utf8')) : {}; } catch (e) { body = {}; }
+        } else {
+          body = raw.toString('utf8');
+        }
+      }
+
+      const ctx = {
+        method: req.method,
+        path: '/' + rest.slice(1).join('/'),
+        query: q,
+        body,
+        headers: {
+          'content-type': req.headers['content-type'] || '',
+          'user-agent': req.headers['user-agent'] || '',
+        },
+        ip: clientIp(req),
+      };
+      const r = await pluginMgr.handleRequest(id, ctx);
+      const payload = Buffer.isBuffer(r.body)
+        ? r.body
+        : Buffer.from(typeof r.body === 'string' ? r.body : JSON.stringify(r.body));
+      res.writeHead(r.status, { 'Content-Type': r.type, 'Cache-Control': 'no-store', 'Content-Length': payload.length });
+      return res.end(payload);
+    }
+
+    throw new Error('接口不存在');
+  }
+
   async function handleApi(req, res, parts, query) {
+    // ===== 插件 =====
+    // 注意单复数：/api/plugins/* 是管理（列表/上传/启停），/api/plugin/<id>/* 是插件自己的
+    if (parts[1] === 'plugins') return handlePlugins(req, res, parts, query);
+    if (parts[1] === 'plugin' && parts[2]) return handlePluginSelf(req, res, parts, query);
+
     if (parts[1] === 'watches') return ok(res, { watches: await watchList(query.get('refresh') === '1') });
     if (parts[1] === 'notices') return ok(res, { notices: ensure(await api.getNoticeNew()) });
 
@@ -3863,6 +4143,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   // B 站点播: 先把「手表名 ↔ 会话」拉齐, 否则「按手表自动匹配会话」会一个都匹配不到
   await refreshBiliScope().catch(() => {});
 
+  // 插件: 扫描用户目录和程序自带的 plugins/, 按启用状态加载。
+  // 放在最后是因为插件的 onLoad 里可能要用手表列表/会话列表, 前面没准备好就会拿到空
+  await pluginMgr.init().catch((e) => {
+    log.warn('plugin', '插件初始化失败: ' + (e && e.message ? e.message : e));
+  });
+
   return {
     server,
     token: AUTH_TOKEN,
@@ -3889,6 +4175,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     },
     close: () => new Promise((resolve) => {
       server.close(async () => {
+        // 插件先停: 它们的定时器和 fetch 还在跑, 不清理会拖住进程退出
+        try { pluginMgr.closeAll(); } catch (e) { /* ignore */ }
         for (const inst of onebots.values()) {
           try { await inst.close(); } catch (e) { /* ignore */ }
         }

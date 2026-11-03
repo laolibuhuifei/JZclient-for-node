@@ -458,12 +458,33 @@ main{max-width:var(--app-max);margin:0 auto;padding:0 14px 100px}
   background:var(--card);border-top:1px solid var(--outline-variant);z-index:40;
 }
 .nav-brand{display:none}
-.nav-item{display:flex;flex-direction:column;align-items:center;gap:3px;font-size:10.5px;color:var(--on-surface-variant);padding:6px 0 4px;border-radius:10px}
+.nav-item{display:flex;flex-direction:column;align-items:center;gap:3px;font-size:10.5px;color:var(--on-surface-variant);padding:6px 0 4px;border-radius:10px;min-width:0}
+.nav-item span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nav-item svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 .nav-item.active{color:var(--on-surface)}
 .nav-center{display:flex;flex-direction:column;align-items:center;gap:3px;font-size:10.5px;color:var(--on-surface-variant);padding-bottom:4px}
 .nav-center .fab{width:50px;height:50px;border-radius:50%;display:grid;place-items:center;margin-top:-20px;background:var(--primary);color:var(--on-primary);box-shadow:none}
 .nav-center .fab svg{width:24px;height:24px;stroke:var(--on-primary);fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+
+/* ===== 插件 ===== */
+.pl-cover{width:100%;height:118px;object-fit:cover;border-radius:12px;display:block;margin-bottom:12px;background:var(--surface-variant)}
+.pl-head{display:flex;align-items:flex-start;gap:12px}
+.pl-icon{width:42px;height:42px;border-radius:12px;background:var(--primary-container);color:var(--on-primary-container);display:grid;place-items:center;flex:none}
+.pl-icon svg{width:21px;height:21px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.pl-main{flex:1;min-width:0}
+.pl-name{font-size:15px;font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.pl-sub{font-size:12px;color:var(--on-surface-variant);margin-top:3px;word-break:break-word}
+.pl-desc{font-size:12.5px;line-height:1.7;color:var(--on-surface-variant);margin:10px 0 0;white-space:pre-wrap;word-break:break-word}
+.pl-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.pl-tag{font-size:11px;padding:2px 8px;border-radius:999px;background:var(--surface-variant);color:var(--on-surface-variant);white-space:nowrap}
+.pl-tag.ok{background:color-mix(in srgb, var(--success) 15%, transparent);color:var(--success)}
+.pl-tag.bad{background:color-mix(in srgb, var(--error) 15%, transparent);color:var(--error)}
+.pl-tag.warn{background:color-mix(in srgb, #b26a00 15%, transparent);color:#b26a00}
+.pl-err{margin-top:10px;font-size:12px;line-height:1.7;color:var(--error);background:color-mix(in srgb, var(--error) 8%, transparent);border-radius:10px;padding:9px 11px;word-break:break-word}
+.pl-acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.pl-config{margin-top:12px;border-top:1px solid var(--outline-variant);padding-top:12px}
+.pl-frame{width:100%;min-height:420px;border:none;display:block;border-radius:var(--radius-lg);background:var(--surface)}
+.pl-dir{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;word-break:break-all;background:var(--surface-variant);border-radius:8px;padding:7px 9px;margin-top:8px;color:var(--on-surface-variant)}
 
 /* ===== 聊天列表 ===== */
 .chat-list{background:var(--card);border-radius:var(--radius-lg);border:1px solid var(--outline-variant);overflow:hidden}
@@ -1257,7 +1278,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     overview:'概览', friends:'好友', profile:'宝贝资料', contacts:'通讯录',
     guard:'安全区域', settings:'设置', health:'健康', apps:'应用', wifi:'WiFi',
     alarms:'闹钟', ai:'AI 助手', hidden:'隐藏功能', bind:'绑定手表', account:'账号',
-    announcements:'公告', logs:'实时日志'
+    announcements:'公告', logs:'实时日志', plugins:'插件'
   };
   var PAGE_SUBS = {
     home:'运行状态与账号概览', chat:'与手表和家庭群的会话', location:'实时位置与历史轨迹',
@@ -1271,13 +1292,30 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     grid:'<svg viewBox="0 0 24 24"><rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/></svg>',
     user:'<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/></svg>'
   };
+  // 插件可以在 plugin.json 里挑一个图标名，没挑或者挑错了都用插头
+  var PLUGIN_ICONS = {
+    plug:'<svg viewBox="0 0 24 24"><path d="M9 3v6M15 3v6"/><path d="M6 9h12v3a6 6 0 0 1-6 6 6 6 0 0 1-6-6V9Z"/><path d="M12 18v3"/></svg>',
+    star:'<svg viewBox="0 0 24 24"><path d="M12 3.5l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17.5 6.6 20.4l1-6.1L3.2 10l6.1-.9L12 3.5Z"/></svg>',
+    bell:'<svg viewBox="0 0 24 24"><path d="M18 16V10a6 6 0 1 0-12 0v6l-1.5 2.5h15L18 16Z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>',
+    chart:'<svg viewBox="0 0 24 24"><path d="M4 20h16"/><rect x="6" y="11" width="3.4" height="6" rx="1"/><rect x="11" y="7" width="3.4" height="10" rx="1"/><rect x="16" y="13" width="3.4" height="4" rx="1"/></svg>',
+    gift:'<svg viewBox="0 0 24 24"><rect x="3.5" y="9" width="17" height="11.5" rx="2"/><path d="M3.5 13.5h17M12 9v11.5"/><path d="M12 9C10 9 8 8 8 6.2A2.2 2.2 0 0 1 12 5a2.2 2.2 0 0 1 4 1.2C16 8 14 9 12 9Z"/></svg>',
+    game:'<svg viewBox="0 0 24 24"><rect x="2.5" y="7" width="19" height="10" rx="4"/><path d="M7 10v4M5 12h4"/><circle cx="16.5" cy="11" r="1"/><circle cx="18.5" cy="13.5" r="1"/></svg>',
+    book:'<svg viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19v15H6.5A2.5 2.5 0 0 0 4 20.5v-15Z"/><path d="M4 20.5A2.5 2.5 0 0 1 6.5 18H19v3H6.5"/></svg>',
+    camera:'<svg viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="3"/><circle cx="12" cy="13.5" r="3.6"/><path d="M8.5 7l1.4-2.5h4.2L15.5 7"/></svg>',
+    music:'<svg viewBox="0 0 24 24"><circle cx="7" cy="17.5" r="3"/><circle cx="18" cy="15.5" r="3"/><path d="M10 17.5V7l11-2v10.5"/></svg>',
+    robot:'<svg viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="11" rx="3"/><circle cx="9" cy="13" r="1.2"/><circle cx="15" cy="13" r="1.2"/><path d="M12 4.5V8M9 16.5h6"/></svg>'
+  };
+  function pluginIcon(name){
+    return PLUGIN_ICONS[name] || PLUGIN_ICONS.plug;
+  }
   var AVATAR_COLORS = [
     'var(--surface-variant)', 'var(--surface-variant)', 'var(--surface-variant)',
     'var(--surface-variant)', 'var(--surface-variant)', 'var(--surface-variant)'
   ];
   var SUB_TABS = ['overview','friends','profile','contacts','guard','settings','health','apps','wifi','alarms','ai','hidden','bind','account','announcements','logs'];
   var state = { watches: [], id: null, tab: 'home', loggedIn: false, tokenInvalid: false, watchError: '',
-    chatKey: null, chatTargets: [], chatPoll: null, homePoll: null, bindData: null, map: null, noticeId: null, backTo: null };
+    chatKey: null, chatTargets: [], chatPoll: null, homePoll: null, bindData: null, map: null, noticeId: null, backTo: null,
+    plugins: [], pluginsEnabled: true, pluginsLoaded: false };
   var $ = function(s){ return document.querySelector(s); };
 
   function esc(v){
@@ -1701,29 +1739,68 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     if (state.tab === 'chat') return 'chat';
     if (state.tab === 'location') return 'location';
     // 日志是从「我的」进来的诊断页, 高亮跟着「我的」走
-    if (state.tab === 'me' || state.tab === 'account' || state.tab === 'logs') return 'me';
+    if (state.tab === 'me' || state.tab === 'account' || state.tab === 'logs' || state.tab === 'plugins') return 'me';
+    // 插件自己的页面: 高亮对应的那一项
+    if (state.tab.indexOf('plugin:') === 0) return state.tab;
     return 'more';
+  }
+
+  // 带外部界面的插件会出现在导航栏里。放在「我的」前面，
+  // 最多 4 个 —— 手机底部导航本来就 5 格，塞太多每个都只剩个图标了
+  function pluginNavItems(){
+    var out = [];
+    (state.plugins || []).forEach(function(p){
+      if (!p.hasUi || !p.loaded || p.disabled) return;
+      out.push({ tab: 'plugin:' + p.id, label: p.uiTitle || p.name, icon: p.icon, plugin: true });
+    });
+    return out.slice(0, 4);
+  }
+
+  function navItems(){
+    var base = NAV.slice();
+    var extra = pluginNavItems();
+    if (!extra.length) return base;
+    var idx = base.length;
+    for (var i = 0; i < base.length; i++) { if (base[i].tab === 'me') { idx = i; break; } }
+    return base.slice(0, idx).concat(extra, base.slice(idx));
+  }
+
+  function pluginById(id){
+    var list = state.plugins || [];
+    for (var i = 0; i < list.length; i++) { if (list[i].id === id) return list[i]; }
+    return null;
+  }
+
+  function pluginTitle(id){
+    var p = pluginById(id);
+    return p ? (p.uiTitle || p.name) : '插件';
   }
 
   function updateTitle(){
     var t = $('#pageTitle');
-    if (t) t.textContent = PAGE_TITLES[state.tab] || 'JZClientForNode';
+    if (t) t.textContent = PAGE_TITLES[state.tab]
+      || (state.tab.indexOf('plugin:') === 0 ? pluginTitle(state.tab.slice(7)) : 'JZClientForNode');
     var s = $('#pageSub');
-    if (s) s.textContent = PAGE_SUBS[state.tab] || '';
+    if (s) s.textContent = PAGE_SUBS[state.tab]
+      || (state.tab === 'plugins' ? '上传、启用、配置第三方插件' : '');
     var row = $('#pageHead');
     if (row) row.style.display = SUB_TABS.indexOf(state.tab) >= 0 ? 'none' : 'flex';
     // 主页只做整体概览, 不需要切手表, 把顶部手表条藏掉
     var strip = $('#watchStrip');
-    if (strip) strip.style.display = state.tab === 'home' ? 'none' : 'flex';
+    if (strip) strip.style.display = (state.tab === 'home' || state.tab.indexOf('plugin:') === 0) ? 'none' : 'flex';
   }
 
   function renderNav(){
     var box = $('#nav');
     var active = navActive();
-    box.innerHTML = NAV.map(function(n){
-      return '<button class="nav-item' + (active === n.tab ? ' active' : '') + '" data-nav="' + n.tab + '" title="' + esc(n.label) + '" data-label="' + esc(n.label) + '">' +
-        NAV_ICONS[n.icon] + '<span>' + n.label + '</span></button>';
+    var items = navItems();
+    box.innerHTML = items.map(function(n){
+      var icon = n.plugin ? pluginIcon(n.icon) : NAV_ICONS[n.icon];
+      return '<button class="nav-item' + (active === n.tab ? ' active' : '') + '" data-nav="' + esc(n.tab) + '" title="' + esc(n.label) + '" data-label="' + esc(n.label) + '">' +
+        icon + '<span>' + esc(n.label) + '</span></button>';
     }).join('');
+    // 手机端是 grid，列数写死 5 的话多一个插件就会换行 —— 按实际项数铺
+    box.style.gridTemplateColumns = 'repeat(' + items.length + ',1fr)';
     Array.prototype.forEach.call(box.querySelectorAll('[data-nav]'), function(btn){
       btn.onclick = function(){
         var tab = btn.getAttribute('data-nav');
@@ -1818,7 +1895,9 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     if (nt) nt.setAttribute('aria-expanded', 'false');
     destroyMap();
     setLoading();
-    if (!state.id && ['home', 'announcements', 'account', 'bind', 'ai', 'chat', 'more', 'me', 'logs'].indexOf(state.tab) < 0) {
+    // 插件页和插件管理页不依赖具体某块手表，没绑表也要能进
+    var noWatchTabs = ['home', 'announcements', 'account', 'bind', 'ai', 'chat', 'more', 'me', 'logs', 'plugins'];
+    if (!state.id && noWatchTabs.indexOf(state.tab) < 0 && state.tab.indexOf('plugin:') !== 0) {
       $('#content').innerHTML = '<div class="empty">' + esc(noWatchHint()) + '</div>';
       return;
     }
@@ -1851,6 +1930,12 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         }
       }
       else if (state.tab === 'overview') await run(api('/api/watch/' + id + '/overview'), renderOverview);
+      else if (state.tab === 'plugins') await renderPlugins();
+      else if (state.tab.indexOf('plugin:') === 0) {
+        // 插件自己的界面用 iframe 装：样式和脚本都跟主界面隔离，
+        // 插件里写的 CSS 不会把 WebUI 的按钮搞变形
+        if (seq === loadSeq) renderPluginTab(state.tab.slice(7));
+      }
       else if (state.tab === 'health') await run(api('/api/watch/' + id + '/health'), renderHealth);
       else if (state.tab === 'contacts') await run(api('/api/watch/' + id + '/contacts'), renderContacts);
       else if (state.tab === 'friends') await run(api('/api/watch/' + id + '/friends'), renderFriends);
@@ -3134,6 +3219,326 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     startLogStream();
   }
 
+  // ===== 插件管理 =====
+  // 权限名在界面上说人话：chat.send 谁看得懂
+  var PERM_TEXT = {
+    'chat.send': '发消息', 'chat.read': '读聊天', 'watch.read': '读手表',
+    'watch.write': '改手表', 'http': '访问网络'
+  };
+
+  async function loadPlugins(force){
+    if (state.pluginsLoaded && !force) return state.plugins;
+    try {
+      var d = await api('/api/plugins');
+      state.plugins = (d && d.list) || [];
+      state.pluginsEnabled = !(d && d.enabled === false);
+      state.pluginsLoaded = true;
+    } catch(e){
+      // 插件接口挂了不该影响主界面，静默留空即可
+      state.plugins = [];
+      state.pluginsLoaded = true;
+    }
+    return state.plugins;
+  }
+
+  function pluginConfigForm(p){
+    if (!p.config || !p.config.length) return '';
+    var rows = p.config.map(function(c){
+      var v = (p.configValues || {})[c.key];
+      if (v === undefined) v = c.default;
+      var input;
+      if (c.type === 'boolean') {
+        input = '<label class="switch"><input data-cfg="' + esc(c.key) + '" type="checkbox"' + (v ? ' checked' : '') + '><span></span></label>';
+      } else if (c.type === 'select') {
+        input = '<select data-cfg="' + esc(c.key) + '">' + (c.options || []).map(function(o){
+          return '<option value="' + esc(o.value) + '"' + (String(v) === String(o.value) ? ' selected' : '') + '>' + esc(o.label) + '</option>';
+        }).join('') + '</select>';
+      } else if (c.type === 'number') {
+        input = '<input data-cfg="' + esc(c.key) + '" type="number" value="' + esc(v) + '">';
+      } else if (c.type === 'textarea') {
+        input = '<textarea data-cfg="' + esc(c.key) + '" rows="3" placeholder="' + esc(c.placeholder || '') + '" style="width:100%;padding:9px 11px;border-radius:10px;font:inherit;background:var(--surface);color:var(--on-surface);border:1px solid var(--outline-variant)">' + esc(v) + '</textarea>';
+      } else {
+        input = '<input data-cfg="' + esc(c.key) + '" type="' + (c.type === 'password' ? 'password' : 'text') + '" value="' + esc(v) + '" placeholder="' + esc(c.placeholder || '') + '">';
+      }
+      return '<label class="field" style="display:block;margin-top:10px"><span style="display:block;font-size:12px;color:var(--on-surface-variant);margin-bottom:5px">' +
+        esc(c.label) + (c.hint ? ' · ' + esc(c.hint) : '') + '</span>' + input + '</label>';
+    }).join('');
+    return '<div class="pl-config" data-cfgbox="' + esc(p.id) + '" style="display:none">' + rows +
+      '<div style="display:flex;gap:8px;margin-top:12px">' +
+      '<button class="btn small" data-pl="savecfg" data-id="' + esc(p.id) + '">保存设置</button></div></div>';
+  }
+
+  function pluginCard(p){
+    var cover = p.hasCover
+      ? '<img class="pl-cover" src="/api/plugins/' + encodeURIComponent(p.id) + '/cover?v=' + encodeURIComponent(p.version) + '" alt="" onerror="this.remove()">'
+      : '';
+
+    var tags = '';
+    if (p.builtin) tags += '<span class="pl-tag">内置</span>';
+    if (p.error) tags += '<span class="pl-tag bad">加载失败</span>';
+    else if (p.disabled) tags += '<span class="pl-tag warn">已禁用</span>';
+    else if (p.loaded) tags += '<span class="pl-tag ok">运行中</span>';
+    else tags += '<span class="pl-tag">未运行</span>';
+    if (p.hasUi) tags += '<span class="pl-tag">有独立界面</span>';
+    (p.permissions || []).forEach(function(x){
+      tags += '<span class="pl-tag">' + esc(PERM_TEXT[x] || x) + '</span>';
+    });
+
+    var acts = '';
+    if (p.disabled) acts += '<button class="btn small" data-pl="enable" data-id="' + esc(p.id) + '">启用</button>';
+    else acts += '<button class="btn small tonal" data-pl="disable" data-id="' + esc(p.id) + '">禁用</button>';
+    acts += '<button class="btn small tonal" data-pl="reload" data-id="' + esc(p.id) + '">重载</button>';
+    if (p.config && p.config.length) acts += '<button class="btn small tonal" data-pl="config" data-id="' + esc(p.id) + '">设置</button>';
+    if (p.hasUi && p.loaded && !p.disabled) acts += '<button class="btn small tonal" data-pl="open" data-id="' + esc(p.id) + '">打开界面</button>';
+    if (!p.builtin) acts += '<button class="btn small danger" data-pl="uninstall" data-id="' + esc(p.id) + '">卸载</button>';
+
+    return '<div class="card" style="margin-top:12px" data-plcard="' + esc(p.id) + '">' + cover +
+      '<div class="pl-head"><span class="pl-icon">' + pluginIcon(p.icon) + '</span>' +
+      '<div class="pl-main"><div class="pl-name">' + esc(p.name) + '</div>' +
+      '<div class="pl-sub">v' + esc(p.version) + ' · ' + esc(p.author || '匿名') +
+      (p.homepage ? ' · <a href="' + esc(p.homepage) + '" target="_blank" rel="noopener">主页</a>' : '') +
+      '</div></div></div>' +
+      (p.description ? '<div class="pl-desc">' + esc(p.description) + '</div>' : '') +
+      '<div class="pl-tags">' + tags + '</div>' +
+      (p.error ? '<div class="pl-err">' + esc(p.error) + '</div>' : '') +
+      '<div class="pl-acts">' + acts + '</div>' +
+      pluginConfigForm(p) + '</div>';
+  }
+
+  // 「我的」页里那张插件卡片
+  async function loadPluginCard(){
+    var box = $('#pluginCard');
+    if (!box) return;
+    await loadPlugins();
+    var all = state.plugins || [];
+    var running = all.filter(function(p){ return p.loaded && !p.disabled; }).length;
+    var navN = pluginNavItems().length;
+    var bad = all.filter(function(p){ return !!p.error; }).length;
+    box.className = 'card';
+    box.innerHTML = '<div class="card-title">插件</div>' +
+      '<div class="row"><span>已安装</span><span class="value">' +
+      (all.length ? running + ' / ' + all.length + ' 个运行中' : '未安装') + '</span></div>' +
+      (navN ? '<div class="row"><span>导航栏入口</span><span class="value">' + navN + ' 个</span></div>' : '') +
+      (bad ? '<div class="row"><span>加载失败</span><span class="value" style="color:var(--error)">' + bad + ' 个</span></div>' : '') +
+      '<div style="display:flex;gap:8px;margin-top:12px">' +
+      '<button class="btn small" id="goPlugins">管理插件</button></div>' +
+      '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:8px">' +
+      '用 JS 写插件，能调聊天和手表接口，还能往导航栏加自己的界面。</div>';
+    var b = $('#goPlugins');
+    if (b) b.onclick = function(){
+      state.tab = 'plugins';
+      state.backTo = 'me';
+      renderNav(); updateTitle(); load();
+    };
+  }
+
+  async function renderPlugins(){
+    setLoading();
+    var d;
+    try { d = await api('/api/plugins'); }
+    catch(e){
+      $('#content').innerHTML = '<div class="empty">插件列表加载失败：' + esc(e.message) +
+        '<br><button class="btn small tonal" id="plRetry" style="margin-top:12px">重试</button></div>';
+      var rb = $('#plRetry');
+      if (rb) rb.onclick = function(){ load(); };
+      return;
+    }
+    state.plugins = d.list || [];
+    state.pluginsEnabled = d.enabled !== false;
+    state.pluginsLoaded = true;
+    renderNav(); updateTitle();
+
+    var html = '<div class="card"><div class="card-title">插件</div>' +
+      '<div class="row"><span>总开关</span><label class="switch"><input id="plToggle" type="checkbox"' +
+      (state.pluginsEnabled ? ' checked' : '') + '><span></span></label></div>' +
+      '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:6px">' +
+      '关掉后所有插件停止运行，定时任务也不再触发。单个插件也可以在下面单独禁用。</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">' +
+      '<button class="btn small" id="plUpload">上传插件（.zip）</button>' +
+      '<button class="btn small tonal" id="plRescan">重新扫描目录</button></div>' +
+      '<input type="file" id="plFile" accept=".zip,application/zip" style="display:none">' +
+      '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:12px">' +
+      '也可以把插件文件夹直接放进来，然后点「重新扫描目录」，不用重启程序：</div>' +
+      '<div class="pl-dir">' + esc((d.dirs && d.dirs.user) || '') + '</div>' +
+      '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:8px">' +
+      '插件能读写你的手表数据和聊天记录，只装自己信得过的。</div></div>';
+
+    if (!state.plugins.length) {
+      html += '<div class="card" style="margin-top:12px"><div class="empty" style="padding:16px 0">' +
+        '还没有装插件。<br>上传一个 zip，或者把插件文件夹放进上面的目录。</div></div>';
+    } else {
+      state.plugins.forEach(function(p){ html += pluginCard(p); });
+    }
+    $('#content').innerHTML = html;
+    bindPluginPage();
+  }
+
+  function bindPluginPage(){
+    var c = $('#content');
+    if (!c) return;
+
+    var tg = $('#plToggle');
+    if (tg) tg.onchange = async function(){
+      tg.disabled = true;
+      try {
+        await api('/api/plugins/toggle', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: tg.checked }),
+        });
+        state.pluginsLoaded = false;
+        toast(tg.checked ? '插件系统已开启' : '插件系统已关闭');
+        await renderPlugins();
+      } catch(e){
+        toast(e.message, true);
+        tg.checked = !tg.checked;
+      } finally { tg.disabled = false; }
+    };
+
+    var rs = $('#plRescan');
+    if (rs) rs.onclick = async function(){
+      rs.disabled = true; rs.textContent = '扫描中…';
+      try {
+        var r = await api('/api/plugins/rescan', { method: 'POST' });
+        state.plugins = (r && r.list) || [];
+        toast('已重新扫描，共 ' + state.plugins.length + ' 个插件');
+        await renderPlugins();
+      } catch(e){
+        toast('扫描失败：' + e.message, true);
+      } finally { rs.disabled = false; rs.textContent = '重新扫描目录'; }
+    };
+
+    var up = $('#plUpload');
+    var file = $('#plFile');
+    if (up && file) {
+      up.onclick = function(){ file.click(); };
+      file.onchange = async function(){
+        var f = file.files && file.files[0];
+        if (!f) return;
+        if (!/\.zip$/i.test(f.name)) { toast('只支持 .zip 压缩包', true); file.value = ''; return; }
+        if (f.size > 16 * 1024 * 1024) { toast('压缩包超过 16MB 了', true); file.value = ''; return; }
+        up.disabled = true; up.textContent = '安装中…';
+        try {
+          var buf = await f.arrayBuffer();
+          var r = await api('/api/plugins/upload?name=' + encodeURIComponent(f.name), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: buf,
+            timeout: 90000,
+          });
+          var res = (r && r.result) || {};
+          if (res.loaded) toast('已安装 ' + res.name + ' v' + res.version + (res.shadowed ? '（盖住了内置的同名插件）' : ''));
+          else toast('装上了，但加载失败：' + (res.error || '未知原因'), true);
+          state.pluginsLoaded = false;
+          await renderPlugins();
+        } catch(e){
+          toast('安装失败：' + e.message, true);
+        } finally {
+          up.disabled = false; up.textContent = '上传插件（.zip）';
+          file.value = '';
+        }
+      };
+    }
+
+    // 所有卡片上的按钮走一个委托，省得每张卡都绑一遍
+    c.onclick = async function(e){
+      var btn = e.target && e.target.closest ? e.target.closest('[data-pl]') : null;
+      if (!btn) return;
+      var act = btn.getAttribute('data-pl');
+      var id = btn.getAttribute('data-id');
+      var p = pluginById(id);
+
+      if (act === 'config') {
+        var box = c.querySelector('[data-cfgbox="' + id + '"]');
+        if (box) box.style.display = (box.style.display === 'none' || !box.style.display) ? 'block' : 'none';
+        return;
+      }
+      if (act === 'open') {
+        state.tab = 'plugin:' + id;
+        state.backTo = 'plugins';
+        renderNav(); updateTitle(); load();
+        return;
+      }
+
+      var busy = btn.textContent;
+      btn.disabled = true;
+      try {
+        if (act === 'savecfg') {
+          var box2 = c.querySelector('[data-cfgbox="' + id + '"]');
+          var values = {};
+          Array.prototype.forEach.call(box2.querySelectorAll('[data-cfg]'), function(el){
+            var k = el.getAttribute('data-cfg');
+            values[k] = el.type === 'checkbox' ? el.checked : el.value;
+          });
+          btn.textContent = '保存中…';
+          await api('/api/plugins/' + encodeURIComponent(id) + '/config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ values: values }),
+          });
+          toast('设置已保存');
+          await renderPlugins();
+          var box3 = $('#content').querySelector('[data-cfgbox="' + id + '"]');
+          if (box3) box3.style.display = 'block';
+          return;
+        }
+
+        if (act === 'uninstall') {
+          var nm = p ? p.name : id;
+          if (!window.confirm('确定卸载「' + nm + '」？\n\n插件目录和它存的数据会一起删掉，不能恢复。')) return;
+          await api('/api/plugins/' + encodeURIComponent(id) + '/uninstall', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirm: id }),
+          });
+          toast('已卸载');
+          state.pluginsLoaded = false;
+          await renderPlugins();
+          return;
+        }
+
+        btn.textContent = '处理中…';
+        await api('/api/plugins/' + encodeURIComponent(id) + '/' + act, { method: 'POST' });
+        toast(act === 'enable' ? '已启用' : (act === 'disable' ? '已禁用' : '已重新加载'));
+        state.pluginsLoaded = false;
+        await renderPlugins();
+      } catch(err){
+        toast((act === 'enable' ? '启用' : act === 'disable' ? '禁用' : act === 'reload' ? '重载' : '操作') + '失败：' + err.message, true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = busy;
+      }
+    };
+  }
+
+  function renderPluginTab(id){
+    var p = pluginById(id);
+    var c = $('#content');
+    if (!p) {
+      c.innerHTML = '<div class="empty">这个插件不存在，可能已经被卸载了。</div>';
+      return;
+    }
+    if (!p.loaded || p.disabled) {
+      c.innerHTML = '<div class="empty">插件「' + esc(p.name) + '」现在没有运行' +
+        (p.error ? '：<br>' + esc(p.error) : '') +
+        '<br><button class="btn small tonal" id="plGoManage" style="margin-top:14px">去插件管理看看</button></div>';
+      var b = $('#plGoManage');
+      if (b) b.onclick = function(){ state.tab = 'plugins'; renderNav(); updateTitle(); load(); };
+      return;
+    }
+    c.innerHTML = '<iframe class="pl-frame" id="pluginFrame" title="' + esc(p.name) + '" ' +
+      'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads" ' +
+      'src="/api/plugin/' + encodeURIComponent(id) + '/ui/"></iframe>';
+  }
+
+  // 插件页自己报高度，这里跟着调 iframe。不这么做的话，
+  // 短页面留一大片空白，长页面底部被切掉（iframe 内部滚动在手机上很难受）
+  window.addEventListener('message', function(e){
+    var d = e && e.data;
+    if (!d || typeof d !== 'object' || !d.__jzPluginHeight) return;
+    var f = $('#pluginFrame');
+    if (!f || e.source !== f.contentWindow) return;
+    var h = Number(d.__jzPluginHeight) || 0;
+    f.style.height = Math.max(360, Math.min(h, 20000)) + 'px';
+  });
+
   function renderMe(d, ov){
     var a = (ov && ov.account) || {};
     var st = (ov && ov.status) || {};
@@ -3195,6 +3600,9 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     // 微聊 B 站点播(异步填充, 见下方 loadBiliCard)
     html += '<div id="biliCard" style="margin-top:12px"></div>';
 
+    // 插件（异步填充，见下方 loadPluginCard）
+    html += '<div id="pluginCard" style="margin-top:12px"></div>';
+
     // 诊断: 实时日志
     html += '<div class="card" style="margin-top:12px"><div class="card-title">诊断</div>' +
       '<div class="row"><span>实时日志</span><span class="value" style="display:flex;align-items:center;gap:8px">' +
@@ -3216,6 +3624,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     loadOneBotCard();
     loadGeniusApiCard();
     loadBiliCard();
+    loadPluginCard();
 
     var gl = $('#goLogs');
     if (gl) gl.onclick = function(){
@@ -5583,6 +5992,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     hideGate();
     armWatchdog(15000);
     try {
+      // 导航栏要按插件列表决定加几项，所以得在第一次 renderNav 之前拉
+      await loadPlugins();
       renderNav(); updateTitle();
       loadBackground();
       // 先问一句账号状态: 没登录和"登录了但没绑表"在页面上要分开说

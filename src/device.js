@@ -68,6 +68,12 @@ const DEFAULTS = {
     maxHeight: 12000,    // 长图最高多少像素(再高微聊那边看着也费劲, 还费内存)
   },
   // 公告服务地址写死在 src/site.config.js 的 notice.baseUrl, 不放进用户配置
+  // 插件系统：插件代码和插件自己的数据都不在这里，这里只放「总开关」和「禁用名单」。
+  // 禁用名单必须在主配置里：插件被卸载后目录没了，但「我禁过它」这件事要留住
+  plugins: {
+    enabled: true,
+    disabled: [],        // 被禁用的插件 id
+  },
 };
 
 // 单块手表的 OneBot 默认配置(端口 0 = 由 webui 自动分配)
@@ -172,6 +178,16 @@ function normalizeBiliBots(raw) {
   return out;
 }
 
+// 插件系统设置。enabled 是总开关(关掉后所有插件都不加载、也不收消息),
+// disabled 是逐个插件的禁用名单
+function normalizePlugins(raw) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  return {
+    enabled: r.enabled !== false,
+    disabled: Array.isArray(r.disabled) ? r.disabled.map(String).filter(Boolean) : [],
+  };
+}
+
 function load() {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
@@ -198,6 +214,7 @@ function load() {
       cfg.extApi = normalizeExtApi(cfg.extApi);
       cfg.biliBots = normalizeBiliBots(cfg.biliBots);
       cfg.biliComment = normalizeBiliComment(cfg.biliComment);
+      cfg.plugins = normalizePlugins(cfg.plugins);
       if (!Array.isArray(cfg.ai.sessions)) cfg.ai.sessions = [];
       if (!Array.isArray(cfg.ai.keywords)) cfg.ai.keywords = [];
       return cfg;
@@ -208,6 +225,7 @@ function load() {
     onebot: Object.assign({}, DEFAULTS.onebot),
     ai: Object.assign({}, DEFAULTS.ai),
     biliComment: Object.assign({}, DEFAULTS.biliComment),
+    plugins: normalizePlugins(null),
     onebotWatches: {},
     extApi: {},
     biliBots: {},
@@ -257,4 +275,5 @@ module.exports = {
   // 按手表配置的归一化工具(webui 保存单个手表的 OneBot / 点播配置时要用)
   onebotWatchDefaults, normalizeOnebotWatch, normalizeExtApi,
   biliWatchDefaults, normalizeBiliWatch, normalizeBiliBots, normalizeBiliComment,
+  normalizePlugins,
 };

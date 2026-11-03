@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>手表日报</title>
+<style>
+/* 插件界面是独立页面（跑在 iframe 里），所以样式要自己带一份。
+   变量名和 WebUI 保持一致，父页面把主题传进来就能自动跟上深浅色。 */
+:root{
+  --primary:#0b57d0; --on-primary:#fff;
+  --primary-container:#d3e3fd; --on-primary-container:#041e49;
+  --surface:#fdfcff; --on-surface:#1a1c1e;
+  --card:#f4f3fa; --surface-variant:#e1e2ec; --on-surface-variant:#43474e;
+  --outline-variant:#d6d8e0; --error:#ba1a1a; --success:#1a7f37;
+}
+:root[data-theme="dark"]{
+  --primary:#a8c7fa; --on-primary:#062e6f;
+  --primary-container:#0842a0; --on-primary-container:#d3e3fd;
+  --surface:#111318; --on-surface:#e2e2e9;
+  --card:#1d2025; --surface-variant:#2b2f36; --on-surface-variant:#c4c6d0;
+  --outline-variant:#3a3d44; --error:#ffb4ab; --success:#7bd88f;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--surface); color:var(--on-surface);
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+  font-size:14px; line-height:1.6; -webkit-font-smoothing:antialiased;
+  padding:16px 16px 40px;
+}
+.wrap{max-width:640px;margin:0 auto}
+h1{font-size:18px;margin:0 0 2px}
+.sub{color:var(--on-surface-variant);font-size:12.5px;margin-bottom:16px}
+.card{
+  background:var(--card); border-radius:16px; padding:16px;
+  margin-bottom:14px; border:1px solid var(--outline-variant);
+}
+.card h2{font-size:13px;margin:0 0 12px;color:var(--on-surface-variant);font-weight:600;letter-spacing:.02em}
+.wrow{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--outline-variant)}
+.wrow:first-of-type{border-top:none;padding-top:0}
+.wname{font-weight:600;font-size:14px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wmeta{color:var(--on-surface-variant);font-size:12px;text-align:right;line-height:1.45}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--success);margin-right:5px;vertical-align:1px}
+.dot.off{background:var(--outline-variant)}
+.bat{display:inline-block;min-width:42px;text-align:right;font-variant-numeric:tabular-nums}
+.bat.low{color:var(--error)}
+label.field{display:block;margin-bottom:12px}
+label.field > span{display:block;font-size:12.5px;color:var(--on-surface-variant);margin-bottom:5px}
+input[type=text],select{
+  width:100%;padding:9px 11px;border-radius:10px;font:inherit;
+  background:var(--surface);color:var(--on-surface);
+  border:1px solid var(--outline-variant);outline:none;
+}
+input[type=text]:focus,select:focus{border-color:var(--primary)}
+.switch{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0}
+.switch span{font-size:13.5px}
+.switch small{display:block;color:var(--on-surface-variant);font-size:12px;line-height:1.5}
+input[type=checkbox]{width:20px;height:20px;accent-color:var(--primary);flex:none}
+.btn{
+  padding:10px 18px;border-radius:12px;font:inherit;font-weight:600;cursor:pointer;
+  background:var(--primary);color:var(--on-primary);border:none;
+}
+.btn.tonal{background:var(--primary-container);color:var(--on-primary-container)}
+.btn:disabled{opacity:.55;cursor:default}
+.row{display:flex;gap:10px;flex-wrap:wrap}
+.hint{color:var(--on-surface-variant);font-size:12px;margin-top:8px;line-height:1.6}
+.msg{margin-top:12px;font-size:13px;min-height:20px}
+.msg.ok{color:var(--success)}
+.msg.err{color:var(--error)}
+.empty{color:var(--on-surface-variant);font-size:13px;padding:8px 0}
+pre{
+  background:var(--surface);border:1px solid var(--outline-variant);border-radius:10px;
+  padding:10px;font-size:12px;white-space:pre-wrap;word-break:break-word;margin:10px 0 0;
+  font-family:ui-monospace,Menlo,Consolas,monospace;
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>手表日报</h1>
+  <div class="sub">每天早上自动把手表状态发到微聊，也可以随时手动发一份。</div>
+
+  <div class="card">
+    <h2>手表现状</h2>
+    <div id="watches"><div class="empty">读取中…</div></div>
+  </div>
+
+  <div class="card">
+    <h2>设置</h2>
+    <label class="field">
+      <span>发到哪个会话</span>
+      <select id="targetKey"><option value="">（自动选第一个单聊）</option></select>
+    </label>
+    <label class="field">
+      <span>每天发送时间</span>
+      <input type="text" id="time" placeholder="08:00" inputmode="numeric">
+    </label>
+    <label class="field">
+      <span>消息开头</span>
+      <input type="text" id="prefix" placeholder="今天的日报来了">
+    </label>
+    <div class="switch">
+      <div><span>带上电量</span></div>
+      <input type="checkbox" id="includeBattery">
+    </div>
+    <div class="switch">
+      <div><span>带上最后位置</span><small>关掉能少调一次定位接口，发得更快</small></div>
+      <input type="checkbox" id="includeLocation">
+    </div>
+  </div>
+
+  <div class="row">
+    <button class="btn" id="save">保存</button>
+    <button class="btn tonal" id="send">现在发一份</button>
+  </div>
+  <div class="msg" id="msg"></div>
+
+  <div id="lastBox" style="display:none">
+    <div class="card" style="margin-top:14px">
+      <h2>上次发出的内容</h2>
+      <pre id="lastText"></pre>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  // 父页面会注入 JZ_PLUGIN（插件 id 和接口前缀）。直接双击打开这个文件时没有，
+  // 就按目录名猜一个，至少不至于整个页面白屏。
+  var P = window.JZ_PLUGIN || { id: 'watch-daily', api: '/api/plugin/watch-daily/api' };
+  if (P.theme) document.documentElement.setAttribute('data-theme', P.theme);
+
+  var $ = function(s){ return document.querySelector(s); };
+  var data = null;
+
+  function esc(v){
+    return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+
+  function say(text, bad){
+    var m = $('#msg');
+    m.textContent = text || '';
+    m.className = 'msg' + (text ? (bad ? ' err' : ' ok') : '');
+  }
+
+  async function call(path, opts){
+    var r = await fetch(P.api + path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}));
+    var t = await r.text();
+    var j = null;
+    try { j = JSON.parse(t); } catch(e) {}
+    if (!r.ok) throw new Error((j && (j.error || j.message)) || ('HTTP ' + r.status));
+    return j;
+  }
+
+  function fmtTime(ts){
+    var n = Number(ts);
+    if (!isFinite(n) || !n) return '';
+    var d = new Date(n);
+    var p = function(x){ return String(x).padStart(2,'0'); };
+    return (d.getMonth()+1) + '/' + d.getDate() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function renderWatches(list){
+    var box = $('#watches');
+    if (!list.length) { box.innerHTML = '<div class="empty">还没有绑定手表。</div>'; return; }
+    box.innerHTML = list.map(function(w){
+      var b = w.battery;
+      var bat = (b == null || b < 0) ? '电量未知' : Math.round(b) + '%';
+      var low = b != null && b >= 0 && b <= 20;
+      var loc = w.lastLocation && w.lastLocation.address ? w.lastLocation.address : '';
+      return '<div class="wrow">' +
+        '<div class="wname">' + esc(w.name || w.watchId) + '</div>' +
+        '<div class="wmeta">' +
+          '<span class="dot' + (w.online ? '' : ' off') + '"></span>' + (w.online ? '在线' : '离线') +
+          '<span class="bat' + (low ? ' low' : '') + '" style="margin-left:8px">' + esc(bat) + '</span>' +
+          (loc ? '<br>' + esc(loc) : '') +
+        '</div></div>';
+    }).join('');
+  }
+
+  function renderTargets(list, current){
+    var sel = $('#targetKey');
+    sel.innerHTML = '<option value="">（自动选第一个单聊）</option>' + list.map(function(t){
+      var label = (t.name || t.key) + (t.type === 'group' ? ' · 家庭群' : ' · 单聊');
+      return '<option value="' + esc(t.key) + '"' + (t.key === current ? ' selected' : '') + '>' + esc(label) + '</option>';
+    }).join('');
+  }
+
+  function fill(d){
+    data = d;
+    renderWatches(d.watches || []);
+    renderTargets(d.targets || [], d.targetKey || '');
+    $('#time').value = (d.config && d.config.time) || '08:00';
+    $('#prefix').value = (d.config && d.config.prefix) || '';
+    $('#includeBattery').checked = !(d.config && d.config.includeBattery === false);
+    $('#includeLocation').checked = !(d.config && d.config.includeLocation === false);
+    if (d.lastText) {
+      $('#lastBox').style.display = 'block';
+      $('#lastText').textContent = d.lastText + (d.lastSentAt ? '\n\n（' + fmtTime(d.lastSentAt) + ' 发出）' : '');
+    }
+  }
+
+  async function refresh(){
+    try {
+      fill(await call('/status'));
+    } catch (e) {
+      $('#watches').innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>';
+    }
+  }
+
+  $('#save').onclick = async function(){
+    var btn = this;
+    btn.disabled = true;
+    say('保存中…');
+    try {
+      var r = await call('/save', {
+        method: 'POST',
+        body: JSON.stringify({
+          targetKey: $('#targetKey').value,
+          time: $('#time').value.trim(),
+          prefix: $('#prefix').value,
+          includeBattery: $('#includeBattery').checked,
+          includeLocation: $('#includeLocation').checked,
+        }),
+      });
+      say('已保存，定时任务按新时间重排了。');
+      await refresh();
+    } catch (e) {
+      say('保存失败：' + e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  $('#send').onclick = async function(){
+    var btn = this;
+    btn.disabled = true;
+    say('正在发…');
+    try {
+      var r = await call('/send', { method: 'POST', body: '{}' });
+      if (r && r.ok === false) say('没发出去：' + (r.error || '未知原因'), true);
+      else say('已发送。');
+      if (r) fill(r);
+    } catch (e) {
+      say('发送失败：' + e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  refresh();
+})();
+</script>
+</body>
+</html>

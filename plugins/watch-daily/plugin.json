@@ -1,0 +1,46 @@
+{
+  "id": "watch-daily",
+  "name": "手表日报",
+  "version": "1.0.0",
+  "author": "laolibuhuifei",
+  "description": "每天早上把每块手表的电量、在线状态和最后位置汇总成一条消息发到微聊；孩子发「日报」也能随时要一份。带一个自己的管理界面。",
+  "homepage": "https://github.com/laolibuhuifei/JZclient-for-node",
+  "main": "main.js",
+  "cover": "cover.png",
+  "icon": "bell",
+  "permissions": ["watch.read", "chat.read", "chat.send"],
+  "config": [
+    {
+      "key": "time",
+      "label": "每天发送时间",
+      "type": "text",
+      "default": "08:00",
+      "placeholder": "08:00",
+      "hint": "24 小时制，像 07:30 这样写。改完立刻生效。"
+    },
+    {
+      "key": "prefix",
+      "label": "消息开头",
+      "type": "text",
+      "default": "今天的日报来了",
+      "hint": "每条日报的第一行。"
+    },
+    {
+      "key": "includeBattery",
+      "label": "带上电量",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "key": "includeLocation",
+      "label": "带上最后位置",
+      "type": "boolean",
+      "default": true,
+      "hint": "关掉能少调一次定位接口，日报发得更快。"
+    }
+  ],
+  "ui": {
+    "title": "手表日报",
+    "entry": "ui/index.html"
+  }
+}

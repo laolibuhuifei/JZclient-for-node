@@ -25,6 +25,17 @@ const log = require('./logger');
 const USER_DIR = path.join(os.homedir(), '.watch-parent-cli', 'plugins');
 const BUILTIN_DIR = path.join(__dirname, '..', 'plugins');
 
+// 插件来源模式。云端托管（jz-cloud）把实例的 JZ_PLUGIN_MODE 设成 managed：
+//   用户不能自己上传 zip，只能装平台插件市场里那些管理员传上去的；
+//   安装动作由平台用签名票据调 /api/platform/plugins/install 完成。
+// 本地版默认 full，行为不变。
+const PLUGIN_MODE = (function () {
+  const m = String(process.env.JZ_PLUGIN_MODE || '').trim().toLowerCase();
+  return m === 'managed' ? 'managed' : 'full';
+})();
+
+const MANAGED_HINT = '云端版不允许自行上传插件：请到云端的「插件市场」里安装，管理员审核过的插件都在那里';
+
 const MANIFEST_NAMES = ['plugin.json', 'manifest.json'];
 const ID_RE = /^[a-z0-9][a-z0-9._-]{0,47}$/;
 
@@ -758,6 +769,24 @@ class PluginManager {
     p.disabled = list;
   }
 
+  // 「这个插件是平台插件市场装下来的」标记。只用于界面显示和卸载提示，
+  // 不影响加载逻辑 —— 就算用户手改 config.json 抹掉它，也顶多是少个角标
+  managedSet() {
+    const p = this.cfg.plugins || {};
+    return new Set(Array.isArray(p.managed) ? p.managed.map(String) : []);
+  }
+
+  isManaged(id) { return this.managedSet().has(String(id)); }
+
+  setManaged(id, on) {
+    const p = this.cfg.plugins || (this.cfg.plugins = {});
+    const list = Array.isArray(p.managed) ? p.managed.map(String) : [];
+    const i = list.indexOf(String(id));
+    if (on && i < 0) list.push(String(id));
+    if (!on && i >= 0) list.splice(i, 1);
+    p.managed = list;
+  }
+
   // 扫描两个目录。同名 id 时用户目录优先（用户装的版本覆盖内置的）
   scan() {
     const found = new Map();
@@ -846,6 +875,7 @@ class PluginManager {
         configValues: p.manifest.config.length ? p.configAll(p) : {},
         loaded: p.loaded,
         disabled: this.isDisabled(p.id),
+        managed: this.isManaged(p.id),
         error: p.error || this.lastError.get(p.id) || '',
         loadedAt: p.loadedAt || 0,
       });
@@ -904,9 +934,14 @@ class PluginManager {
 
   // 从 zip 安装。整包解到临时目录，校验通过才换到正式目录，
   // 装坏了不会把原来那个版本弄没
-  async install(buf, filename) {
+  async install(buf, filename, opts) {
     if (!Buffer.isBuffer(buf) || !buf.length) throw new Error('没收到文件内容');
     if (buf.length > 16 * 1024 * 1024) throw new Error('压缩包太大了（超过 16MB）');
+
+    // 云端模式：只有平台（by === 'platform'）能装，用户自己传的一律拒绝。
+    // 判断放在最前面，别等到解压完才发现 —— 那样等于给了对方一个免费的解压器。
+    const by = (opts && opts.by) || 'user';
+    if (PLUGIN_MODE === 'managed' && by !== 'platform') throw new Error(MANAGED_HINT);
 
     fs.mkdirSync(USER_DIR, { recursive: true });
     const tmp = path.join(USER_DIR, '.staging-' + crypto.randomBytes(6).toString('hex'));
@@ -972,6 +1007,8 @@ class PluginManager {
       this.plugins.set(manifest.id, p);
       // 覆盖安装默认当成「用户想用它」，把禁用标记清掉
       this.setDisabled(manifest.id, false);
+      // 来源标记跟着最后一次安装走：平台装的就记成平台的，本地传的抹掉
+      this.setManaged(manifest.id, by === 'platform');
       this.saveCfg();
 
       if (had) {
@@ -1018,6 +1055,7 @@ class PluginManager {
     // 数据目录跟着插件目录一起删。要留档的话用户得自己先备份
     fs.rmSync(p.dir, { recursive: true, force: true });
     this.setDisabled(p.id, false);
+    this.setManaged(p.id, false);
     this.saveCfg();
     log.info('plugin', `已卸载插件 ${p.id}`);
 
@@ -1169,4 +1207,5 @@ function normalizeHttpResponse(ret) {
 
 module.exports = {
   PluginManager, normalizeManifest, USER_DIR, BUILTIN_DIR, PERMISSIONS, ICONS,
+  PLUGIN_MODE, MANAGED_HINT,
 };

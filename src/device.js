@@ -73,6 +73,7 @@ const DEFAULTS = {
   plugins: {
     enabled: true,
     disabled: [],        // 被禁用的插件 id
+    managed: [],         // 从云端插件市场装的 id（仅用于界面显示）
   },
 };
 
@@ -185,6 +186,8 @@ function normalizePlugins(raw) {
   return {
     enabled: r.enabled !== false,
     disabled: Array.isArray(r.disabled) ? r.disabled.map(String).filter(Boolean) : [],
+    // 从云端插件市场装下来的插件 id。只用于界面显示「来自市场」和卸载提示
+    managed: Array.isArray(r.managed) ? r.managed.map(String).filter(Boolean) : [],
   };
 }
 

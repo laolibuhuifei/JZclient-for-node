@@ -19,7 +19,7 @@ const bili = require('./bilibili');
 const biliBot = require('./bili-bot');
 const biliComment = require('./bili-comment');
 const biliSearch = require('./bili-search');
-const { PluginManager, normalizeManifest } = require('./plugin');
+const { PluginManager, normalizeManifest, PLUGIN_MODE, MANAGED_HINT } = require('./plugin');
 const log = require('./logger');
 const SITE = require('./site.config');
 
@@ -323,7 +323,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   const TICKET_SECRET = String(ticketSecret || process.env.INSTANCE_TICKET_SECRET || '').trim();
   const ticketUsed = new Map();   // nonce -> 过期时间
 
-  function verifyTicket(t) {
+  function verifyTicket(t, want) {
     if (!TICKET_SECRET || !t) return null;
     const s = String(t);
     const dot = s.lastIndexOf('.');
@@ -340,6 +340,10 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       return null;
     }
     if (!j || typeof j.e !== 'number' || Date.now() > j.e) return null;
+    // 票据分两种：用户票据（?ticket= 换 Cookie）和平台票据（调 /api/platform/*）。
+    // 必须在这里就分开，否则平台票据能被拿去换 WebUI 的登录 Cookie —— 等于绕过登录。
+    const kind = j.t === 'platform' ? 'platform' : 'user';
+    if (kind !== (want || 'user')) return null;
     // nonce 单次使用，防重放
     if (j.n) {
       if (ticketUsed.has(j.n)) return null;
@@ -2325,6 +2329,10 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (!sub && req.method === 'GET') {
       return ok(res, {
         enabled: cfg.plugins.enabled !== false,
+        // full = 本地版，能自己上传；managed = 云端版，只能装插件市场里的
+        mode: PLUGIN_MODE,
+        // 云端模式下来源页地址（平台通过 JZ_CONSOLE_URL 注入），前端拿它做「去插件市场」的链接
+        consoleUrl: String(process.env.JZ_CONSOLE_URL || '').trim(),
         dirs: { user: require('./plugin').USER_DIR, builtin: require('./plugin').BUILTIN_DIR },
         list: pluginMgr.list(),
       });
@@ -2333,6 +2341,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     // 上传 zip：body 就是文件原始字节（前端 File.arrayBuffer() 直接塞进来），
     // 文件名走 query。不用 multipart 是因为解析器得自己写，而我们只需要一个文件
     if (sub === 'upload' && req.method === 'POST') {
+      // 云端模式下先挡掉，别白读 16MB 再报错
+      if (PLUGIN_MODE === 'managed') throw new Error(MANAGED_HINT);
       const buf = await readRawBody(req, 16 * 1024 * 1024);
       const name = String(query.get('name') || 'plugin.zip');
       const r = await pluginMgr.install(buf, name);
@@ -2478,6 +2488,48 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         : Buffer.from(typeof r.body === 'string' ? r.body : JSON.stringify(r.body));
       res.writeHead(r.status, { 'Content-Type': r.type, 'Cache-Control': 'no-store', 'Content-Length': payload.length });
       return res.end(payload);
+    }
+
+    throw new Error('接口不存在');
+  }
+
+  // ===== 云端托管平台专用接口 =====
+  // 平台和实例共享 INSTANCE_SECRET，平台用它对一张 t:'platform' 的票据签名来调这里。
+  // 只有平台知道密钥，所以这条通道等价于「平台身份」，不需要也不接受 Cookie。
+  //
+  // 为什么不让平台直接往实例目录写文件：实例降权到 jzinstN、HOME 是 700，
+  // 平台（admin-0）根本没有写权限。走 HTTP 让实例自己装，是唯一不需要 root 的路子。
+  async function handlePlatform(req, res, parts, query) {
+    const tk = String(req.headers['x-jz-ticket'] || query.get('ticket') || '').trim();
+    if (!verifyTicket(tk, 'platform')) {
+      log.warn('platform', `平台票据校验失败 ip=${clientIp(req)}`);
+      return sendJson(res, 401, { ok: false, error: '平台票据无效或已过期' });
+    }
+
+    const action = parts[3] || '';
+
+    if (parts[2] === 'plugins' && !action && req.method === 'GET') {
+      return ok(res, { mode: PLUGIN_MODE, list: pluginMgr.list() });
+    }
+
+    if (parts[2] === 'plugins' && action === 'install' && req.method === 'POST') {
+      const buf = await readRawBody(req, 16 * 1024 * 1024);
+      const name = String(query.get('name') || 'plugin.zip');
+      const r = await pluginMgr.install(buf, name, { by: 'platform' });
+      log.info('plugin', `平台下发安装 ${r.id} v${r.version}` + (r.loaded ? '' : '（加载失败: ' + r.error + '）'));
+      return ok(res, { result: r, list: pluginMgr.list() });
+    }
+
+    if (parts[2] === 'plugins' && action === 'uninstall' && req.method === 'POST') {
+      const b = await readBody(req);
+      const id = String((b && b.id) || '').trim();
+      if (!id) throw new Error('缺少插件 id');
+      // 平台只能卸「平台装过的」。内置插件和用户自己传的都不归它管，
+      // 否则平台侧一个越权调用就能把用户本地装的插件删了
+      if (!pluginMgr.isManaged(id)) throw new Error('这个插件不是从插件市场装的，平台不能卸载');
+      const list = await pluginMgr.uninstall(id);
+      log.info('plugin', `平台下发卸载 ${id}`);
+      return ok(res, { list });
     }
 
     throw new Error('接口不存在');
@@ -4069,8 +4121,15 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       }
 
       // 对外 API: 用自己的令牌校验, 不走 WebUI 的 Cookie 鉴权
+      // 必须 await: 直接 return 一个 Promise 的话, 它 reject 时已经离开 try 的作用域,
+      // 下面的 catch 抓不到 → 变成未捕获的 rejection, 整个进程直接挂掉
       if (parts[0] === 'api' && parts[1] === 'ext') {
-        return handleExtApi(req, res, parts, url.searchParams);
+        return await handleExtApi(req, res, parts, url.searchParams);
+      }
+
+      // 云端托管平台专用: 用平台票据（t:'platform'）校验，同样不走 Cookie
+      if (parts[0] === 'api' && parts[1] === 'platform') {
+        return await handlePlatform(req, res, parts, url.searchParams);
       }
 
       // 其余 /api 一律要求已持令牌

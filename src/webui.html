@@ -485,6 +485,10 @@ main{max-width:var(--app-max);margin:0 auto;padding:0 14px 100px}
 .pl-config{margin-top:12px;border-top:1px solid var(--outline-variant);padding-top:12px}
 .pl-frame{width:100%;min-height:420px;border:none;display:block;border-radius:var(--radius-lg);background:var(--surface)}
 .pl-dir{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;word-break:break-all;background:var(--surface-variant);border-radius:8px;padding:7px 9px;margin-top:8px;color:var(--on-surface-variant)}
+/* 云端模式：没有上传按钮，换成一段说明 */
+.pl-note{margin-top:12px;padding:10px 12px;border-radius:10px;font-size:12.5px;line-height:1.7;
+  background:color-mix(in srgb,var(--primary) 8%,transparent);border:1px solid color-mix(in srgb,var(--primary) 26%,transparent);color:var(--on-surface)}
+.pl-note a{color:var(--primary);font-weight:600}
 
 /* ===== 聊天列表 ===== */
 .chat-list{background:var(--card);border-radius:var(--radius-lg);border:1px solid var(--outline-variant);overflow:hidden}
@@ -3232,6 +3236,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       var d = await api('/api/plugins');
       state.plugins = (d && d.list) || [];
       state.pluginsEnabled = !(d && d.enabled === false);
+      state.pluginsMode = (d && d.mode) || 'full';
+      state.pluginsConsole = (d && d.consoleUrl) || '';
       state.pluginsLoaded = true;
     } catch(e){
       // 插件接口挂了不该影响主界面，静默留空即可
@@ -3275,6 +3281,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
 
     var tags = '';
     if (p.builtin) tags += '<span class="pl-tag">内置</span>';
+    if (p.managed) tags += '<span class="pl-tag">来自插件市场</span>';
     if (p.error) tags += '<span class="pl-tag bad">加载失败</span>';
     else if (p.disabled) tags += '<span class="pl-tag warn">已禁用</span>';
     else if (p.loaded) tags += '<span class="pl-tag ok">运行中</span>';
@@ -3345,21 +3352,36 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     }
     state.plugins = d.list || [];
     state.pluginsEnabled = d.enabled !== false;
+    state.pluginsMode = d.mode || 'full';
+    state.pluginsConsole = d.consoleUrl || '';
     state.pluginsLoaded = true;
     renderNav(); updateTitle();
+
+    var managed = state.pluginsMode === 'managed';
+    var tools;
+    if (managed) {
+      // 云端版：不给上传入口，指回云端的插件市场
+      var link = state.pluginsConsole
+        ? '<a href="' + esc(state.pluginsConsole) + '" target="_blank" rel="noopener">打开插件市场</a>'
+        : '去云端的「插件市场」';
+      tools = '<div class="pl-note">这是云端托管的实例：插件由平台统一提供，不能自己上传。' +
+        '要装新的、或者换版本，' + link + '。装好的插件在这里单独开关。</div>';
+    } else {
+      tools = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">' +
+        '<button class="btn small" id="plUpload">上传插件（.zip）</button>' +
+        '<button class="btn small tonal" id="plRescan">重新扫描目录</button></div>' +
+        '<input type="file" id="plFile" accept=".zip,application/zip" style="display:none">' +
+        '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:12px">' +
+        '也可以把插件文件夹直接放进来，然后点「重新扫描目录」，不用重启程序：</div>' +
+        '<div class="pl-dir">' + esc((d.dirs && d.dirs.user) || '') + '</div>';
+    }
 
     var html = '<div class="card"><div class="card-title">插件</div>' +
       '<div class="row"><span>总开关</span><label class="switch"><input id="plToggle" type="checkbox"' +
       (state.pluginsEnabled ? ' checked' : '') + '><span></span></label></div>' +
       '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:6px">' +
       '关掉后所有插件停止运行，定时任务也不再触发。单个插件也可以在下面单独禁用。</div>' +
-      '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">' +
-      '<button class="btn small" id="plUpload">上传插件（.zip）</button>' +
-      '<button class="btn small tonal" id="plRescan">重新扫描目录</button></div>' +
-      '<input type="file" id="plFile" accept=".zip,application/zip" style="display:none">' +
-      '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:12px">' +
-      '也可以把插件文件夹直接放进来，然后点「重新扫描目录」，不用重启程序：</div>' +
-      '<div class="pl-dir">' + esc((d.dirs && d.dirs.user) || '') + '</div>' +
+      tools +
       '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:8px">' +
       '插件能读写你的手表数据和聊天记录，只装自己信得过的。</div></div>';
 

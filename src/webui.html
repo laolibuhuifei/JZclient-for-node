@@ -3359,22 +3359,33 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
   }
 
   function paintLinkCard(box, st){
-    var srcText = st.source === 'remote' ? '云端下发'
+    var srcText = st.source === 'remote' ? '远端下发'
       : (st.source === 'user' ? '本地编辑' : '程序内置');
+    var autoOn = st.auto !== false;
+    var hint;
+    if (st.remoteFromEnv) {
+      hint = '当前用的是平台下发的地址（环境变量 JZ_LINKS_URL）；在上面填了就以你填的为准。';
+    } else if (st.remoteDefault) {
+      hint = '留空就用官方链接库，每 6 小时自动同步一次；也可以填自己的地址。';
+    } else {
+      hint = '填一个返回「名称 + Tab + 链接」纯文本的地址，就会定时拉最新列表；留空回官方链接库。';
+    }
     box.className = 'card';
     box.innerHTML = '<div class="card-title">链接库</div>' +
       '<div class="row"><span>链接条数</span><span class="value">' + (st.count || 0) + ' 条</span></div>' +
       '<div class="row"><span>来源</span><span class="value">' + esc(srcText) + '</span></div>' +
+      '<div class="row"><span>自动同步</span><label class="switch"><input id="lkAuto" type="checkbox"' +
+        (autoOn ? ' checked' : '') + '><span></span></label></div>' +
       (st.lastSyncAt ? '<div class="row"><span>上次同步</span><span class="value">' + fmtTime(st.lastSyncAt) + '</span></div>' : '') +
       (st.lastError ? '<div class="row"><span>同步错误</span><span class="value" style="color:var(--error);word-break:break-all">' +
         esc(st.lastError) + '</span></div>' : '') +
       '<label class="field" style="margin-top:10px"><span>远端地址</span>' +
-        '<input id="lkRemote" placeholder="留空则只用本地链接库" value="' + esc(st.remoteUrl || '') + '"></label>' +
-      '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:-2px">' +
-        (st.remoteFromEnv
-          ? '当前用的是平台下发的地址（环境变量 JZ_LINKS_URL）；在上面填了就以你填的为准。'
-          : '填一个返回「名称 + Tab + 链接」纯文本的地址，就会定时拉最新列表；留空只用本地。') +
-      '</div>' +
+        '<input id="lkRemote" placeholder="留空则用官方链接库" value="' + esc(st.remoteUrl || '') + '"></label>' +
+      '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:-2px">' + esc(hint) + '</div>' +
+      (autoOn ? '' : '<div class="muted" style="font-size:12px;line-height:1.7">' +
+        '自动同步已关闭，只有点「立即同步」才会拉。</div>') +
+      (st.manualHold ? '<div class="muted" style="font-size:12px;line-height:1.7">' +
+        '你手动改过列表，自动同步先暂停了；点「立即同步」会以远端为准覆盖你的改动。</div>' : '') +
       '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">' +
         '<button class="btn small" id="lkSave">保存地址</button>' +
         '<button class="btn small tonal" id="lkSync">立即同步</button>' +
@@ -3383,7 +3394,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:10px">' +
         '发链接卡片时，这个列表按域名分组，显示成「中文名 · 原链接」，中文名和网址都能搜。' +
         (st.source === 'remote'
-          ? '<br>云端下发的列表每次同步都会覆盖本地改动，要长期生效请让管理员在平台后台改。'
+          ? '<br>远端下发的列表每次同步都会覆盖本地改动，要长期生效请让管理员在平台后台改。'
           : '') +
       '</div>';
 
@@ -3407,17 +3418,24 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       }
     }
 
-    $('#lkSave').onclick = async function(){
+    // 地址和开关一起提交：开关一拨就存，不用再点「保存地址」
+    async function saveRemote(){
       var url = $('#lkRemote').value.trim();
+      var auto = !!$('#lkAuto').checked;
       try {
         var r = await api('/api/links/remote', {
-          method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url: url }),
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ url: url, auto: auto }),
         });
         refresh(r.state);
-        if (url) { toast('地址已保存，开始同步'); doSync(true); }
-        else toast('已关闭远端同步，继续用本地链接库');
+        if (!auto) { toast('已关闭自动同步'); return; }
+        toast(url ? '地址已保存，开始同步' : '已切回官方链接库，开始同步');
+        doSync(true);
       } catch(e){ toast(e.message, true); }
-    };
+    }
+
+    $('#lkSave').onclick = saveRemote;
+    $('#lkAuto').onchange = saveRemote;
 
     $('#lkSync').onclick = function(){ doSync(false); };
 
@@ -3452,7 +3470,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
 
     $('#lkReset').onclick = async function(){
       if (!window.confirm('恢复成程序自带的 ' + (st.builtinCount || '') + ' 条内置链接？\n\n'
-        + '本地编辑或云端下发的那份会被删掉，需要的话先点「编辑文本」复制出来。')) return;
+        + '本地编辑或远端下发的那份会被删掉，需要的话先点「编辑文本」复制出来。'
+        + (autoOn ? '\n\n自动同步开着，20 秒后会再拉一次远端。' : ''))) return;
       try {
         var r = await api('/api/links/reset', { method:'POST' });
         toast('已恢复内置链接库（' + r.count + ' 条）');
@@ -4546,7 +4565,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         var st = linkPresetsCache || {};
         var all = (st.links || []).length;
         if (!all) { presetTip.textContent = ''; return; }
-        var src = st.source === 'remote' ? '云端下发' : (st.source === 'user' ? '本地编辑' : '程序内置');
+        var src = st.source === 'remote' ? '远端下发' : (st.source === 'user' ? '本地编辑' : '程序内置');
         presetTip.textContent = (n === all ? '共 ' + all + ' 条' : '匹配 ' + n + ' / ' + all + ' 条')
           + ' · ' + src + (st.lastError ? ' · 上次同步失败：' + st.lastError : '');
       }

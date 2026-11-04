@@ -6,8 +6,11 @@
 // 生效顺序（从高到低）：
 //   1. ~/.watch-parent-cli/links.txt  —— 当前生效的那一份（远端拉下来的 / 用户手改的）
 //   2. src/link-presets.txt           —— 程序自带的内置表，装完就有 322 条
-// 远端地址来自 cfg.links.remoteUrl，没填就看环境变量 JZ_LINKS_URL（云端平台启动实例时注入的）。
-// 所以：本地部署版默认只用内置表，填了地址就能跟着平台走；云端托管版由平台统一下发。
+// 远端地址（三层，从高到低）：
+//   1. cfg.links.remoteUrl  —— 用户在「我的 → 链接库」里自己填的
+//   2. 环境变量 JZ_LINKS_URL —— 云端平台启动实例时注入的（= 平台地址 + /api/links.txt）
+//   3. DEFAULT_REMOTE       —— 官方链接库，本地部署版装完就跟着它走
+// cfg.links.auto === false 时完全关掉自动同步（手动点「立即同步」仍然可用）。
 //
 // ⚠ 解析刻意做得宽松：TAB、空格、全角空格、竖线、逗号当分隔符都能认出来，
 // 名称里带空格（「恐龙博物馆 · 上」）也不会被切坏 —— 定位方式是从行里找第一个 http(s)://
@@ -28,6 +31,10 @@ const LIMITS = { items: 5000, url: 2048, name: 120, bytes: 2 * 1024 * 1024 };
 // 远端同步间隔：6 小时。平台的链接库一天改不了几次，没必要勤拉
 const REFRESH_MS = 6 * 3600 * 1000;
 const FETCH_TIMEOUT_MS = 15000;
+
+// 官方链接库。本地部署版没配地址时默认就拉这一份，改一条链接不用发客户端版本。
+// 想彻底不联网：在「我的 → 链接库」把「自动同步」关掉（或清空地址后关掉自动同步）。
+const DEFAULT_REMOTE = 'https://jz.laolibuhuifei.com/api/links.txt';
 
 // ---------- 解析 / 序列化 ----------
 
@@ -147,11 +154,18 @@ function invalidate() { cache = null; }
 
 // ---------- 远端地址 ----------
 
-// 用户自己填的优先，其次平台注入的环境变量。空字符串 = 不自动同步
+// 用户自己填的优先，其次平台注入的环境变量，最后回落到官方链接库
 function remoteUrlOf(cfg) {
   const own = cfg && cfg.links ? String(cfg.links.remoteUrl || '').trim() : '';
   if (own) return own;
-  return String(process.env.JZ_LINKS_URL || '').trim();
+  const env = String(process.env.JZ_LINKS_URL || '').trim();
+  if (env) return env;
+  return DEFAULT_REMOTE;
+}
+
+// 自动同步开关：只有显式写 false 才算关（老配置里没有这个字段，按「开」处理）
+function autoOn(cfg) {
+  return !(cfg && cfg.links && cfg.links.auto === false);
 }
 
 // 只允许 http(s)：file:// / data: 这类拿来做本地文件读取或注入就麻烦了
@@ -170,7 +184,9 @@ function state(cfg) {
   const list = currentList();
   const hasUser = !!statOrNull(USER_FILE);
   const builtin = statOrNull(BUILTIN_FILE);
-  const remoteUrl = remoteUrlOf(cfg);
+  const ownUrl = String((cfg && cfg.links && cfg.links.remoteUrl) || '').trim();
+  const envUrl = String(process.env.JZ_LINKS_URL || '').trim();
+  const remoteUrl = ownUrl || envUrl || DEFAULT_REMOTE;
 
   let source = 'builtin';
   if (hasUser) source = meta.source === 'remote' ? 'remote' : 'user';
@@ -180,8 +196,11 @@ function state(cfg) {
     count: list.length,
     source,                              // builtin | user | remote
     updatedAt: Number(meta.at) || (hasUser ? (statOrNull(USER_FILE) || {}).mtimeMs : (builtin ? builtin.mtimeMs : 0)) || 0,
-    remoteUrl,                           // 实际生效的远端地址（可能是环境变量来的）
-    remoteFromEnv: !(cfg && cfg.links && String(cfg.links.remoteUrl || '').trim()) && !!remoteUrl,
+    remoteUrl,                           // 实际生效的远端地址（自己填的 / 环境变量 / 官方默认）
+    remoteFromEnv: !ownUrl && !!envUrl,  // 来自云端平台注入
+    remoteDefault: !ownUrl && !envUrl,   // 用的是官方默认地址
+    auto: autoOn(cfg),                   // 自动同步开没开
+    manualHold: meta.source === 'local' && !!meta.manualAt,  // 手改过，自动同步暂时让位
     lastSyncAt: Number(meta.at) || 0,
     lastError: String(meta.lastError || ''),
     builtinCount: builtinList().length,
@@ -265,7 +284,9 @@ function saveText(text) {
   }
   writeAtomic(USER_FILE, format(list));
   const meta = readMeta();
-  writeMeta({ source: 'local', url: meta.url || '', at: Date.now(), count: list.length, lastError: '' });
+  // manualAt 是「用户手改过」的记号：自动同步看到它就暂停，免得一小时后把人的改动冲掉。
+  // 想恢复跟随远端，点一次「立即同步」即可（refresh 成功会把 source 写回 remote）。
+  writeMeta({ source: 'local', url: meta.url || '', at: Date.now(), manualAt: Date.now(), count: list.length, lastError: '' });
   invalidate();
   return { count: list.length };
 }
@@ -296,15 +317,18 @@ function stopAutoRefresh() {
 }
 
 /**
- * 配了远端地址才起定时器。启动后 20 秒先跑一次（等 IM / WebUI 都起来），之后每小时看一次，
- * 距离上次同步不到 6 小时就跳过 —— 一小时一跳是为了「用户刚改了地址」能尽快生效。
+ * 配了地址、且没关自动同步才起定时器。启动后 20 秒先跑一次（等 IM / WebUI 都起来），
+ * 之后每小时看一次，距离上次同步不到 6 小时就跳过 —— 一小时一跳是为了「用户刚改了地址」能尽快生效。
  */
 function startAutoRefresh(cfg, logger) {
   stopAutoRefresh();
+  if (!autoOn(cfg)) return;
   if (!remoteUrlOf(cfg)) return;
 
   const tick = async () => {
     const meta = readMeta();
+    // 用户手改过就先别动，等他点「立即同步」恢复跟随远端
+    if (meta.source === 'local' && meta.manualAt) return;
     const fresh = meta.source === 'remote' && Date.now() - Number(meta.at || 0) < REFRESH_MS;
     if (fresh) return;
     const r = await refresh(cfg, {});
@@ -326,8 +350,9 @@ module.exports = {
   parse, format,
   state, currentList, currentText,
   refresh, saveText, reset,
-  remoteUrlOf, checkUrl,
+  remoteUrlOf, autoOn, checkUrl,
   startAutoRefresh, stopAutoRefresh,
+  DEFAULT_REMOTE,
   // 测试用
   _paths: { USER_FILE, META_FILE, BUILTIN_FILE },
   _limits: LIMITS,

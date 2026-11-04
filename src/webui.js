@@ -2965,7 +2965,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         if (!r.ok) throw new Error(r.error || '同步失败');
         return ok(res, { count: r.count, notModified: !!r.notModified, state: linkLib.state(cfg) });
       }
-      // 设置 / 清空远端地址
+      // 设置 / 清空远端地址，以及自动同步开关
       if (parts[2] === 'remote' && req.method === 'POST') {
         const b = await readBody(req);
         const url = String((b && b.url) || '').trim();
@@ -2973,7 +2973,10 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           const bad = linkLib.checkUrl(url);
           if (bad) throw new Error(bad);
         }
-        cfg.links = device.normalizeLinks({ remoteUrl: url });
+        // auto 不传就沿用当前值，免得只想改地址的人把开关顺手带掉
+        const keep = cfg.links && cfg.links.auto !== false;
+        const auto = b && typeof b.auto === 'boolean' ? b.auto : keep;
+        cfg.links = device.normalizeLinks({ remoteUrl: url, auto });
         device.save(cfg);
         // 地址变了要重起定时器，否则还是按旧地址同步（或者干脆没在跑）
         linkLib.startAutoRefresh(cfg, log);

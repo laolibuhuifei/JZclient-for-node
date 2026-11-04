@@ -77,10 +77,12 @@ const DEFAULTS = {
   },
   // 白名单链接库：发链接卡片时可以直接挑的那些 H5 地址
   // 链接本体不在配置里（几百条塞进来配置文件会臃肿），存在 ~/.watch-parent-cli/links.txt，
-  // 这里只放「从哪拉」。remoteUrl 留空就看环境变量 JZ_LINKS_URL —— 云端平台启动实例时注入，
-  // 本地部署版没这个变量，自然就只用程序自带的内置表。
+  // 这里只放「从哪拉」和「拉不拉」：
+  //   remoteUrl 留空 → 环境变量 JZ_LINKS_URL（云端平台注入）→ 官方默认地址
+  //   auto = false   → 完全不自动同步（手动点「立即同步」仍可用）
   links: {
     remoteUrl: '',
+    auto: true,
   },
 };
 
@@ -205,6 +207,8 @@ function normalizeLinks(raw) {
   return {
     // 只留 http(s)：别的协议在 link-presets.js 里也会被拒，这里提前收一下
     remoteUrl: /^https?:\/\//i.test(url) ? url : '',
+    // 默认开。老配置里没这个字段 → 当作开，也就是升级后自动跟官方链接库走
+    auto: r.auto !== false,
   };
 }
 

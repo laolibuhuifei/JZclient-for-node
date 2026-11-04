@@ -13,7 +13,7 @@ const { chat: aiChat } = require('./ai');
 const { parseMessage, describe, mediaUrl, buildText, buildEmoji, buildLocation, buildLink, buildPhoto, buildVideo, buildVoice, buildKaomoji, EMOJI_PRESET, LINK_APP_NAME } = require('./message');
 const { loadImageSource, uploadImage, uploadVoice, uploadVideo, directVideo, probeDuration, splitAudio, splitVideo, cleanupSplit, downloadToTmp } = require('./upload');
 const { fetchFavicon } = require('./favicon');
-const LINK_PRESETS = require('./link-presets');
+const linkLib = require('./link-presets');
 const { startOneBot } = require('./onebot');
 const bili = require('./bilibili');
 const biliBot = require('./bili-bot');
@@ -2938,6 +2938,56 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       }
     }
 
+    // ===== 白名单链接库 =====
+    // 发链接卡片时的预设列表。列表本体存在 ~/.watch-parent-cli/links.txt，
+    // 可以由远端接口统一下发（云端平台），也可以用户自己编辑（本地部署版）
+    if (parts[1] === 'links') {
+      // GET /api/links —— 完整状态：列表 + 来源 + 上次同步时间 + 生效的远端地址
+      if (!parts[2] || parts[2] === 'state') {
+        return ok(res, linkLib.state(cfg));
+      }
+      // GET /api/links/text 取原始文本（编辑框），POST 保存
+      if (parts[2] === 'text') {
+        if (req.method === 'GET') return ok(res, { text: linkLib.currentText() });
+        if (req.method === 'POST') {
+          const b = await readBody(req);
+          const r = linkLib.saveText(b && typeof b.text === 'string' ? b.text : '');
+          return ok(res, { count: r.count, state: linkLib.state(cfg) });
+        }
+      }
+      // 手动同步一次远端
+      if (parts[2] === 'refresh' && req.method === 'POST') {
+        const b = await readBody(req);
+        const r = await linkLib.refresh(cfg, {
+          url: b && b.url ? String(b.url).trim() : '',
+          force: true,
+        });
+        if (!r.ok) throw new Error(r.error || '同步失败');
+        return ok(res, { count: r.count, notModified: !!r.notModified, state: linkLib.state(cfg) });
+      }
+      // 设置 / 清空远端地址
+      if (parts[2] === 'remote' && req.method === 'POST') {
+        const b = await readBody(req);
+        const url = String((b && b.url) || '').trim();
+        if (url) {
+          const bad = linkLib.checkUrl(url);
+          if (bad) throw new Error(bad);
+        }
+        cfg.links = device.normalizeLinks({ remoteUrl: url });
+        device.save(cfg);
+        // 地址变了要重起定时器，否则还是按旧地址同步（或者干脆没在跑）
+        linkLib.startAutoRefresh(cfg, log);
+        return ok(res, { state: linkLib.state(cfg) });
+      }
+      // 丢掉本地覆盖，回到程序自带的内置表
+      if (parts[2] === 'reset' && req.method === 'POST') {
+        const r = linkLib.reset();
+        linkLib.startAutoRefresh(cfg, log);
+        return ok(res, { count: r.count, state: linkLib.state(cfg) });
+      }
+      return ok(res, { result: true });
+    }
+
     if (parts[1] === 'config') {
       const show = JSON.parse(JSON.stringify(cfg));
       if (show.token) show.token = String(show.token).slice(0, 24) + '...';
@@ -3038,8 +3088,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         });
       }
       if (parts[2] === 'link-presets') {
-        // 手表端 H5 白名单链接, 发链接卡片时可以直接挑, 不用手打长 URL
-        return ok(res, { links: LINK_PRESETS });
+        // 手表端 H5 白名单链接。列表可能来自内置表 / 用户手改 / 远端接口，
+        // 具体逻辑在 link-presets.js；这里原样吐出去，前端按中文名 + 原链接显示
+        return ok(res, linkLib.state(cfg));
       }
       if (parts[2] === 'connect' && req.method === 'POST') {
         const c = await ensureIM();
@@ -4208,6 +4259,10 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     log.warn('plugin', '插件初始化失败: ' + (e && e.message ? e.message : e));
   });
 
+  // 白名单链接库：配了远端地址（自己填的，或云端平台注入的 JZ_LINKS_URL）才会起定时器。
+  // 放在最后，别让它跟登录、IM 抢启动阶段的网络
+  linkLib.startAutoRefresh(cfg, log);
+
   return {
     server,
     token: AUTH_TOKEN,
@@ -4236,6 +4291,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       server.close(async () => {
         // 插件先停: 它们的定时器和 fetch 还在跑, 不清理会拖住进程退出
         try { pluginMgr.closeAll(); } catch (e) { /* ignore */ }
+        // 链接库的定时器同理
+        try { linkLib.stopAutoRefresh(); } catch (e) { /* ignore */ }
         for (const inst of onebots.values()) {
           try { await inst.close(); } catch (e) { /* ignore */ }
         }

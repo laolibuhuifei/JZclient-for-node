@@ -75,6 +75,13 @@ const DEFAULTS = {
     disabled: [],        // 被禁用的插件 id
     managed: [],         // 从云端插件市场装的 id（仅用于界面显示）
   },
+  // 白名单链接库：发链接卡片时可以直接挑的那些 H5 地址
+  // 链接本体不在配置里（几百条塞进来配置文件会臃肿），存在 ~/.watch-parent-cli/links.txt，
+  // 这里只放「从哪拉」。remoteUrl 留空就看环境变量 JZ_LINKS_URL —— 云端平台启动实例时注入，
+  // 本地部署版没这个变量，自然就只用程序自带的内置表。
+  links: {
+    remoteUrl: '',
+  },
 };
 
 // 单块手表的 OneBot 默认配置(端口 0 = 由 webui 自动分配)
@@ -191,6 +198,16 @@ function normalizePlugins(raw) {
   };
 }
 
+// 白名单链接库设置。只有一个远端地址，链接本体存在独立的 links.txt 里
+function normalizeLinks(raw) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const url = String(r.remoteUrl || '').trim();
+  return {
+    // 只留 http(s)：别的协议在 link-presets.js 里也会被拒，这里提前收一下
+    remoteUrl: /^https?:\/\//i.test(url) ? url : '',
+  };
+}
+
 function load() {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
@@ -218,6 +235,7 @@ function load() {
       cfg.biliBots = normalizeBiliBots(cfg.biliBots);
       cfg.biliComment = normalizeBiliComment(cfg.biliComment);
       cfg.plugins = normalizePlugins(cfg.plugins);
+      cfg.links = normalizeLinks(cfg.links);
       if (!Array.isArray(cfg.ai.sessions)) cfg.ai.sessions = [];
       if (!Array.isArray(cfg.ai.keywords)) cfg.ai.keywords = [];
       return cfg;
@@ -229,6 +247,7 @@ function load() {
     ai: Object.assign({}, DEFAULTS.ai),
     biliComment: Object.assign({}, DEFAULTS.biliComment),
     plugins: normalizePlugins(null),
+    links: normalizeLinks(null),
     onebotWatches: {},
     extApi: {},
     biliBots: {},
@@ -278,5 +297,5 @@ module.exports = {
   // 按手表配置的归一化工具(webui 保存单个手表的 OneBot / 点播配置时要用)
   onebotWatchDefaults, normalizeOnebotWatch, normalizeExtApi,
   biliWatchDefaults, normalizeBiliWatch, normalizeBiliBots, normalizeBiliComment,
-  normalizePlugins,
+  normalizePlugins, normalizeLinks,
 };

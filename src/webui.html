@@ -3340,8 +3340,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
   }
 
   // 链接库：发链接卡片时用的白名单预设。
-  // 本地部署版自己编辑（或填一个自己的接口地址）；云端托管版由平台统一下发，
-  // 平台地址走环境变量 JZ_LINKS_URL 注入，这里会显示成「云端下发」。
+  // 列表有几万条，全部由平台后台统一维护，地址写死（云端实例走 JZ_LINKS_URL，
+  // 本地部署版走官方链接库），用户改不了。这里只显示状态 + 一个「立即同步」。
   async function loadLinkCard(){
     var box = $('#linkCard');
     if (!box) return;
@@ -3353,49 +3353,37 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         '<div class="muted" style="font-size:12px">加载失败：' + esc(e.message) + '</div>';
       return;
     }
-    // 顺手刷新发链接表单的缓存，用户在别处改完不用重启就能看到新列表
+    // 顺手刷新发链接表单的缓存（只有元信息，列表按需搜索）
     linkPresetsCache = st;
     paintLinkCard(box, st);
   }
 
   function paintLinkCard(box, st){
     var srcText = st.source === 'remote' ? '远端下发'
-      : (st.source === 'user' ? '本地编辑' : '程序内置');
+      : (st.source === 'user' ? '本地缓存' : '程序内置');
     var autoOn = st.auto !== false;
-    var hint;
-    if (st.remoteFromEnv) {
-      hint = '当前用的是平台下发的地址（环境变量 JZ_LINKS_URL）；在上面填了就以你填的为准。';
-    } else if (st.remoteDefault) {
-      hint = '留空就用官方链接库，每 6 小时自动同步一次；也可以填自己的地址。';
-    } else {
-      hint = '填一个返回「名称 + Tab + 链接」纯文本的地址，就会定时拉最新列表；留空回官方链接库。';
-    }
     box.className = 'card';
     box.innerHTML = '<div class="card-title">链接库</div>' +
       '<div class="row"><span>链接条数</span><span class="value">' + (st.count || 0) + ' 条</span></div>' +
       '<div class="row"><span>来源</span><span class="value">' + esc(srcText) + '</span></div>' +
+      '<div class="row"><span>数据地址</span><span class="value mono" style="font-size:11.5px;' +
+        'word-break:break-all;opacity:.8">' + esc(st.remoteUrl || '') + '</span></div>' +
       '<div class="row"><span>自动同步</span><label class="switch"><input id="lkAuto" type="checkbox"' +
         (autoOn ? ' checked' : '') + '><span></span></label></div>' +
       (st.lastSyncAt ? '<div class="row"><span>上次同步</span><span class="value">' + fmtTime(st.lastSyncAt) + '</span></div>' : '') +
       (st.lastError ? '<div class="row"><span>同步错误</span><span class="value" style="color:var(--error);word-break:break-all">' +
         esc(st.lastError) + '</span></div>' : '') +
-      '<label class="field" style="margin-top:10px"><span>远端地址</span>' +
-        '<input id="lkRemote" placeholder="留空则用官方链接库" value="' + esc(st.remoteUrl || '') + '"></label>' +
-      '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:-2px">' + esc(hint) + '</div>' +
       (autoOn ? '' : '<div class="muted" style="font-size:12px;line-height:1.7">' +
         '自动同步已关闭，只有点「立即同步」才会拉。</div>') +
       (st.manualHold ? '<div class="muted" style="font-size:12px;line-height:1.7">' +
-        '你手动改过列表，自动同步先暂停了；点「立即同步」会以远端为准覆盖你的改动。</div>' : '') +
+        '本地缓存和远端不一致（手动改过），点「立即同步」会以远端为准覆盖。</div>' : '') +
       '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">' +
-        '<button class="btn small" id="lkSave">保存地址</button>' +
-        '<button class="btn small tonal" id="lkSync">立即同步</button>' +
-        '<button class="btn small tonal" id="lkEdit">编辑文本</button>' +
-        '<button class="btn small danger" id="lkReset">恢复内置</button></div>' +
+        '<button class="btn small tonal" id="lkSync">立即同步</button></div>' +
       '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:10px">' +
-        '发链接卡片时，这个列表按域名分组，显示成「中文名 · 原链接」，中文名和网址都能搜。' +
-        (st.source === 'remote'
-          ? '<br>远端下发的列表每次同步都会覆盖本地改动，要长期生效请让管理员在平台后台改。'
-          : '') +
+        (st.remoteFromEnv
+          ? '这个列表由云端平台统一维护，每 6 小时自动同步一次，地址不能改。'
+          : '这个列表由官方链接库统一维护，每 6 小时自动同步一次，地址不能改。') +
+        '<br>发链接卡片时按关键词搜索，显示成「中文名 · 原链接」。' +
       '</div>';
 
     function refresh(next){
@@ -3403,7 +3391,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       paintLinkCard(box, next);
     }
 
-    async function doSync(auto){
+    async function doSync(){
       var btn = $('#lkSync');
       if (btn) { btn.disabled = true; btn.textContent = '同步中…'; }
       try {
@@ -3414,70 +3402,27 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         refresh(r.state);
       } catch(e){
         toast('同步失败：' + e.message, true);
-        if (!auto) loadLinkCard();
+        loadLinkCard();
       }
     }
 
-    // 地址和开关一起提交：开关一拨就存，不用再点「保存地址」
-    async function saveRemote(){
-      var url = $('#lkRemote').value.trim();
+    // 自动同步开关：一拨就存，不用再点保存
+    async function saveAuto(){
       var auto = !!$('#lkAuto').checked;
       try {
-        var r = await api('/api/links/remote', {
+        var r = await api('/api/links/auto', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ url: url, auto: auto }),
+          body: JSON.stringify({ auto: auto }),
         });
         refresh(r.state);
         if (!auto) { toast('已关闭自动同步'); return; }
-        toast(url ? '地址已保存，开始同步' : '已切回官方链接库，开始同步');
-        doSync(true);
+        toast('已开启自动同步');
+        doSync();
       } catch(e){ toast(e.message, true); }
     }
 
-    $('#lkSave').onclick = saveRemote;
-    $('#lkAuto').onchange = saveRemote;
-
-    $('#lkSync').onclick = function(){ doSync(false); };
-
-    $('#lkEdit').onclick = async function(){
-      var text = '';
-      try { text = (await api('/api/links/text')).text || ''; }
-      catch(e){ toast(e.message, true); return; }
-      $('#modalCard').innerHTML = '<h2>编辑链接库</h2>' +
-        '<p class="muted" style="font-size:12px;line-height:1.7;margin:0 0 10px">' +
-          '每行一条：<b>中文名</b> + Tab（或空格）+ <b>链接</b>。空行和 # 开头的行会被忽略。' +
-          '名称里带空格没关系，程序从第一个 http 开始认链接。</p>' +
-        '<textarea id="lkText" spellcheck="false" style="width:100%;height:46vh;min-height:240px;' +
-          'font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.6"></textarea>' +
-        '<div class="modal-actions">' +
-          '<button type="button" class="btn text" id="lkTextCancel">取消</button>' +
-          '<button type="button" class="btn" id="lkTextSave">保存</button></div>';
-      $('#modal').classList.remove('hidden');
-      $('#lkText').value = text;
-      $('#lkTextCancel').onclick = closeModal;
-      $('#lkTextSave').onclick = async function(){
-        try {
-          var r = await api('/api/links/text', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ text: $('#lkText').value }),
-          });
-          closeModal();
-          toast('已保存 ' + r.count + ' 条链接');
-          refresh(r.state);
-        } catch(e){ toast(e.message, true); }
-      };
-    };
-
-    $('#lkReset').onclick = async function(){
-      if (!window.confirm('恢复成程序自带的 ' + (st.builtinCount || '') + ' 条内置链接？\n\n'
-        + '本地编辑或远端下发的那份会被删掉，需要的话先点「编辑文本」复制出来。'
-        + (autoOn ? '\n\n自动同步开着，20 秒后会再拉一次远端。' : ''))) return;
-      try {
-        var r = await api('/api/links/reset', { method:'POST' });
-        toast('已恢复内置链接库（' + r.count + ' 条）');
-        refresh(r.state);
-      } catch(e){ toast(e.message, true); }
-    };
+    $('#lkAuto').onchange = saveAuto;
+    $('#lkSync').onclick = doSync;
   }
 
   async function renderPlugins(){
@@ -4365,8 +4310,9 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
   }
 
   // 手表端 H5 白名单链接库（服务端 src/link-presets.js）
-  // 每项是 { name, url }：name 是中文名（「支付宝忘记密码」），url 是原链接。
-  // 列表可能来自程序内置表、用户自己改的文本，或者云端平台下发的接口
+  // 这里只缓存**元信息**（条数 / 来源 / 上次同步），不缓存列表 ——
+  // 两万多条 = 2.2MB JSON + 两万多个 <option>，浏览器扛不住。
+  // 具体条目按需走 /api/links/search，一次最多 60 条
   var linkPresetsCache = null;
 
   function wireChatPane(t) {
@@ -4452,24 +4398,38 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       try { return new URL(u).host || '其它'; } catch(e){ return '其它'; }
     }
 
-    // 按域名分组渲染白名单下拉。
-    // 显示「中文名 · 原链接」两个都摆出来 —— 同名不同址的（比如两首「爷爷一定有办法」）
-    // 光看名字分不清，光看 URL 又认不出是什么
-    function paintPresets(sel, kw, keep){
-      var q = String(kw || '').trim().toLowerCase();
-      var list = (linkPresetsCache && linkPresetsCache.links) || [];
-      var groups = {}, order = [], total = 0;
+    // 几万条不可能一次塞进 <select>（两万多个 option 浏览器直接卡死），
+    // 所以下拉里只放「这一次搜索」的结果，最多 PRESET_LIMIT 条，搜索交给后端。
+    // 显示「中文名 · 原链接」两个都摆出来 —— 同名不同址的光看名字分不清
+    var PRESET_LIMIT = 60;
+    var PRESET_RECENT_KEY = 'jz_link_recent';
+
+    // 最近用过的几条：空关键词时置顶，省得每次都要打字
+    function presetRecent(){
+      try {
+        var a = JSON.parse(localStorage.getItem(PRESET_RECENT_KEY) || '[]');
+        if (!Array.isArray(a)) return [];
+        return a.filter(function(x){ return x && x.url; }).slice(0, 8);
+      } catch(e){ return []; }
+    }
+
+    function pushPresetRecent(it){
+      if (!it || !it.url) return;
+      var a = presetRecent().filter(function(x){ return x.url !== it.url; });
+      a.unshift({ name: it.name || it.url, url: it.url });
+      try { localStorage.setItem(PRESET_RECENT_KEY, JSON.stringify(a.slice(0, 8))); } catch(e){}
+    }
+
+    // 渲染当前这一屏结果（≤60 条，按域名分组不会爆）
+    function paintPresetOptions(sel, items, keep){
+      var list = items || [];
+      var groups = {}, order = [];
       list.forEach(function(it){
-        var name = it.name || '';
-        var url = it.url || '';
-        // 中文名和网址都参与搜索：记不住名字的可以搜路径，反之亦然
-        if (q && name.toLowerCase().indexOf(q) < 0 && url.toLowerCase().indexOf(q) < 0) return;
-        var host = presetHost(url);
+        var host = presetHost(it.url);
         if (!groups[host]) { groups[host] = []; order.push(host); }
         groups[host].push(it);
-        total++;
       });
-      var html = '<option value="">' + (total ? '— 不使用预设 —' : '— 没有匹配的白名单链接 —') + '</option>';
+      var html = '<option value="">' + (list.length ? '— 不使用预设 —' : '— 没有匹配的白名单链接 —') + '</option>';
       order.forEach(function(host){
         html += '<optgroup label="' + esc(host + '（' + groups[host].length + '）') + '">';
         groups[host].forEach(function(it){
@@ -4480,15 +4440,15 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       });
       sel.innerHTML = html;
       if (keep && sel.value !== keep) sel.value = '';
-      return total;
     }
 
     // 下拉框宽度有限，长 URL 会被浏览器截掉 —— 选中后单独显示一行完整信息，
-    // 名称加粗、网址等宽可选中，需要复制的话直接框选
-    function paintPresetPreview(box, url){
+    // 名称加粗、网址等宽可选中，需要复制的话直接框选。
+    // 只从当前这一屏结果里找，不再遍历全量列表
+    function paintPresetPreview(box, url, items){
       if (!box) return;
       var it = null;
-      ((linkPresetsCache && linkPresetsCache.links) || []).forEach(function(x){ if (x.url === url) it = x; });
+      (items || []).forEach(function(x){ if (x.url === url) it = x; });
       if (!it) { box.innerHTML = ''; box.style.display = 'none'; return; }
       box.style.display = 'block';
       box.innerHTML = '<b>' + esc(it.name) + '</b>' +
@@ -4555,34 +4515,92 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       $('#lkCancel').onclick = closeModal;
 
       // ===== 白名单链接预设 =====
+      // 列表有几万条，前端只拿「这一次搜索」的结果，别的一律不问后端要
       var presetSel = $('#lkPreset');
       var presetTip = $('#lkPresetTip');
       var presetPrev = $('#lkPresetPreview');
-      function showPresets(kw, keep){
-        var n = paintPresets(presetSel, kw, keep);
-        paintPresetPreview(presetPrev, presetSel.value || keep || '');
-        if (!presetTip) return;
+      var presetItems = [];     // 当前下拉里的条目
+      var presetSeq = 0;        // 竞态保护：只认最后一次请求
+      var presetTimer = null;
+
+      function presetMeta(){
         var st = linkPresetsCache || {};
-        var all = (st.links || []).length;
-        if (!all) { presetTip.textContent = ''; return; }
-        var src = st.source === 'remote' ? '远端下发' : (st.source === 'user' ? '本地编辑' : '程序内置');
-        presetTip.textContent = (n === all ? '共 ' + all + ' 条' : '匹配 ' + n + ' / ' + all + ' 条')
-          + ' · ' + src + (st.lastError ? ' · 上次同步失败：' + st.lastError : '');
+        return {
+          all: st.count || 0,
+          src: st.source === 'remote' ? '远端下发' : (st.source === 'user' ? '本地缓存' : '程序内置'),
+          err: st.lastError || '',
+        };
       }
-      $('#lkPresetKw').oninput = function(){ showPresets(this.value, presetSel.value); };
-      presetSel.onchange = function(){
-        if (this.value) $('#lkUrl').value = this.value;
-        paintPresetPreview(presetPrev, this.value);
-      };
-      // 列表只拉一次, 之后切换手表/重开表单都复用。想更新去「我的 → 链接库」点同步
-      if (linkPresetsCache) {
-        showPresets('', $('#lkUrl').value || '');
-      } else {
-        api('/api/chats/link-presets').then(function(d){
-          linkPresetsCache = d || { links: [] };
-          showPresets('', $('#lkUrl').value || '');
+
+      function presetPreview(url){
+        paintPresetPreview(presetPrev, url, presetItems);
+      }
+
+      // 服务端搜索。几万条里扫一遍后端只要 4ms，前端一次最多渲染 60 条
+      function searchPresets(kw, keep){
+        var seq = ++presetSeq;
+        var q = String(kw || '').trim();
+        api('/api/links/search?limit=' + PRESET_LIMIT + '&q=' + encodeURIComponent(q)).then(function(d){
+          if (seq !== presetSeq) return;
+          presetItems = (d && d.items) || [];
+          paintPresetOptions(presetSel, presetItems, keep);
+          presetPreview(presetSel.value || keep || '');
+          if (!presetTip) return;
+          var m = presetMeta();
+          if (!m.all && !presetItems.length) { presetTip.textContent = ''; return; }
+          presetTip.textContent = (q
+              ? '匹配 ' + d.matched + ' 条' + (d.hasMore ? '，显示前 ' + presetItems.length + ' 条' : '')
+              : '共 ' + d.total + ' 条')
+            + ' · ' + m.src + (m.err ? ' · 上次同步失败：' + m.err : '');
         }).catch(function(e){
-          linkPresetsCache = { links: [] };
+          if (seq !== presetSeq) return;
+          presetItems = [];
+          presetSel.innerHTML = '<option value="">白名单加载失败</option>';
+          if (presetTip) presetTip.textContent = e.message || '';
+        });
+      }
+
+      // 没输关键词时先摆最近用过的几条，省得每次都要打字
+      function showDefaultPresets(keep){
+        var rec = presetRecent();
+        if (rec.length) {
+          presetItems = rec;
+          paintPresetOptions(presetSel, rec, keep);
+          presetPreview(presetSel.value || keep || '');
+          if (presetTip) {
+            var m = presetMeta();
+            presetTip.textContent = '最近用过 ' + rec.length + ' 条 · 共 ' + (m.all || 0) + ' 条，输入关键词搜索';
+          }
+          return;
+        }
+        searchPresets('', keep);
+      }
+
+      $('#lkPresetKw').oninput = function(){
+        var kw = this.value;
+        if (presetTimer) clearTimeout(presetTimer);
+        // 200ms 防抖：别每敲一个字就发一次请求
+        presetTimer = setTimeout(function(){ searchPresets(kw, presetSel.value); }, 200);
+      };
+      presetSel.onchange = function(){
+        var url = this.value;
+        if (url) $('#lkUrl').value = url;
+        presetPreview(url);
+        if (!url) return;
+        var hit = null;
+        presetItems.forEach(function(x){ if (x.url === url) hit = x; });
+        pushPresetRecent(hit);
+      };
+
+      // 元信息（条数 / 来源）在「我的 → 链接库」里已经拉过就复用，没有就现拉一次
+      if (linkPresetsCache) {
+        showDefaultPresets($('#lkUrl').value || '');
+      } else {
+        api('/api/links').then(function(st){
+          linkPresetsCache = st || {};
+          showDefaultPresets($('#lkUrl').value || '');
+        }).catch(function(e){
+          linkPresetsCache = {};
           presetSel.innerHTML = '<option value="">白名单加载失败</option>';
           toast('白名单链接加载失败：' + e.message, true);
         });

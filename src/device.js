@@ -76,12 +76,11 @@ const DEFAULTS = {
     managed: [],         // 从云端插件市场装的 id（仅用于界面显示）
   },
   // 白名单链接库：发链接卡片时可以直接挑的那些 H5 地址
-  // 链接本体不在配置里（几百条塞进来配置文件会臃肿），存在 ~/.watch-parent-cli/links.txt，
-  // 这里只放「从哪拉」和「拉不拉」：
-  //   remoteUrl 留空 → 环境变量 JZ_LINKS_URL（云端平台注入）→ 官方默认地址
-  //   auto = false   → 完全不自动同步（手动点「立即同步」仍可用）
+  // 链接本体不在配置里（几万条塞进来配置文件会臃肿），存在 ~/.watch-parent-cli/links.txt，
+  // 这里只有一个开关。地址是写死的（环境变量 JZ_LINKS_URL → 官方链接库），
+  // 由平台后台统一维护，用户改不了：
+  //   auto = false   → 不自动同步（手动点「立即同步」仍可用）
   links: {
-    remoteUrl: '',
     auto: true,
   },
 };
@@ -200,13 +199,11 @@ function normalizePlugins(raw) {
   };
 }
 
-// 白名单链接库设置。只有一个远端地址，链接本体存在独立的 links.txt 里
+// 白名单链接库设置。链接本体存在独立的 links.txt 里，这里只有一个「要不要自动同步」。
+// 老版本配置里的 remoteUrl 一律丢弃 —— 地址现在由平台注入，用户改不了
 function normalizeLinks(raw) {
   const r = raw && typeof raw === 'object' ? raw : {};
-  const url = String(r.remoteUrl || '').trim();
   return {
-    // 只留 http(s)：别的协议在 link-presets.js 里也会被拒，这里提前收一下
-    remoteUrl: /^https?:\/\//i.test(url) ? url : '',
     // 默认开。老配置里没这个字段 → 当作开，也就是升级后自动跟官方链接库走
     auto: r.auto !== false,
   };

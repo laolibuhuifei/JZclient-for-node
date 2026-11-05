@@ -2939,16 +2939,26 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     }
 
     // ===== 白名单链接库 =====
-    // 发链接卡片时的预设列表。列表本体存在 ~/.watch-parent-cli/links.txt，
-    // 可以由远端接口统一下发（云端平台），也可以用户自己编辑（本地部署版）
+    // 发链接卡片时的预设列表。几万条，全部存在 ~/.watch-parent-cli/links.txt，
+    // 由平台后台统一维护、客户端定时拉取。地址写死（平台注入 / 官方链接库），用户改不了。
+    // 界面不再一次拿全量（2MB JSON + 两万多个 option 会卡死浏览器），
+    // 搜索走 /api/links/search 服务端匹配，一次只回 60 条
     if (parts[1] === 'links') {
-      // GET /api/links —— 完整状态：列表 + 来源 + 上次同步时间 + 生效的远端地址
+      // GET /api/links —— 状态：条数 / 来源 / 上次同步 / 生效地址（不含列表本体）
       if (!parts[2] || parts[2] === 'state') {
         return ok(res, linkLib.state(cfg));
       }
-      // GET /api/links/text 取原始文本（编辑框），POST 保存
+      // GET /api/links/search?q=&limit=&offset= —— 服务端搜索
+      if (parts[2] === 'search') {
+        return ok(res, linkLib.search(query.get('q') || '', {
+          limit: query.get('limit'),
+          offset: query.get('offset'),
+        }));
+      }
+      // 原始文本：只读，给导出/排障用（界面不再调它）
       if (parts[2] === 'text') {
         if (req.method === 'GET') return ok(res, { text: linkLib.currentText() });
+        // 写入口留着给脚本和排障，界面上已经不提供（列表由平台统一维护）
         if (req.method === 'POST') {
           const b = await readBody(req);
           const r = linkLib.saveText(b && typeof b.text === 'string' ? b.text : '');
@@ -2957,38 +2967,28 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       }
       // 手动同步一次远端
       if (parts[2] === 'refresh' && req.method === 'POST') {
-        const b = await readBody(req);
-        const r = await linkLib.refresh(cfg, {
-          url: b && b.url ? String(b.url).trim() : '',
-          force: true,
-        });
+        const r = await linkLib.refresh(cfg, { force: true });
         if (!r.ok) throw new Error(r.error || '同步失败');
         return ok(res, { count: r.count, notModified: !!r.notModified, state: linkLib.state(cfg) });
       }
-      // 设置 / 清空远端地址，以及自动同步开关
-      if (parts[2] === 'remote' && req.method === 'POST') {
+      // 自动同步开关。地址不可改，所以这里只认 auto 一个字段
+      if (parts[2] === 'auto' && req.method === 'POST') {
         const b = await readBody(req);
-        const url = String((b && b.url) || '').trim();
-        if (url) {
-          const bad = linkLib.checkUrl(url);
-          if (bad) throw new Error(bad);
-        }
-        // auto 不传就沿用当前值，免得只想改地址的人把开关顺手带掉
-        const keep = cfg.links && cfg.links.auto !== false;
-        const auto = b && typeof b.auto === 'boolean' ? b.auto : keep;
-        cfg.links = device.normalizeLinks({ remoteUrl: url, auto });
+        const on = !(b && b.auto === false);
+        cfg.links = device.normalizeLinks({ auto: on });
         device.save(cfg);
-        // 地址变了要重起定时器，否则还是按旧地址同步（或者干脆没在跑）
+        // 开关变了要重起定时器，否则关掉了还在跑、打开了又不起
         linkLib.startAutoRefresh(cfg, log);
         return ok(res, { state: linkLib.state(cfg) });
       }
-      // 丢掉本地覆盖，回到程序自带的内置表
+      // 丢掉本地覆盖，回到程序自带的内置表（排障用，界面不提供）
       if (parts[2] === 'reset' && req.method === 'POST') {
         const r = linkLib.reset();
         linkLib.startAutoRefresh(cfg, log);
         return ok(res, { count: r.count, state: linkLib.state(cfg) });
       }
-      return ok(res, { result: true });
+      // 地址是不可改的：老客户端如果还在调 /api/links/remote，明确拒掉而不是装作成功
+      throw new Error('链接库地址由平台统一下发，不能修改');
     }
 
     if (parts[1] === 'config') {
@@ -3091,9 +3091,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         });
       }
       if (parts[2] === 'link-presets') {
-        // 手表端 H5 白名单链接。列表可能来自内置表 / 用户手改 / 远端接口，
-        // 具体逻辑在 link-presets.js；这里原样吐出去，前端按中文名 + 原链接显示
-        return ok(res, linkLib.state(cfg));
+        // 手表端 H5 白名单链接。几万条，默认只回元信息（不带列表本体），
+        // 界面正常走 /api/links/search；真要全量（脚本/导出）带 ?full=1
+        return ok(res, linkLib.state(cfg, { full: query.get('full') === '1' }));
       }
       if (parts[2] === 'connect' && req.method === 'POST') {
         const c = await ensureIM();

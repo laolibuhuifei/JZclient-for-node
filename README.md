@@ -83,6 +83,8 @@ JZClientForNode/
 │   └── jzclient.js            # CLI 入口
 ├── src/
 │   ├── assets/icon.png        # 项目图标（512×512）
+│   ├── assets/jzclient-logo.png  # 评论长图页脚的项目图标（128×128）
+│   ├── assets/author.png      # 评论长图页脚的作者头像（128×128）
 │   ├── assets/fonts/cat-book.ttf        # WebUI 自定义字体（约 15MB，见「第三方资源」）
 │   ├── assets/emoji/          # 表情包预览图（32 张 114×114 PNG，见「第三方资源」）
 │   ├── assets/node-mascot.svg # Node.js 吉祥物（封底，见「第三方资源」）
@@ -854,6 +856,10 @@ WebUI 每 30 秒同步一次电量与上报时间，不需要手动刷新页面�
 - 抓评论和下载视频**并行**跑，不会让看图多等一个下载的时间；出图失败只记日志，视频照发
 - 评论最多抓 60 条、长图最高 12000 像素（都在「我的 → B 站点播 → 评论长图」里可改），
   塞不下的部分会在页脚注明「本图只画了 N 条」
+- 图尾有一行署名：左边**项目图标 + `JZClient v版本号`**，右边**作者头像 + `BY laolibuhuifei`**。
+  两张图是随包带的 `src/assets/jzclient-logo.png` 和 `author.png`（128×128 PNG），
+  用 `png.js` 同步解码，**不联网**（没外网的实例也能出图）；想换图标直接替换这两个文件就行，
+  不用改代码。文件缺了页脚会自动退回纯文字，出图不受影响
 - **不填 SESSDATA 只能拿到热门的前 3 条** —— B 站对未登录请求就是这么回的，`cursor.is_end` 直接是 true，
   翻不动页。想要完整评论区，把浏览器里登录 B 站后的 `SESSDATA` Cookie 值填进去
 - 网页上可以直接预览：填个 BV 号点「生成预览」，不用真去手表上点播一遍

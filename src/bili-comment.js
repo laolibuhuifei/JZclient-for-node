@@ -10,9 +10,12 @@
 //   2. 评论接口只认 aid（数字），bvid 得先用 /x/web-interface/view 换一次。
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const bili = require('./bilibili');
 const image = require('./image');
 const { Canvas } = require('./canvas');
+const { decodePNG } = require('./png');
 const log = require('./logger');
 
 // ---------- 外观 ----------
@@ -304,6 +307,34 @@ async function fetchComments(bvid, opts) {
 
 // ---------- 渲染 ----------
 
+// 页脚素材：项目图标 + 作者头像
+//
+// 两张都是随包带的本地 PNG（128×128，在 assets/ 下），**不走网络**：
+// 评论长图可能在没外网的实例上生成，也不该为了两个固定图标多打一次请求。
+// 这里刻意用同步的 decodePNG —— 渲染是纯排版的同步流程，改成异步会把
+// renderComments 变成 Promise，调用方和测试都得跟着改一遍。
+const ASSET_DIR = path.join(__dirname, 'assets');
+const FOOT_LOGO = 'jzclient-logo.png';
+const FOOT_AVATAR = 'author.png';
+const AUTHOR = 'laolibuhuifei';
+let VERSION = '';
+try { VERSION = String(require('../package.json').version || ''); } catch (e) { /* 漏打包就不显示版本 */ }
+
+const assetCache = new Map();      // 文件名 -> 解码结果（null = 没有/坏了）
+
+function loadAsset(name) {
+  if (assetCache.has(name)) return assetCache.get(name);
+  let img = null;
+  try {
+    img = decodePNG(fs.readFileSync(path.join(ASSET_DIR, name)));
+  } catch (e) {
+    // 缺图不算错：页脚会退回纯文字，图照样出得来
+    log.debug('bili', '页脚图标读不到 ' + name + '：' + (e && e.message ? e.message : e));
+  }
+  assetCache.set(name, img);
+  return img;
+}
+
 // 量字宽用的小画布：只要字体，不要像素
 function makeMeasurer() {
   return new Canvas(1, 1);
@@ -447,6 +478,81 @@ function layoutComment(m, item, topY) {
   return { ops, height };
 }
 
+// 页脚一行：图标 + 名称版本 │ 头像 BY 作者
+//
+// 排版参考常见插件截图那套（左边项目标、右边作者），这里合成一行居中：
+//   [图标] JZClient v0.1.0  │  [头像] BY laolibuhuifei
+// 分段画是为了缺素材时不露空位：没有头像就只留左边那段，没有图标就从名称开始。
+function layoutFooter(m, topY, info) {
+  const o = info || {};
+  const logo = loadAsset(FOOT_LOGO);
+  const avatar = loadAsset(FOOT_AVATAR);
+  const name = 'JZClient';
+  const ver = o.version ? 'v' + o.version : '';
+  const author = o.author || '';
+
+  const LOGO = 40;          // 图标外框（六边形只占原图中间 ~75%，40 视觉上正好和 22px 字齐）
+  const AV = 32;            // 头像直径
+  const GAP_ICON = 10;      // 图标 -> 名称
+  const GAP_VER = 7;        // 名称 -> 版本
+  const GAP_SEG = 20;       // 竖线两侧留白
+  const GAP_AV = 10;        // 头像 -> BY
+  const SEP = '#d8dbe0';    // 竖线：比正文分隔线（COLOR.line）深一点，否则印不出来
+
+  const nw = m.measure(name, 22, true);
+  const vw = ver ? m.measure(ver, 15, false) : 0;
+  const byw = author ? m.measure('BY', 12, true) : 0;
+  const aw = author ? m.measure(author, 17, false) : 0;
+
+  let total = (logo ? LOGO + GAP_ICON : 0) + nw + (vw ? GAP_VER + vw : 0);
+  if (author) {
+    total += GAP_SEG * 2 + 1;
+    total += (avatar ? AV + GAP_AV : 0) + byw + 7 + aw;
+  }
+
+  const rowH = Math.max(logo ? LOGO : 0, avatar ? AV : 0, 26);
+  const midY = topY + rowH / 2;
+  const baseY = Math.round(midY + 8);      // 22px 字的基线大约在视觉中心下 8px
+  const ops = [];
+  let x = Math.round((WIDTH - total) / 2);
+
+  if (logo) {
+    const lx = x;
+    const ly = Math.round(midY - LOGO / 2);
+    ops.push((c) => c.drawImage(logo, lx, ly, LOGO, LOGO));
+    x += LOGO + GAP_ICON;
+  }
+  const nx = x;
+  ops.push((c) => c.text(name, nx, baseY, { size: 22, color: COLOR.text, bold: true }));
+  x += nw;
+  if (vw) {
+    const vx = x + GAP_VER;
+    ops.push((c) => c.text(ver, vx, baseY - 1, { size: 15, color: COLOR.mute }));
+    x += GAP_VER + vw;
+  }
+  if (author) {
+    x += GAP_SEG;
+    const sx = x;
+    const sh = Math.min(28, rowH);
+    const sy = Math.round(midY - sh / 2);
+    ops.push((c) => c.fillRect(sx, sy, 1, sh, SEP));
+    x += 1 + GAP_SEG;
+    if (avatar) {
+      const ax = x;
+      const ay = Math.round(midY - AV / 2);
+      ops.push((c) => c.drawImage(avatar, ax, ay, AV, AV, { circle: true }));
+      x += AV + GAP_AV;
+    }
+    const byX = x;
+    ops.push((c) => c.text('BY', byX, baseY - 3, { size: 12, color: COLOR.faint, bold: true }));
+    x += byw + 7;
+    const auX = x;
+    ops.push((c) => c.text(author, auX, baseY, { size: 17, color: COLOR.name }));
+  }
+
+  return { ops, height: rowH };
+}
+
 // 把抓到的评论渲染成 PNG
 // opts: { maxHeight, maxComments }
 function renderComments(data, opts) {
@@ -509,8 +615,8 @@ function renderComments(data, opts) {
   let shown = 0;
   for (const item of data.list) {
     const { ops: itemOps, height } = layoutComment(m, item, y);
-    // 底部还要留出页脚，塞不下就到此为止
-    if (y + height > maxHeight - 120) break;
+    // 底部还要留出页脚（统计行 34 + 图标行 36 + 底部留白），塞不下就到此为止
+    if (y + height > maxHeight - 150) break;
     ops.push(...itemOps);
     y += height;
     shown++;
@@ -524,17 +630,23 @@ function renderComments(data, opts) {
     y += 70;
   }
 
-  // 页脚：说清楚「只画了一部分」比含糊的「还有 N 条」好懂
+  // 页脚：说清楚「只画了一部分」比含糊的「还有 N 条」好懂；
+  // 下面是「图标 + 名称版本 │ 头像 + 作者」，署名比原来那行纯文字清楚得多
   const hidden = Math.max(0, (data.total || data.list.length) - shown);
-  const footParts = [];
-  if (hidden > 0) footParts.push('本图只画了 ' + shown + ' 条，共 ' + data.total + ' 条');
-  footParts.push('JZClient 生成');
-  footParts.push('made by laolibuhuifei');
-  const footText = footParts.join('  ·  ');
-  y += 26;
-  const footY = y;
-  ops.push((c) => c.text(footText, PAD, footY, { size: FONT.small, color: COLOR.faint }));
-  const height = Math.min(maxHeight, y + 28);
+  y += 24;
+  // shown=0 时上面已经写了「还没有评论」，再补一句「只画了 0 条」只会让人更懵
+  if (shown > 0 && hidden > 0) {
+    const tip = '本图只画了 ' + shown + ' 条，共 ' + data.total + ' 条';
+    const tipW = m.measure(tip, FONT.small, false);
+    const tipX = Math.round((WIDTH - tipW) / 2);
+    const tipY = y + 16;
+    ops.push((c) => c.text(tip, tipX, tipY, { size: FONT.small, color: COLOR.faint }));
+    y += 34;
+  }
+  const foot = layoutFooter(m, y + 8, { version: VERSION, author: AUTHOR });
+  ops.push(...foot.ops);
+  y += 8 + foot.height;
+  const height = Math.min(maxHeight, y + 30);
 
   // 真画布
   const c = new Canvas(WIDTH, height, '#ffffff');

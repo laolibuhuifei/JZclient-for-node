@@ -5,6 +5,7 @@ const os = require('os');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 const { ApiClient, MODULES } = require('./api');
 const device = require('./device');
 const sso = require('./sso');
@@ -25,6 +26,7 @@ const SITE = require('./site.config');
 
 const HTML_FILE = path.join(__dirname, 'webui.html');
 let htmlCache = null;
+let htmlGzip = null;
 let htmlEtag = '';
 
 function pageHtml() {
@@ -35,29 +37,55 @@ function pageHtml() {
       const st = fs.statSync(HTML_FILE);
       htmlEtag = '"' + st.size.toString(16) + '-' + Math.floor(st.mtimeMs).toString(16) + '"';
     } catch (e) { htmlEtag = ''; }
+    // 顺手压一份放内存。HTML 是死文件，压一次管到进程重启，实测 20ms 上下，
+    // 换来的是一次 345KB → 84KB（4.1 倍）。别改成每次请求现压，那才是真的浪费 CPU。
+    try {
+      htmlGzip = zlib.gzipSync(Buffer.from(htmlCache, 'utf8'), { level: 6 });
+    } catch (e) {
+      htmlGzip = null;
+      log.warn('webui', '首页 gzip 失败，退回明文发送：' + (e && e.message ? e.message : e));
+    }
   }
   return htmlCache;
 }
 
+// 只认 gzip：deflate 和 br 得多缓存一份压缩结果，而首页以中文 + CSS/JS 为主，
+// 三者压缩率都在 4 倍上下，为那一点点差额多养一份内存不划算。
+function acceptsGzip(req) {
+  const ae = String(req.headers['accept-encoding'] || '');
+  // 认 "gzip" 和 "*"；q=0 表示客户端明确拒绝，别硬塞
+  const m = ae.match(/(?:^|,)\s*(?:gzip|\*)\s*(?:;\s*q=([\d.]+))?/i);
+  if (!m) return false;
+  return m[1] === undefined || parseFloat(m[1]) > 0;
+}
+
 // 页面 HTML 有 300 多 KB（CSS/JS 全内嵌），走内网穿透时每次重传要一秒左右。
-// 但它其实是**静态文件** —— 里面的数据都是前端起来后异步拉的 —— 所以给 ETag + no-cache：
-// 浏览器第二次访问只发一个 If-None-Match，命中就回 304（几十字节），省掉整包传输。
-// 注意别改成 no-store：那样每次都要重下 300KB，隧道上就是实打实的一秒。
-function sendHtml(req, res, body) {
+// 但它其实是**静态文件** —— 里面的数据都是前端起来后异步拉的 —— 所以给了两层优化：
+//   1. ETag + no-cache：浏览器第二次访问只发 If-None-Match，命中回 304（几十字节），整包都不传
+//   2. gzip：绕不过去的「首次访问」和「换设备/清缓存」压到 84KB，隧道上从 2 秒掉到 0.7 秒
+// 注意别改成 no-store：那样每次都要重下 300KB，隧道上就是实打实的两秒。
+function sendHtml(req, res) {
+  const text = pageHtml();
   if (htmlEtag && req.headers['if-none-match'] === htmlEtag) {
-    res.writeHead(304, { ETag: htmlEtag, 'Cache-Control': 'no-cache' });
+    res.writeHead(304, { ETag: htmlEtag, 'Cache-Control': 'no-cache', Vary: 'Accept-Encoding' });
     return res.end();
   }
-  const buf = Buffer.from(body, 'utf8');
-  res._bytes = buf.length;
+  const plain = Buffer.from(text, 'utf8');
+  const gz = acceptsGzip(req) ? htmlGzip : null;
+  const out = gz || plain;
+  // 记的是真实上线的字节数（压缩后），debug 日志里才对得上隧道的实际流量
+  res._bytes = out.length;
   const head = {
     'Content-Type': 'text/html; charset=utf-8',
-    'Content-Length': buf.length,
+    'Content-Length': out.length,
     'Cache-Control': 'no-cache',
+    // 同一份 HTML 有两种表示，不写 Vary 会让中间缓存把 gzip 版本发给不支持的客户端
+    'Vary': 'Accept-Encoding',
   };
+  if (gz) head['Content-Encoding'] = 'gzip';
   if (htmlEtag) head.ETag = htmlEtag;
   res.writeHead(200, head);
-  res.end(buf);
+  res.end(out);
 }
 
 function send(res, status, type, body) {
@@ -4171,7 +4199,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           res.writeHead(302, { Location: '/?auth=fail' });
           return res.end();
         }
-        return sendHtml(req, res, pageHtml());
+        return sendHtml(req, res);
       }
 
       // ===== 令牌接口(免鉴权) =====
@@ -4221,10 +4249,16 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       }
 
       if (parts[0] === 'assets' && parts[1] === 'fonts' && parts[2]) {
-        const file = path.join(__dirname, 'assets', 'fonts', path.basename(parts[2]));
+        const name = path.basename(parts[2]);
+        const file = path.join(__dirname, 'assets', 'fonts', name);
         if (!fs.existsSync(file)) return send(res, 404, 'text/plain; charset=utf-8', 'Not Found');
+        // 以前这里写死 font/ttf，现在有 .woff2 了，按后缀给，否则浏览器可能不认
+        const ftype = /\.woff2$/i.test(name) ? 'font/woff2'
+          : /\.woff$/i.test(name) ? 'font/woff'
+            : /\.otf$/i.test(name) ? 'font/otf'
+              : 'font/ttf';
         const buf = fs.readFileSync(file);
-        res.writeHead(200, { 'Content-Type': 'font/ttf', 'Cache-Control': 'public, max-age=604800', 'Content-Length': buf.length });
+        res.writeHead(200, { 'Content-Type': ftype, 'Cache-Control': 'public, max-age=604800', 'Content-Length': buf.length });
         return res.end(buf);
       }
       // 表情预览图: /assets/emoji/<code>.png

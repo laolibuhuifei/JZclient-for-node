@@ -889,9 +889,15 @@ input::placeholder,textarea::placeholder{color:rgba(255,255,255,.3)}
 </style>
 <style>
 /* ===== 自定义字体 ===== */
+/* cat-book.ttf 是 21,544 字形的全量 CJK 字体，14.6MB —— 走内网穿透要下 85 秒，
+   而且 font-display:swap 只是不挡首屏，它照样把上行带宽吃满，接口请求全被挤在后面。
+   所以另存了一份子集 cat-book-web.woff2：GB2312 一级+二级（6763 字）+ ASCII + 标点符号
+   + 本页面里出现的所有字符 = 7042 字形，2.2MB，小 6.6 倍。
+   子集外的生僻字会回落到 PingFang SC / 微软雅黑，能看，只是不是这款字体。
+   重新生成：pyftsubset cat-book.ttf --text-file=<字符表> --flavor=woff2（见 README） */
 @font-face{
   font-family:'JZCatBook';
-  src:url('/assets/fonts/cat-book.ttf') format('truetype');
+  src:url('/assets/fonts/cat-book-web.woff2') format('woff2');
   font-display:swap;
 }
 body{font-family:'JZCatBook','PingFang SC','Microsoft YaHei',system-ui,sans-serif}

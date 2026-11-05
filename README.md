@@ -85,7 +85,8 @@ JZClientForNode/
 │   ├── assets/icon.png        # 项目图标（512×512）
 │   ├── assets/jzclient-logo.png  # 评论长图页脚的项目图标（128×128）
 │   ├── assets/author.png      # 评论长图页脚的作者头像（128×128）
-│   ├── assets/fonts/cat-book.ttf        # WebUI 自定义字体（约 15MB，见「第三方资源」）
+│   ├── assets/fonts/cat-book.ttf        # WebUI 自定义字体母版（21,544 字形，14.6MB，见「第三方资源」）
+│   ├── assets/fonts/cat-book-web.woff2  # 上面那份的网页子集（7,042 字形，2.2MB，页面实际加载的是它）
 │   ├── assets/emoji/          # 表情包预览图（32 张 114×114 PNG，见「第三方资源」）
 │   ├── assets/node-mascot.svg # Node.js 吉祥物（封底，见「第三方资源」）
 │   ├── api.js                 # 业务 API 客户端与签名
@@ -1198,12 +1199,35 @@ macOS 用 Finder 右键压缩也行，装的时候会自动跳过 `__MACOSX/` �
 | 资源 | 路径 | 来源与说明 |
 | --- | --- | --- |
 | 自定义字体 | `src/assets/fonts/cat-book.ttf` | 「送给猫咪的一本书」，约 15MB。字体文件内未包含版权与许可声明，此处仅作界面字体使用。**如权利人提出异议会立即移除**；你也可以直接删掉该文件，WebUI 会自动回退到 PingFang SC / 微软雅黑，功能不受影响；或换成任意 `ttf` 并保持文件名不变 |
+| 网页用字体子集 | `src/assets/fonts/cat-book-web.woff2` | 由上面那份生成，非独立素材，版权同上 |
 | 表情预览图 | `src/assets/emoji/*.png`（32 张） | 从官方客户端安装包 `assets/emoji_new.zip` 中的 `small/` 目录导出，仅用于「与官方表情一一对应」的互操作展示。版权归原厂商所有 |
 | 表情清单 | `src/emoji_preset.json` | 表情代号与名称，同上，源自官方客户端资源 |
 | Node.js 吉祥物 | `src/assets/node-mascot.svg` | 来自 [nodejs.org](https://nodejs.org/)，版权归 OpenJS Foundation，仅用于页脚标识「本项目由 Node.js 驱动」 |
 | 项目图标 | `src/assets/icon.png`、`icon-180.png` | 本项目自制 |
 
 如果你要基于本项目二次分发（尤其是商业用途），请自行确认上述素材的授权情况，或替换为你有权使用的资源。
+
+### 字体子集是怎么来的
+
+`cat-book.ttf` 有 21,544 个字形、14.6MB。WebUI 走内网穿透时（上行往往只有 1~2Mbps），
+一个访客要拉 85 秒，而且 `font-display: swap` 只是不挡首屏，它照样把带宽吃满，
+把页面的接口请求全挤在后面。所以页面实际加载的是 `cat-book-web.woff2`：
+
+- 字符集 = ASCII + 拉丁补充 + 通用/中文标点 + 全角符号 + 常见数学与图形符号 + **GB2312 一级与二级汉字（6763 字）** + `webui.html` 里出现的所有字符
+- 结果 7,042 个字形 / **2.2MB**，比原文件小 6.6 倍，隧道上 85 秒 → 13 秒
+- 子集外的生僻字自动回落到 `PingFang SC` / `微软雅黑`，能看，只是不是这款字体
+
+重新生成（需要 `pip install fonttools brotli`，只是构建期工具，运行时不依赖）：
+
+```bash
+pyftsubset src/assets/fonts/cat-book.ttf \
+  --text-file=<上表的字符表，每行一整串> \
+  --output-file=/tmp/sub.ttf --layout-features='*' --no-hinting --desubroutinize
+python -c "from fontTools.ttLib import TTFont; f=TTFont('/tmp/sub.ttf'); f.flavor='woff2'; f.save('src/assets/fonts/cat-book-web.woff2')"
+```
+
+**改完 `webui.html` 记得重新跑一遍**：子集里带了页面用到的字符，页面新增了生僻字就得补进去，
+否则那个字会显示成系统字体（不难看，但和周围不一致）。
 
 ## 免责声明
 

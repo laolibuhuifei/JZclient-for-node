@@ -25,10 +25,39 @@ const SITE = require('./site.config');
 
 const HTML_FILE = path.join(__dirname, 'webui.html');
 let htmlCache = null;
+let htmlEtag = '';
 
 function pageHtml() {
-  if (!htmlCache) htmlCache = fs.readFileSync(HTML_FILE, 'utf8');
+  if (!htmlCache) {
+    htmlCache = fs.readFileSync(HTML_FILE, 'utf8');
+    // ETag 用「大小 + mtime」拼，不重算内容哈希：换文件自然失效，算一次也几乎不花时间
+    try {
+      const st = fs.statSync(HTML_FILE);
+      htmlEtag = '"' + st.size.toString(16) + '-' + Math.floor(st.mtimeMs).toString(16) + '"';
+    } catch (e) { htmlEtag = ''; }
+  }
   return htmlCache;
+}
+
+// 页面 HTML 有 300 多 KB（CSS/JS 全内嵌），走内网穿透时每次重传要一秒左右。
+// 但它其实是**静态文件** —— 里面的数据都是前端起来后异步拉的 —— 所以给 ETag + no-cache：
+// 浏览器第二次访问只发一个 If-None-Match，命中就回 304（几十字节），省掉整包传输。
+// 注意别改成 no-store：那样每次都要重下 300KB，隧道上就是实打实的一秒。
+function sendHtml(req, res, body) {
+  if (htmlEtag && req.headers['if-none-match'] === htmlEtag) {
+    res.writeHead(304, { ETag: htmlEtag, 'Cache-Control': 'no-cache' });
+    return res.end();
+  }
+  const buf = Buffer.from(body, 'utf8');
+  res._bytes = buf.length;
+  const head = {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': buf.length,
+    'Cache-Control': 'no-cache',
+  };
+  if (htmlEtag) head.ETag = htmlEtag;
+  res.writeHead(200, head);
+  res.end(buf);
 }
 
 function send(res, status, type, body) {
@@ -4142,7 +4171,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           res.writeHead(302, { Location: '/?auth=fail' });
           return res.end();
         }
-        return send(res, 200, 'text/html; charset=utf-8', pageHtml());
+        return sendHtml(req, res, pageHtml());
       }
 
       // ===== 令牌接口(免鉴权) =====

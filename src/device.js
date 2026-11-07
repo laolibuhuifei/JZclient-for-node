@@ -48,7 +48,20 @@ const DEFAULTS = {
     model: 'gpt-4o-mini',
     temperature: 0.7,
     trigger: 'auto',     // auto=自动回复, keyword=关键词触发
+    // 用户自己设置的关键词, 默认空 —— 项目不内置任何触发词
     keywords: [],
+    // 关键词匹配方式: auto(前缀优先 + 词边界包含, 默认) / prefix(只认前缀) / contains(只认包含)
+    // 新增：anjianhe
+    keywordsMode: 'auto',
+    // 上次是否在运行。以前这个状态只在内存里, 重启服务就变回停止, 看着像功能坏了
+    // 新增：anjianhe
+    autoStart: true,
+    // 单次请求超时。推理模型(reasoner/o1 系列)先想再答, 60 秒经常来不及
+    // 新增：anjianhe
+    timeoutMs: 120000,
+    // 0 = 不传 max_tokens, 交给上游默认
+    // 新增：anjianhe
+    maxTokens: 0,
     systemPrompt: '你是一个家长端聊天助手。请用简短、口语化的中文回复，不要使用表情符号。',
     sessions: [],        // 启用 AI 的会话 { key, type, name, receiverId|dialogId }
   },
@@ -84,6 +97,52 @@ const DEFAULTS = {
     auto: true,
   },
 };
+
+// AI 助手配置归一化。
+// 优化/修复：anjianhe —— 新增 keywordsMode / autoStart / timeoutMs / maxTokens 四个字段，
+// 并把老配置里的脏数据（字符串形式的 keywords、数字型 receiverId、越界 temperature）收敛掉。
+// 老配置里没有 keywordsMode / autoStart / timeoutMs 这些字段，直接 Object.assign 也能跑，
+// 但出现过几种脏数据：keywords 是字符串、sessions 里 receiverId 被写成数字、
+// model 后面带空格导致请求 404。这里统一收敛，保证升级前后行为一致。
+function normalizeAi(raw) {
+  const d = DEFAULTS.ai;
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const num = (v, min, max, def) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return def;
+    return Math.min(max, Math.max(min, n));
+  };
+  const keywords = Array.isArray(r.keywords)
+    ? r.keywords.map((x) => String(x == null ? '' : x).trim()).filter(Boolean)
+    : [];
+  const sessions = Array.isArray(r.sessions)
+    ? r.sessions.filter((s) => s && typeof s === 'object' && (s.type === 'group' || s.type === 'single'))
+      .map((s) => {
+        const out = { key: String(s.key || ''), type: s.type, name: String(s.name || '') };
+        if (s.type === 'group') {
+          if (s.dialogId != null && s.dialogId !== '') out.dialogId = String(s.dialogId);
+        } else if (s.receiverId != null && s.receiverId !== '') {
+          out.receiverId = String(s.receiverId);
+        }
+        return out;
+      })
+    : [];
+  const mode = String(r.keywordsMode || '').trim();
+  return {
+    baseUrl: String(r.baseUrl || '').trim().replace(/\/+$/, ''),
+    apiKey: String(r.apiKey || ''),
+    model: String(r.model || d.model).trim() || d.model,
+    temperature: num(r.temperature, 0, 2, d.temperature),
+    trigger: r.trigger === 'keyword' ? 'keyword' : 'auto',
+    keywords,
+    keywordsMode: ['auto', 'prefix', 'contains'].indexOf(mode) >= 0 ? mode : d.keywordsMode,
+    autoStart: r.autoStart !== false,
+    timeoutMs: num(r.timeoutMs, 5000, 600000, d.timeoutMs),
+    maxTokens: num(r.maxTokens, 0, 32000, d.maxTokens),
+    systemPrompt: r.systemPrompt == null ? d.systemPrompt : String(r.systemPrompt),
+    sessions,
+  };
+}
 
 // 单块手表的 OneBot 默认配置(端口 0 = 由 webui 自动分配)
 function onebotWatchDefaults() {
@@ -213,7 +272,7 @@ function load() {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
       const cfg = Object.assign({}, DEFAULTS, JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')));
-      cfg.ai = Object.assign({}, DEFAULTS.ai, cfg.ai || {});
+      cfg.ai = normalizeAi(cfg.ai);
       cfg.webui = Object.assign({}, DEFAULTS.webui, cfg.webui || {});
       // 老配置里的 onebot.http / ws / wsClient / enabled 属于「全局实例」时代。
       // 现在只有按手表的实例了, 但直接丢掉会让老用户已经接好的端口和令牌全废,
@@ -237,15 +296,13 @@ function load() {
       cfg.biliComment = normalizeBiliComment(cfg.biliComment);
       cfg.plugins = normalizePlugins(cfg.plugins);
       cfg.links = normalizeLinks(cfg.links);
-      if (!Array.isArray(cfg.ai.sessions)) cfg.ai.sessions = [];
-      if (!Array.isArray(cfg.ai.keywords)) cfg.ai.keywords = [];
       return cfg;
     }
   } catch (e) { /* 损坏则用默认 */ }
   return Object.assign({}, DEFAULTS, {
     webui: Object.assign({}, DEFAULTS.webui),
     onebot: Object.assign({}, DEFAULTS.onebot),
-    ai: Object.assign({}, DEFAULTS.ai),
+    ai: normalizeAi(null),
     biliComment: Object.assign({}, DEFAULTS.biliComment),
     plugins: normalizePlugins(null),
     links: normalizeLinks(null),
@@ -298,5 +355,5 @@ module.exports = {
   // 按手表配置的归一化工具(webui 保存单个手表的 OneBot / 点播配置时要用)
   onebotWatchDefaults, normalizeOnebotWatch, normalizeExtApi,
   biliWatchDefaults, normalizeBiliWatch, normalizeBiliBots, normalizeBiliComment,
-  normalizePlugins, normalizeLinks,
+  normalizePlugins, normalizeLinks, normalizeAi,
 };

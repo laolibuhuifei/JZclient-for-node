@@ -8,7 +8,8 @@
     "jzclient": "bin/jzclient.js"
   },
   "scripts": {
-    "start": "node bin/jzclient.js"
+    "start": "node bin/jzclient.js",
+    "test": "node --test"
   },
   "keywords": [
     "smartwatch",

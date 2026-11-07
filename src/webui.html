@@ -4963,20 +4963,28 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
   }
 
   // ===== AI 助手 =====
+  // 优化/修复：anjianhe —— 运行状态卡补「重启后自动恢复」/诊断行，新增「自检（直连模型）」按钮，
+  // 触发方式表单补关键词匹配方式选择；会话保存后提示没对上的条目
   function renderAi(d){
     var c = d.config || {};
     var targets = d.targets || [];
     // 云端托管：接口由平台统一提供，界面只读
     var managed = !!d.managed;
     var html = '<div class="grid">';
+    var diag = d.diagnostics || {};
     html += '<div class="card"><div class="card-title">运行状态</div>' +
       '<div class="row"><span>AI 自动回复</span><span class="value">' + (d.running ? '运行中' : '已停止') + '</span></div>' +
+      '<div class="row"><span>重启后自动恢复</span><span class="value">' + (d.autoStart === false ? '不自动' : '自动') + '</span></div>' +
       '<div class="row"><span>IM 连接</span><span class="value">' + (d.connected ? '已连接' : '未连接') + '</span></div>' +
       '<div class="row"><span>启用会话</span><span class="value">' + (d.sessions || []).length + ' 个</span></div>' +
-      '<div style="margin-top:12px">' +
+      '<div class="row"><span>会话 / 关键词 / 模型</span><span class="value">' +
+        esc(String(diag.chatTargets || 0)) + ' / ' + esc(String((c.keywords || []).length)) +
+        ' / ' + esc(c.model || '-') + '</span></div>' +
+      '<div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px">' +
       (d.running
         ? '<button class="btn danger" id="aiStop">停止 AI</button>'
-        : '<button class="btn" id="aiStart">启动 AI</button>') + '</div></div>';
+        : '<button class="btn" id="aiStart">启动 AI</button>') +
+      '<button class="btn tonal" id="aiTest">自检（直连模型）</button></div></div>';
 
     if (managed) {
       // 托管模式：不显示地址和密钥（那是平台的内部实现，露出来只会让人以为能改），
@@ -5041,6 +5049,18 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       try { await post('/api/ai/stop'); toast('AI 已停止'); load(); }
       catch(e){ toast(e.message, true); }
     };
+    // 自检：绕过 IM 和会话判断，直接拿当前配置打一次模型接口。
+    // 「AI 不回复」时先点它，一次就能分清是上游/密钥/模型名的问题，还是触发链的问题
+    var testBtn = $('#aiTest');
+    if (testBtn) testBtn.onclick = async function(){
+      var old = testBtn.textContent;
+      testBtn.disabled = true; testBtn.textContent = '自检中…';
+      try {
+        var r = await post('/api/ai/test', {});
+        toast('接口正常 · ' + (r.model || '') + ' · ' + r.ms + 'ms → ' + String(r.reply || '').slice(0, 30));
+      } catch(e){ toast(e.message, true); }
+      finally { testBtn.disabled = false; testBtn.textContent = old; }
+    };
     var cfgBtn = $('#aiCfg');
     if (cfgBtn) cfgBtn.onclick = function(){
       openForm('AI 接口配置', [
@@ -5059,10 +5079,15 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         { name:'trigger', label:'模式', type:'select', value: c.trigger || 'auto', options:[
           { value:'auto', label:'自动回复（所有文本）' }, { value:'keyword', label:'关键词触发' }
         ]},
-        { name:'keywords', label:'关键词（逗号分隔）', value: (c.keywords || []).join(',') }
+        { name:'keywords', label:'关键词（逗号或空格分隔）', value: (c.keywords || []).join(',') },
+        { name:'keywordsMode', label:'关键词匹配方式', type:'select', value: c.keywordsMode || 'auto', options:[
+          { value:'auto', label:'前缀优先 + 词边界包含（推荐）' },
+          { value:'prefix', label:'只认前缀（最严格）' },
+          { value:'contains', label:'只认包含（旧行为）' }
+        ]}
       ], '保存', async function(v){
-        await post('/api/ai/trigger', v);
-        toast('已保存'); load();
+        var r = await post('/api/ai/trigger', v);
+        toast('已保存，共 ' + (r.keywords || []).length + ' 个关键词'); load();
       });
     };
     var prompt = $('#aiPrompt');
@@ -5080,7 +5105,12 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       });
       try {
         var r = await post('/api/ai/sessions', { keys: keys });
-        toast('已启用 ' + r.count + ' 个会话'); load();
+        if (r.missed && r.missed.length) {
+          toast('已启用 ' + r.count + ' 个，' + r.missed.length + ' 个没对上会话列表（刷新页面后重勾）', true);
+        } else {
+          toast('已启用 ' + r.count + ' 个会话');
+        }
+        load();
       } catch(e){ toast(e.message, true); }
     };
   }

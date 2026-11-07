@@ -11,6 +11,7 @@ const device = require('./device');
 const sso = require('./sso');
 const { ImClient } = require('./im');
 const { chat: aiChat } = require('./ai');
+const aiTrigger = require('./ai-trigger');
 const { parseMessage, describe, mediaUrl, buildText, buildEmoji, buildLocation, buildLink, buildPhoto, buildVideo, buildVoice, buildKaomoji, EMOJI_PRESET, LINK_APP_NAME } = require('./message');
 const { loadImageSource, uploadImage, uploadVoice, uploadVideo, directVideo, probeDuration, splitAudio, splitVideo, cleanupSplit, downloadToTmp } = require('./upload');
 const { fetchFavicon } = require('./favicon');
@@ -1422,9 +1423,13 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   }
 
   // ===== AI 助手状态 =====
+  // aiRunning 只表示「这一轮进程里是否在听」，真正的开关状态存在 cfg.ai.autoStart，
+  // 启动时按它自动恢复（以前只活在内存里，重启服务就变回停止，看着像「AI 坏了」）
   let aiRunning = false;
   const aiHistory = new Map();
   const aiChains = new Map();
+  // 「会话没启用」这条提示的限流时间戳（避免家庭群之类未勾选会话刷屏）
+  const aiSkipLog = { at: 0 };
 
   function pushChat(key, msg) {
     const list = chatLog.get(key) || [];
@@ -1449,21 +1454,58 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   }
 
   // ===== AI 自动回复 =====
-  function findAiSession(m) {
-    const a = cfg.ai;
-    if (m.dialogId) {
-      const g = a.sessions.find((s) => s.type === 'group' && Number(s.dialogId) === Number(m.dialogId));
-      if (g) return g;
-    }
-    return a.sessions.find((s) => s.type === 'single' && Number(s.receiverId) === Number(m.imAccountId)) || null;
+  //
+  // 优化/修复：anjianhe (https://github.com/anjianhe)
+  //
+  // 会话匹配和关键词匹配的纯逻辑都在 ai-trigger.js（不碰网络，可以直接单测）。
+  // 这里只负责把运行时对象（chatTargets / im / cfg）喂进去。
+  //
+  // 旧实现有两个坑，都是「面板能看见消息、AI 一声不吭」的元凶：
+  //   1. findAiSession 只认 receiverId === m.imAccountId，而且用 Number() 比较。
+  //      可归档用的 resolveChatKey() 是 receiverId === imAccountId || receiverId === dialogId。
+  //      服务端下发时 tag10/tag11 谁在前会随固件和网关版本变，两套规则就劈叉了。
+  //   2. 关键词只做 toLowerCase + includes，全角数字、零宽字符、前后空白全不管。
+  //      手表输入法把半角发成全角时，界面上看着一模一样，匹配却永远失败。
+  //
+  // 现在：会话统一按 chatKey 判定（和聊天面板同源），关键词统一先归一化再匹配。
+  function aiSessionOf(m, chatKey) {
+    const target = (chatTargets || []).find((x) => x.key === chatKey) || null;
+    const sess = aiTrigger.matchSession(cfg.ai.sessions, {
+      chatKey: chatKey || '',
+      dialogId: m.dialogId,
+      imAccountId: m.imAccountId,
+      selfId: (im && im.imAccountId) || cfg.imAccountId || '',
+      peers: target ? (target.peers || []) : [],
+    });
+    return { sess, target };
   }
 
+  // 返回 { hit, keyword, how }：auto 模式恒命中；keyword 模式按归一化后的前缀/词边界判断
   function aiShouldTrigger(text) {
     const a = cfg.ai;
-    if (a.trigger !== 'keyword') return true;
-    if (!a.keywords || !a.keywords.length) return false;
-    const t = String(text).toLowerCase();
-    return a.keywords.some((k) => k && t.includes(String(k).toLowerCase()));
+    if (a.trigger !== 'keyword') return { hit: true, keyword: null, how: 'auto' };
+    return aiTrigger.matchKeyword(text, a.keywords, a.keywordsMode);
+  }
+
+  // 自动启动 AI（启动阶段和改完配置后都可能用到，失败只告警不阻断）
+  // 优化/修复：anjianhe —— 启动状态以前只在内存里，重启服务就变回停止，看着像功能坏了
+  async function startAiAuto(reason) {
+    const rt = aiRuntime();
+    if (!rt.baseUrl) {
+      log.warn('ai', `跳过自动启动（${reason}）：没有可用的接口地址`
+        + (AI_MANAGED ? '，托管模式下检查 JZ_AI_BASE_URL 有没有注入' : '，请在「接口配置」里填'));
+      return false;
+    }
+    if (!cfg.ai.sessions || !cfg.ai.sessions.length) {
+      log.warn('ai', `跳过自动启动（${reason}）：没有启用任何会话`);
+      return false;
+    }
+    await ensureIM();
+    aiRunning = true;
+    log.info('ai', `已自动启动（${reason}）model=${rt.model || '(默认)'} `
+      + `trigger=${cfg.ai.trigger || 'auto'} keywords=${(cfg.ai.keywords || []).length} `
+      + `sessions=${cfg.ai.sessions.length} managed=${AI_MANAGED}`);
+    return true;
   }
 
   function chatKeyOfSession(sess) {
@@ -1474,34 +1516,52 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     return t ? t.key : null;
   }
 
+  // 单聊会话的接收方 id。老配置里可能只有 key（s:<id>）没有 receiverId，
+  // 以前直接拿 sess.receiverId 去发，空值会让发送端在参数校验处静默失败。
+  // 优化/修复：anjianhe
+  function receiverOfSession(sess) {
+    if (sess && sess.receiverId != null && sess.receiverId !== '') return sess.receiverId;
+    const k = aiTrigger.sessionKeyOf(sess);
+    return k.indexOf('s:') === 0 ? k.slice(2) : '';
+  }
+
   function queueAiReply(sess, text) {
     // 托管模式下 aiRuntime() 会换成平台的网关地址和实例令牌，
     // 其余字段（temperature / 提示词）还是用户自己配的
     const a = aiRuntime();
-    const prev = aiChains.get(sess.key) || Promise.resolve();
+    // 串行链的 key 用会话 key 兜底：老配置没有 sess.key 时不会退化成「所有会话共用一条链」
+    const chainKey = aiTrigger.sessionKeyOf(sess) || String(sess.key || 'default');
+    const prev = aiChains.get(chainKey) || Promise.resolve();
     const p = prev.then(async () => {
       try {
-        const h = aiHistory.get(sess.key) || [];
+        const to = sess.type === 'group' ? String(sess.dialogId || '') : String(receiverOfSession(sess));
+        if (!to) throw new Error('会话没有可用的接收方 id（配置里缺 receiverId / dialogId）');
+        const h = aiHistory.get(chainKey) || [];
         const msgs = [{ role: 'system', content: a.systemPrompt || '' }]
           .concat(h)
           .concat([{ role: 'user', content: text }]);
         const reply = await aiChat(a, msgs);
         const nh = h.concat([{ role: 'user', content: text }, { role: 'assistant', content: reply }]);
         if (nh.length > 20) nh.splice(0, nh.length - 20);
-        aiHistory.set(sess.key, nh);
+        aiHistory.set(chainKey, nh);
 
         const c = await ensureIM();
         const r = sess.type === 'group'
           ? await c.sendGroupText(sess.dialogId, c.imAccountId, reply)
-          : await c.sendText(sess.receiverId, reply);
+          : await c.sendText(to, reply);
+        log.info('ai', `回复已发送 ${chainKey} ${r && r.ok ? 'OK' : '失败'} 长度=${String(reply).length}`);
         const key = chatKeyOfSession(sess);
-        if (key) pushChat(key, { self: true, text: '[AI] ' + reply + (r.ok ? '' : '（发送失败）'), time: Date.now() });
+        if (key) pushChat(key, { self: true, text: '[AI] ' + reply + (r && r.ok ? '' : '（发送失败）'), time: Date.now() });
       } catch (e) {
+        // 以前这里只在页面上塞一句「[AI 出错]」，终端日志完全看不到原因，
+        // 用户只能猜。模型名写错、key 过期、reasoner 只回思考不回正文都出在这里。
+        const msg = e && e.message ? e.message : String(e);
+        log.warn('ai', `回复失败 ${chainKey}: ` + msg);
         const key = chatKeyOfSession(sess);
-        if (key) pushChat(key, { self: true, text: '[AI 出错] ' + e.message, time: Date.now() });
+        if (key) pushChat(key, { self: true, text: '[AI 出错] ' + msg, time: Date.now() });
       }
     });
-    aiChains.set(sess.key, p);
+    aiChains.set(chainKey, p);
   }
 
   // IM 业务推送类型: 只用于更新本地状态, 不展示在聊天列表
@@ -1615,7 +1675,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       return;
     }
 
-    if (m.imAccountId === (im && im.imAccountId)) return;
+    // 自己发的消息不当成收到的处理。两边都转字符串再比：以前是严格 ===，
+    // 一个环境里 imAccountId 是数字、另一个是字符串时，自己发的会被当成对方发的，
+    // AI 就会自己跟自己聊起来。（修复：anjianhe）
+    const selfImId = im && im.imAccountId != null ? String(im.imAccountId) : '';
+    const msgImId = m.imAccountId != null ? String(m.imAccountId) : '';
+    if (selfImId && msgImId && selfImId === msgImId) return;
     const parsed = parseMessage(m.msgType, m.raw);
     const text = describe(parsed);
     // 调试: 表情消息记录 inner 字段, 便于确认字段名
@@ -1645,9 +1710,46 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     }
 
     // AI 自动回复(点播命令归点播机器人管, 范围外的点播命令也不让 AI 答, 免得两边抢话)
-    if (aiRunning && !biliCmd && parsed.kind === 'text' && parsed.text) {
-      const sess = findAiSession(m);
-      if (sess && aiShouldTrigger(parsed.text)) queueAiReply(sess, parsed.text);
+    //
+    // 这段以前是「静默失败」重灾区：条件不满足就什么都不打印，用户只能干瞪眼，
+    // 日志里连「为什么没触发」都看不到。现在每一层不通过都留痕：
+    //   - 没文本（消息类型不是文本，或正文只存在于信封内层）→ debug
+    //   - 会话没勾选 → info，并把当前启用的会话 key 一起打出来，方便对照
+    //   - 关键词没命中 → info，打出归一化后的关键词和文本前缀
+    //   - 命中 → info，打出单聊/群、命中方式（exact/prefix/contains）
+    if (aiRunning && !biliCmd) {
+      const aiText = aiTrigger.aiTextOf(parsed, text);
+      const aiKey = key || resolveChatKey(m);
+      if (!aiText) {
+        if (log.isEnabled('debug')) log.debug('ai', `跳过：这条消息没有可回复的正文 kind=${parsed.kind}`);
+      } else {
+        const found = aiSessionOf(m, aiKey);
+        if (!found.sess) {
+          // 没勾选的会话天天都有（家庭群、别的表），不能每条都 info 刷屏；
+          // 每分钟最多一条，但 debug 下每条都留，排查时切 WP_LOG=debug 就行
+          const enabled = (cfg.ai.sessions || []).map((s) => aiTrigger.sessionKeyOf(s)).filter(Boolean);
+          const detail = `key=${aiKey || '(未解析)'} enabled=${enabled.length ? JSON.stringify(enabled) : '(空)'}`;
+          if (log.isEnabled('debug')) log.debug('ai', `跳过：会话没启用 ${detail}`);
+          else if (Date.now() - aiSkipLog.at > 60000) {
+            aiSkipLog.at = Date.now();
+            log.info('ai', `跳过：这条会话没在「启用 AI 的会话」里 ${detail}（同类提示每分钟最多一条）`);
+          }
+        } else {
+          const trig = aiShouldTrigger(aiText);
+          if (!trig.hit) {
+            if (log.isEnabled('debug')) {
+              log.debug('ai', `跳过：关键词未命中 mode=${cfg.ai.keywordsMode || 'auto'} `
+                + `keywords=${JSON.stringify((cfg.ai.keywords || []).slice(0, 10))} `
+                + `text=${JSON.stringify(aiText.slice(0, 40))}`);
+            }
+          } else {
+            log.info('ai', `触发 → ${found.sess.type === 'group' ? '群' : '单聊'} `
+              + `${aiTrigger.sessionKeyOf(found.sess)} `
+              + `(${trig.how}${trig.keyword ? ':' + trig.keyword : ''}) 文本=${JSON.stringify(aiText.slice(0, 30))}`);
+            queueAiReply(found.sess, aiText);
+          }
+        }
+      }
     }
 
     if (!text) return;
@@ -3101,29 +3203,38 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         return ok(res, { result: true });
       }
       if (parts[2] === 'sessions' && req.method === 'POST') {
+        // 优化/修复：anjianhe —— 会话 key 统一成 s:/g:，并把没对上的 key 回给前端
         const b = await readBody(req);
         const keys = Array.isArray(b.keys) ? b.keys.map(String) : [];
         const targets = await loadChatTargets();
         const picked = [];
+        const missed = [];
         keys.forEach((k) => {
           const t = targets.find((x) => x.key === k);
-          if (!t) return;
+          if (!t) { missed.push(k); return; }
+          // key 统一成聊天会话的写法（s:/g:），和 resolveChatKey 完全对齐
           picked.push(t.type === 'group'
-            ? { key: 'group:' + t.dialogId, type: 'group', name: t.name, dialogId: t.dialogId }
-            : { key: 'single:' + t.receiverId, type: 'single', name: t.name, receiverId: t.receiverId });
+            ? { key: 'g:' + t.dialogId, type: 'group', name: t.name, dialogId: t.dialogId }
+            : { key: 's:' + t.receiverId, type: 'single', name: t.name, receiverId: t.receiverId });
         });
         a.sessions = picked;
         device.save(cfg);
-        return ok(res, { count: picked.length });
+        log.info('ai', `启用会话已更新 ${picked.length} 个`
+          + (missed.length ? `；${missed.length} 个没对上会话列表（会话还没加载完时会这样，刷新后重勾）: ${JSON.stringify(missed.slice(0, 5))}` : ''));
+        return ok(res, { count: picked.length, missed });
       }
       if (parts[2] === 'trigger' && req.method === 'POST') {
         const b = await readBody(req);
         a.trigger = b.trigger === 'keyword' ? 'keyword' : 'auto';
-        if (b.keywords != null) {
-          a.keywords = String(b.keywords).split(/[,，\s]+/).filter(Boolean);
+        // 关键词统一走归一化：全角折半角、去零宽、去重，避免「看着一样但就是匹配不上」
+        if (b.keywords != null) a.keywords = aiTrigger.splitKeywords(b.keywords);
+        if (b.keywordsMode != null) {
+          const mode = String(b.keywordsMode);
+          a.keywordsMode = ['auto', 'prefix', 'contains'].indexOf(mode) >= 0 ? mode : 'auto';
         }
         device.save(cfg);
-        return ok(res, { trigger: a.trigger, keywords: a.keywords });
+        log.info('ai', `触发方式已更新 trigger=${a.trigger} mode=${a.keywordsMode || 'auto'} keywords=${JSON.stringify(a.keywords || [])}`);
+        return ok(res, { trigger: a.trigger, keywords: a.keywords, keywordsMode: a.keywordsMode || 'auto' });
       }
       if (parts[2] === 'prompt' && req.method === 'POST') {
         const b = await readBody(req);
@@ -3132,20 +3243,65 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         return ok(res, { systemPrompt: a.systemPrompt });
       }
       if (parts[2] === 'start' && req.method === 'POST') {
+        // 优化/修复：anjianhe —— 启动失败要说清楚是缺地址、缺模型还是缺会话；
+        // 启动成功则落盘 autoStart，进程重启后自动恢复
         // 托管模式下 baseUrl 来自环境变量，不能只看 cfg.ai.baseUrl
-        if (!aiRuntime().baseUrl) throw new Error('请先配置 AI 接口地址');
-        if (!a.sessions.length) throw new Error('请先选择要启用 AI 的会话');
-        await ensureIM();
-        aiRunning = true;
-        return ok(res, { running: true });
+        const rt = aiRuntime();
+        if (!rt.baseUrl) {
+          throw new Error(AI_MANAGED
+            ? '托管模式没拿到 AI 网关地址（JZ_AI_BASE_URL），检查实例环境变量'
+            : '请先配置 AI 接口地址');
+        }
+        if (!rt.model) {
+          throw new Error('没有模型名：托管模式由 JZ_AI_MODEL 下发，自带密钥时请在「接口配置」里填');
+        }
+        await startAiAuto('手动启动');
+        if (!aiRunning) throw new Error('没有启用任何会话，AI 不会开始监听');
+        // 记住这次启动，进程/WebUI 重启后自动恢复，不用每次回来手动点一下
+        a.autoStart = true;
+        device.save(cfg);
+        return ok(res, { running: true, model: rt.model, managed: AI_MANAGED });
       }
       if (parts[2] === 'stop' && req.method === 'POST') {
         aiRunning = false;
+        a.autoStart = false;
+        device.save(cfg);
+        log.info('ai', 'AI 已停止（下次启动不再自动恢复，除非重新点启动）');
         return ok(res, { running: false });
+      }
+      // 一键自检：绕过 IM 和会话判断，直接拿配置发一句话给模型。
+      // 「AI 不回复」时先点这个 —— 上游通不通、模型名对不对，一次就分清了。
+      // 新增：anjianhe（对应前端「自检（直连模型）」按钮）
+      if (parts[2] === 'test' && req.method === 'POST') {
+        const rt = aiRuntime();
+        if (!rt.baseUrl) {
+          throw new Error(AI_MANAGED
+            ? '托管模式没拿到 AI 网关地址（JZ_AI_BASE_URL）'
+            : '请先配置 AI 接口地址');
+        }
+        const b = await readBody(req).catch(() => ({}));
+        const text = String((b && b.text) || '连通性测试，请只回复 ok').slice(0, 200);
+        const t0 = Date.now();
+        try {
+          const reply = await aiChat(rt, [
+            { role: 'system', content: String(rt.systemPrompt || '').slice(0, 1000) },
+            { role: 'user', content: text },
+          ]);
+          return ok(res, {
+            ok: true, managed: AI_MANAGED, source: AI_SOURCE,
+            model: rt.model || '', ms: Date.now() - t0, reply: String(reply).slice(0, 500),
+          });
+        } catch (e) {
+          // 把上游错误原样抛给前端：401/402/429/模型不存在，用户需要看到原文
+          throw new Error('AI 自检失败（' + (rt.model || '未设置模型') + '）: '
+            + (e && e.message ? e.message : String(e)));
+        }
       }
 
       const targets = await loadChatTargets().catch(() => []);
-      const enabledKeys = a.sessions.map((s) => (s.type === 'group' ? 'g:' + s.dialogId : 's:' + s.receiverId));
+      // 用 sessionKeyOf 生成「启用了哪些会话」：老配置里存的可能是 single:123，
+      // 直接拼 's:'+receiverId 会在 receiverId 缺失时得到 's:undefined'，勾选状态全丢
+      const enabledKeys = (a.sessions || []).map((s) => aiTrigger.sessionKeyOf(s)).filter(Boolean);
       const rt = aiRuntime();
       return ok(res, {
         // managed=true 时前端把「接口配置」整块换成只读；
@@ -3162,15 +3318,30 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           temperature: a.temperature,
           trigger: a.trigger || 'auto',
           keywords: a.keywords || [],
+          keywordsMode: a.keywordsMode || 'auto',
+          timeoutMs: a.timeoutMs,
           systemPrompt: a.systemPrompt || '',
         },
         sessions: a.sessions,
+        // autoStart=true 表示「上次是开着的」，进程重启会自动恢复
+        autoStart: a.autoStart !== false,
         running: aiRunning,
         connected: !!(im && im.connected),
         targets: targets.map((t) => ({
           key: t.key, type: t.type, name: t.name, sub: t.sub || '',
           enabled: enabledKeys.includes(t.key),
         })),
+        // 排查用：触发链上各环节的当前值，一眼看出是哪一步空的
+        // 新增：anjianhe
+        diagnostics: {
+          selfImAccountId: (im && im.imAccountId) || cfg.imAccountId || 0,
+          chatTargets: (chatTargets || []).length,
+          sessions: (a.sessions || []).length,
+          keywords: (a.keywords || []).length,
+          hasBaseUrl: !!rt.baseUrl,
+          hasKey: !!rt.apiKey,
+          model: rt.model || '',
+        },
       });
     }
 
@@ -4351,6 +4522,19 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   });
 
   startImBackground();
+
+  // AI 自动回复的「启动」状态以前只活在内存变量里：WebUI/进程一重启就变回停止，
+  // 界面上看着「已停止」，用户以为功能坏了，日志里也找不到任何线索。
+  // 这里按 cfg.ai.autoStart 自动恢复；配置不全时只告警一句，不拖慢其它功能。
+  // 完全没配过 AI 的（没地址也没勾会话）就安静跳过，别每次启动都刷一行警告。
+  // 优化/修复：anjianhe
+  const aiConfigured = !!((cfg.ai && (cfg.ai.sessions || []).length)
+    || String((cfg.ai && cfg.ai.baseUrl) || '').trim() || AI_MANAGED);
+  if (cfg.ai && cfg.ai.autoStart !== false && aiConfigured) {
+    startAiAuto('上次退出时处于开启状态').catch((e) => {
+      log.warn('ai', '自动启动失败（不影响其它功能）: ' + (e && e.message ? e.message : e));
+    });
+  }
   // 对外 API 令牌: 启用状态下确保已生成
   ensureGeniusToken();
 

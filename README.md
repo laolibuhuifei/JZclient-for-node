@@ -801,11 +801,48 @@ WebUI 每 30 秒同步一次电量与上报时间，不需要手动刷新页面�
 - `apiKey`：接口密钥
 - `model`：模型名称
 - `trigger`：`auto` 自动回复，或 `keyword` 关键词触发
-- `keywords`：关键词列表
+- `keywords`：关键词列表（用户自己设置，默认空，项目不内置任何触发词）
+- `keywordsMode`：关键词匹配方式，`auto`（前缀优先 + 词边界包含，默认）/ `prefix` / `contains`
 - `systemPrompt`：系统提示词
 - `sessions`：启用自动回复的会话
 
 配置保存在本地运行期配置文件中，不会提交到仓库。
+
+### 关键词/自动回复「怎么发都不触发」的排查与修复
+
+> 本节对应一次线上故障修复（优化：anjianhe）。
+
+触发链路是四段：**收到消息 → 解析出正文 → 找到已勾选的会话 → 匹配关键词**。
+旧版本在第二、三段各有一处只对部分环境成立的假设，于是「聊天面板能看见消息，AI 一声不吭」：
+
+| 环节 | 旧实现 | 出问题的环境 |
+| --- | --- | --- |
+| 正文 | 只读 `parsed.text` | 固件把正文放在 `msgNewContent` 内层，`describe()` 能找到（面板正常）但 `parsed.text` 是空串，AI 分支直接短路 |
+| 会话 | `receiverId === m.imAccountId`（`Number()` 比较） | 归档用的是 `receiverId === imAccountId \|\| receiverId === dialogId`，两套规则劈叉；账号 ID 超过 16 位还会浮点丢精度 |
+| 关键词 | `toLowerCase().includes()` | 全角字符、零宽字符、前后空白都会让匹配失败，界面上却看不出差别 |
+| 运行态 | `aiRunning` 只在内存里 | 进程/WebUI 重启后变回「已停止」，日志里没有任何记录 |
+
+现在：
+
+- 正文提取优先复用 `describe()` 的结果 —— **面板里看得见的文字，AI 一定拿得到**，再按内层字段兜底
+- 会话匹配复用聊天面板的 `chatKey`（单聊 `s:` / 群 `g:`），单聊与群聊判定同源；ID 比较改成字符串 + BigInt
+- 关键词匹配前先归一化：NFKC（全角折半角）、去零宽字符、折叠空白、小写化
+- 触发链每一步不通过都会留痕：`WP_LOG=info` 看「会话没启用」（每分钟限流一次）和「命中关键词」，`WP_LOG=debug` 看逐条原因
+- 「启动」状态写入 `cfg.ai.autoStart`，重启后自动恢复；点「停止 AI」才会取消
+- AI 页面新增 **「自检（直连模型）」** 按钮：绕过 IM 和会话判断直接请求一次模型接口，
+  返回耗时和回复内容——一眼区分「上游/密钥/模型名不对」还是「触发链没通」
+- 兼容 `deepseek-reasoner`：识别推理模型后不发送 `temperature`（部分网关会 400），
+  正文为空但存在 `reasoning_content` 时给出明确提示；超时默认 120 秒，可用 `cfg.ai.timeoutMs` 调整
+
+### 测试
+
+```bash
+node --test
+```
+
+零依赖，只用 Node 内置 test runner（Node ≥ 18）。覆盖关键词归一化与匹配、会话匹配的多路兜底、
+真实 IM 信封的正文提取，以及 `deepseek-flash` / `deepseek-reasoner` 的请求参数构造。
+
 
 ## 微聊 B 站点播
 

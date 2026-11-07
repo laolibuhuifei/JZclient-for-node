@@ -4966,6 +4966,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
   function renderAi(d){
     var c = d.config || {};
     var targets = d.targets || [];
+    // 云端托管：接口由平台统一提供，界面只读
+    var managed = !!d.managed;
     var html = '<div class="grid">';
     html += '<div class="card"><div class="card-title">运行状态</div>' +
       '<div class="row"><span>AI 自动回复</span><span class="value">' + (d.running ? '运行中' : '已停止') + '</span></div>' +
@@ -4976,15 +4978,36 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         ? '<button class="btn danger" id="aiStop">停止 AI</button>'
         : '<button class="btn" id="aiStart">启动 AI</button>') + '</div></div>';
 
-    html += '<div class="card"><div class="card-title">接口配置</div>' +
-      '<div class="row"><span>请求地址</span><span class="value">' + esc(c.baseUrl || '未配置') + '</span></div>' +
-      '<div class="row"><span>模型</span><span class="value">' + esc(c.model || '-') + '</span></div>' +
-      '<div class="row"><span>API Key</span><span class="value">' + esc(c.hasKey ? c.apiKeyMask : '未设置') + '</span></div>' +
-      '<div class="row"><span>温度</span><span class="value">' + esc(c.temperature != null ? c.temperature : '-') + '</span></div>' +
-      '<div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px">' +
-      '<button class="btn tonal small" id="aiCfg">修改接口</button>' +
-      '<button class="btn tonal small" id="aiTrig">触发方式</button>' +
-      '<button class="btn tonal small" id="aiPrompt">系统提示词</button></div></div>';
+    if (managed) {
+      // 托管模式：不显示地址和密钥（那是平台的内部实现，露出来只会让人以为能改），
+      // 也不给「修改接口」按钮 —— 后端 /api/ai/config 同样会拒
+      var isOfficial = d.source === 'platform';
+      var srcTag = isOfficial
+        ? '<span class="pl-tag ok">官方 AI</span>'
+        : '<span class="pl-tag">自带密钥</span>';
+      var srcHint = isOfficial
+        ? '接口由云端平台统一提供，无需填写密钥，也不支持自定义配置。<br>配额和用量可以在平台的「微聊 AI」页面查看。'
+        : '密钥在平台的「微聊 AI」页面设置，实例里不支持修改。请求从实例直连上游，不经过平台。';
+      html += '<div class="card"><div class="card-title">接口配置</div>' +
+        '<div class="row"><span>服务来源</span><span class="value">' + srcTag + '</span></div>' +
+        '<div class="row"><span>模型</span><span class="value">' + esc(c.model || '-') + '</span></div>' +
+        '<div class="row"><span>温度</span><span class="value">' + esc(c.temperature != null ? c.temperature : '-') + '</span></div>' +
+        '<p class="muted" style="margin:12px 0 0;line-height:1.6">' + srcHint + '</p>' +
+        // 触发方式和提示词是「怎么用」，不是「连哪」，托管模式也该让用户自己调
+        '<div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px">' +
+        '<button class="btn tonal small" id="aiTrig">触发方式</button>' +
+        '<button class="btn tonal small" id="aiPrompt">系统提示词</button></div></div>';
+    } else {
+      html += '<div class="card"><div class="card-title">接口配置</div>' +
+        '<div class="row"><span>请求地址</span><span class="value">' + esc(c.baseUrl || '未配置') + '</span></div>' +
+        '<div class="row"><span>模型</span><span class="value">' + esc(c.model || '-') + '</span></div>' +
+        '<div class="row"><span>API Key</span><span class="value">' + esc(c.hasKey ? c.apiKeyMask : '未设置') + '</span></div>' +
+        '<div class="row"><span>温度</span><span class="value">' + esc(c.temperature != null ? c.temperature : '-') + '</span></div>' +
+        '<div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px">' +
+        '<button class="btn tonal small" id="aiCfg">修改接口</button>' +
+        '<button class="btn tonal small" id="aiTrig">触发方式</button>' +
+        '<button class="btn tonal small" id="aiPrompt">系统提示词</button></div></div>';
+    }
 
     html += '<div class="card"><div class="card-title">触发方式</div>' +
       '<div class="row"><span>模式</span><span class="value">' + (c.trigger === 'keyword' ? '关键词触发' : '自动回复') + '</span></div>' +

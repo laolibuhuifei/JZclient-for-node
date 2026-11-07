@@ -262,6 +262,34 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   const api = new ApiClient(cfg);
   let cache = { at: 0, list: [] };
 
+  // ===== 云端托管的 AI =====
+  //
+  // 平台（jz-cloud）启动实例时注入 JZ_AI_*：
+  //   platform（官方）—— JZ_AI_MODE=platform + 网关地址 + 实例自己的令牌，
+  //                      上游 key 永远不下发
+  //   own（自带密钥）—— JZ_AI_MODE=own + 用户自己的上游地址和 key
+  //
+  // 两种情况都由平台统一管理，所以：
+  //   - 界面显示来源，不给改接口（改了也不生效，运行时读的是环境变量）
+  //   - /api/ai/config 直接拒，防止绕过界面直接调接口
+  //   - 会话选择 / 触发方式 / 系统提示词 仍然归用户，那部分是「怎么用」不是「连哪」
+  //
+  // 只认 MODE 是刻意的：光有 BASE_URL 可能只是有人手动设了个网关，那不叫托管。
+  const AI_SOURCE = String(process.env.JZ_AI_MODE || '').trim();
+  const AI_MANAGED = (AI_SOURCE === 'platform' || AI_SOURCE === 'own')
+    && !!String(process.env.JZ_AI_BASE_URL || '').trim();
+
+  // 真正发请求时用的配置。托管模式下环境变量覆盖用户配置，
+  // 但 temperature / 触发方式 / 提示词这些仍然沿用 cfg.ai。
+  function aiRuntime() {
+    if (!AI_MANAGED) return cfg.ai;
+    return Object.assign({}, cfg.ai, {
+      baseUrl: String(process.env.JZ_AI_BASE_URL || '').trim(),
+      apiKey: String(process.env.JZ_AI_TOKEN || ''),
+      model: String(process.env.JZ_AI_MODEL || '').trim() || cfg.ai.model,
+    });
+  }
+
   // ===== 插件系统 =====
   // 插件能用的能力全部从下面这个 host 走，插件本身拿不到 api / cfg / fs。
   // 想给插件多开一个口子，就在这里加一个方法，而不是把内部对象整个递出去。
@@ -1447,7 +1475,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   }
 
   function queueAiReply(sess, text) {
-    const a = cfg.ai;
+    // 托管模式下 aiRuntime() 会换成平台的网关地址和实例令牌，
+    // 其余字段（temperature / 提示词）还是用户自己配的
+    const a = aiRuntime();
     const prev = aiChains.get(sess.key) || Promise.resolve();
     const p = prev.then(async () => {
       try {
@@ -3059,6 +3089,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (parts[1] === 'ai') {
       const a = cfg.ai;
       if (parts[2] === 'config' && req.method === 'POST') {
+        // 托管模式下接口地址/密钥/模型由平台统一提供，改了也不生效
+        // （运行时读的是 JZ_AI_* 环境变量），所以直接拒，而不是「假装保存成功」
+        if (AI_MANAGED) throw new Error('AI 接口由云端平台统一配置，实例里不能修改');
         const b = await readBody(req);
         if (b.baseUrl != null) a.baseUrl = String(b.baseUrl).trim();
         if (b.apiKey) a.apiKey = String(b.apiKey);
@@ -3099,7 +3132,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         return ok(res, { systemPrompt: a.systemPrompt });
       }
       if (parts[2] === 'start' && req.method === 'POST') {
-        if (!a.baseUrl) throw new Error('请先配置 AI 接口地址');
+        // 托管模式下 baseUrl 来自环境变量，不能只看 cfg.ai.baseUrl
+        if (!aiRuntime().baseUrl) throw new Error('请先配置 AI 接口地址');
         if (!a.sessions.length) throw new Error('请先选择要启用 AI 的会话');
         await ensureIM();
         aiRunning = true;
@@ -3112,12 +3146,19 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
       const targets = await loadChatTargets().catch(() => []);
       const enabledKeys = a.sessions.map((s) => (s.type === 'group' ? 'g:' + s.dialogId : 's:' + s.receiverId));
+      const rt = aiRuntime();
       return ok(res, {
+        // managed=true 时前端把「接口配置」整块换成只读；
+        // source 决定文案（platform=官方 AI，own=自带密钥）
+        managed: AI_MANAGED,
+        source: AI_MANAGED ? AI_SOURCE : '',
         config: {
-          baseUrl: a.baseUrl || '',
-          hasKey: !!a.apiKey,
-          apiKeyMask: a.apiKey ? String(a.apiKey).slice(0, 6) + '...' : '',
-          model: a.model || '',
+          // 托管模式下 baseUrl 显示网关地址没意义（用户也改不了），前端会换成固定文案；
+          // 这里仍然回真实值，方便脚本排障
+          baseUrl: rt.baseUrl || '',
+          hasKey: !!rt.apiKey,
+          apiKeyMask: rt.apiKey ? String(rt.apiKey).slice(0, 6) + '...' : '',
+          model: rt.model || '',
           temperature: a.temperature,
           trigger: a.trigger || 'auto',
           keywords: a.keywords || [],

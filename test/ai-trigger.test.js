@@ -243,6 +243,17 @@ test('normalizeMessages：连续同角色合并、空 assistant 丢弃、system 
 });
 
 // ============ 配置归一化 ============
+test('toImId：数字字符串必须还原成 number（tlv 对 string 走 UTF-8，协议不认）', () => {
+  assert.strictEqual(trig.toImId(123), 123);
+  assert.strictEqual(trig.toImId('123'), 123);
+  assert.strictEqual(trig.toImId(' 123 '), 123);
+  assert.strictEqual(trig.toImId(''), '');
+  assert.strictEqual(trig.toImId(null), '');
+  assert.strictEqual(trig.toImId('s:123'), 's:123');
+  // 超出安全整数就保留字符串，宁可报错也不悄悄改号
+  assert.strictEqual(trig.toImId('12345678901234567890'), '12345678901234567890');
+});
+
 test('normalizeAi：老配置缺字段时补默认值，keywords 默认为空', () => {
   const a = device.normalizeAi({ baseUrl: 'https://api.deepseek.com/v1/' });
   assert.strictEqual(a.baseUrl, 'https://api.deepseek.com/v1');
@@ -272,8 +283,9 @@ test('normalizeAi：脏数据收敛', () => {
   assert.strictEqual(a.trigger, 'auto');
   assert.strictEqual(a.keywordsMode, 'auto');
   assert.strictEqual(a.sessions.length, 2);
-  assert.strictEqual(a.sessions[0].receiverId, '1001');
-  assert.strictEqual(a.sessions[1].dialogId, '9009');
+  // 保持数字类型：转成字符串会让 im.js 的 tlv() 用 UTF-8 编码 id，消息发不出去
+  assert.strictEqual(a.sessions[0].receiverId, 1001);
+  assert.strictEqual(a.sessions[1].dialogId, 9009);
 });
 
 test('normalizeAi：autoStart=false 保持关闭', () => {

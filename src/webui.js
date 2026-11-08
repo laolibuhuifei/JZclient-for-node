@@ -2226,7 +2226,22 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       } catch (e) {
         // 已经发出去几条就不能再补发整条, 否则重复
         if (!/^https?:\/\//i.test(src) || e.sent) throw e;
-        const v = { key: '', downloadUrl: src, duration: Number(body.duration) || 0, audioType: 1, deadline: 0 };
+        // 下载不下来只能直接引用外链。但 audioType 不能瞎填 1(Opus)：
+        // 手表只认 AMR(0) 和自定义 Opus(1)，其它格式发过去就是一条点不开的语音。
+        // 这里按后缀猜一个最接近的，猜不出就明确告诉调用方，别发废消息。
+        const isAmrLink = /\.amr(\?|#|$)/i.test(src);
+        const isOpusLink = /\.(opus|ogg)(\?|#|$)/i.test(src);
+        if (!isAmrLink && !isOpusLink) {
+          throw new Error('音频下载失败，且外链不是 .amr/.opus，手表放不了：' + String(e.message || e).slice(0, 120));
+        }
+        const v = {
+          key: '',
+          downloadUrl: src,
+          duration: Number(body.duration) || 0,
+          audioType: isAmrLink ? 0 : 1,
+          deadline: 0,
+        };
+        log.warn('chat', `音频下载失败，按外链直发（${isAmrLink ? 'AMR' : 'Opus'}）：${String(src).slice(0, 100)}`);
         obj = buildVoice(v);
         msgType = 2;
         label = '[语音 ' + v.duration + '秒]';

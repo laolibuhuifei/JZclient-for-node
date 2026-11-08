@@ -15,6 +15,8 @@
 //   2. 直链带签名和过期时间，拿到就要马上用，不能缓存
 'use strict';
 
+const { FFMPEG, FFPROBE } = require('./ffbin');
+
 const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
@@ -324,7 +326,7 @@ function concatParts(files, out) {
   const list = out + '.txt';
   fs.writeFileSync(list, files.map((f) => "file '" + String(f).replace(/'/g, "'\\''") + "'").join('\n'));
   try {
-    const r = spawnSync('ffmpeg', [
+    const r = spawnSync(FFMPEG, [
       '-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', out,
     ], { timeout: 300000 });
     if (r.status !== 0 || !fs.existsSync(out)) {

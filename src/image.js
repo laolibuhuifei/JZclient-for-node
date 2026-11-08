@@ -15,6 +15,8 @@
 // ffmpeg 也没有的话就当没图 —— 调用方会退回「首字色块」，不影响出图。
 'use strict';
 
+const { FFMPEG, FFPROBE } = require('./ffbin');
+
 const { spawn } = require('child_process');
 const { decodePNG } = require('./png');
 const bili = require('./bilibili');
@@ -98,7 +100,7 @@ function viaFfmpeg(buf) {
   return new Promise((resolve, reject) => {
     let p;
     try {
-      p = spawn('ffmpeg', [
+      p = spawn(FFMPEG, [
         '-hide_banner', '-loglevel', 'error',
         '-i', 'pipe:0',
         '-frames:v', '1',

@@ -289,6 +289,19 @@ function buildPhoto(img) {
 
 // 语音消息(msgType 2, 直发 VoiceDescEntity JSON, 不是 TextMessage 信封)
 // opts: { key, downloadUrl, duration, audioType(0=AMR 1=Opus), groupId, deadline }
+//
+// ⚠️ extra 的结构极其容易写错（2026-11-08 踩过，症状是手表显示「1 秒」且无法播放）：
+// 原版是把 VoiceExtraEntity 这个对象**直接** Gson 序列化进 extra（见
+// wechat/service/impl/Uzbekistan.java 的 setExtra(Uganda.Germany(voiceExtraEntity))），
+// 也就是扁平的 {"audioType":1,"shareType":0,"voiceType":0}。
+// 千万不要照着 VoiceExtraEntity.toString() 抄 —— 那个 toString 为了日志好看额外包了一层
+// {"VoiceExtraEntity":{...}}，它不是序列化格式。
+// 多包这一层的后果：手表按 VoiceExtraEntity 反序列化时 audioType 读不到（=0），
+// 于是把 Opus 的字节当成 AMR 解 —— Opus 按 AMR 的 20ms/帧去算时长只有 1 秒左右，
+// 而且根本解不出声音。症状看着像「语音只有 1 秒、点不开」，根因在这里。
+//
+// groupId 原版填的是 msgId（长语音分片靠它归组），这里留空，
+// 由 im.js 在真正发出去时补上刚生成的 msgId（那之前还没有 msgId）。
 function buildVoice(opts) {
   const voice = {
     vocTime: Math.max(1, Math.round(Number(opts.duration) || 1)),
@@ -298,11 +311,9 @@ function buildVoice(opts) {
     lastIndex: 0,
     deadline: Number(opts.deadline) || 0,
     extra: JSON.stringify({
-      VoiceExtraEntity: {
-        voiceType: 0,
-        audioType: Number(opts.audioType) || 0,
-        shareType: 0,
-      },
+      audioType: Number(opts.audioType) || 0,
+      shareType: 0,
+      voiceType: 0,
     }),
   };
   return voice;

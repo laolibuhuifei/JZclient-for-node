@@ -101,6 +101,37 @@ function bjTime(ms) {
   return new Date((ms || Date.now()) + 8 * 3600e3).toISOString().replace('T', ' ').substring(0, 19);
 }
 
+// 语音消息的 groupId = msgId
+//
+// 原版发送语音时把 VoiceDescEntity.groupId 设成 dialogMsg.getMsgId()
+// （见 wechat/service/impl/Uzbekistan.java 的 qd()）。groupId 是长语音分片的归组键，
+// 手表端播放时也用它去认「这几段是不是同一条」。
+//
+// 但 msgId 是**发送这一刻**才生成的（buildVoice() 那会儿还没有），所以只能在这里补。
+// 只在「确实是语音实体、且调用方没自己指定 groupId」时补 —— 别的消息类型不能动。
+function withVoiceGroup(obj, msgId) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
+  if (obj.vocTime === undefined) return obj;    // vocTime 是 VoiceDescEntity 独有字段
+  if (obj.groupId) return obj;
+  return Object.assign({}, obj, { groupId: msgId });
+}
+
+// 语音载荷的摘要日志。出问题时要能一眼看出「发出去的到底是什么」——
+// 2026-11-08 那次 extra 多包一层，日志里什么都没有，只能靠猜。
+function voiceDigest(obj) {
+  if (!obj || obj.vocTime === undefined) return '';
+  let ex = obj.extra;
+  try { ex = JSON.parse(obj.extra); } catch (e) { /* 原样打 */ }
+  return JSON.stringify({
+    vocTime: obj.vocTime,
+    audioType: ex && ex.audioType,
+    shareType: ex && ex.shareType,
+    groupId: obj.groupId,
+    resoureKey: String(obj.resoureKey || '').slice(0, 12),
+    storeAddr: String(obj.storeAddr || '').slice(0, 60),
+  });
+}
+
 class ImClient extends EventEmitter {
   constructor(cfg, opts = {}) {
     super();
@@ -511,11 +542,15 @@ class ImClient extends EventEmitter {
   async sendSinglePayload(receiverId, obj, msgType = 1) {
     const t0 = Date.now();
     const rid = this.nextRid();
+    const msgId = crypto.randomUUID().replace(/-/g, '');
+    const voice = withVoiceGroup(obj, msgId);
+    const vd = voiceDigest(voice);
+    if (vd) log.debug('im', `语音载荷 ${vd}`);
     const body = Buffer.concat([
       tlv(1, rid),
       tlv(16, 3),
-      tlv(14, Buffer.from(JSON.stringify(obj), 'utf8')),
-      tlv(15, crypto.randomUUID().replace(/-/g, '')),
+      tlv(14, Buffer.from(JSON.stringify(voice), 'utf8')),
+      tlv(15, msgId),
       tlv(13, msgType),
       tlv(11, this.imAccountId),
       tlv(10, receiverId),
@@ -532,11 +567,15 @@ class ImClient extends EventEmitter {
   async sendGroupPayload(dialogId, imAccountId, obj, msgType = 1) {
     const t0 = Date.now();
     const rid = this.nextRid();
+    const msgId = crypto.randomUUID().replace(/-/g, '');
+    const voice = withVoiceGroup(obj, msgId);
+    const vd = voiceDigest(voice);
+    if (vd) log.debug('im', `语音载荷(群) ${vd}`);
     const body = Buffer.concat([
       tlv(1, rid),
       tlv(18, 4),
-      tlv(14, Buffer.from(JSON.stringify(obj), 'utf8')),
-      tlv(15, crypto.randomUUID().replace(/-/g, '')),
+      tlv(14, Buffer.from(JSON.stringify(voice), 'utf8')),
+      tlv(15, msgId),
       tlv(13, msgType),
       tlv(11, imAccountId),
       tlv(10, dialogId),
@@ -579,4 +618,4 @@ class ImClient extends EventEmitter {
   }
 }
 
-module.exports = { ImClient, IM_HOST, IM_PORT, APP_KEY };
+module.exports = { ImClient, IM_HOST, IM_PORT, APP_KEY, withVoiceGroup, voiceDigest };

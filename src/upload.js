@@ -5,6 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+const { FFMPEG, FFPROBE } = require('./ffbin');
 const { ApiClient } = require('./api');
 const site = require('./site');
 const log = require('./logger');
@@ -312,7 +313,7 @@ function probeDurationBuf(buf, ext) {
   const f = tmpFile(ext || '.bin');
   fs.writeFileSync(f, buf);
   try {
-    const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', f], { encoding: 'utf8', timeout: 30000 });
+    const r = spawnSync(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', f], { encoding: 'utf8', timeout: 30000 });
     const d = Number(String(r.stdout || '').trim());
     return Number.isFinite(d) && d > 0 ? d : 0;
   } catch (e) {
@@ -374,7 +375,7 @@ function oggOpusToWatch(ogg, rate) {
 // 探测本地文件时长(秒), 拿不到就返回 0
 function probeDuration(file) {
   try {
-    const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', file],
+    const r = spawnSync(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', file],
       { encoding: 'utf8', timeout: 30000 });
     const d = Number(String(r.stdout || '').trim());
     return Number.isFinite(d) && d > 0 ? d : 0;
@@ -403,7 +404,7 @@ function splitAudio(file, maxSec) {
   const ext = extOfMedia(file) || '.mp3';
   const pick = () => fs.readdirSync(dir).filter((f) => /^seg_\d+\./.test(f)).sort()
     .map((f) => path.join(dir, f));
-  const run = (args) => spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', file].concat(args), { timeout: 300000 });
+  const run = (args) => spawnSync(FFMPEG, ['-y', '-loglevel', 'error', '-i', file].concat(args), { timeout: 300000 });
 
   let r = run(['-f', 'segment', '-segment_time', String(sec), '-reset_timestamps', '1',
     '-c', 'copy', path.join(dir, 'seg_%03d' + ext)]);
@@ -435,7 +436,7 @@ function runFfmpeg(args, timeoutMs) {
       clearTimeout(timer);
       resolve({ code, err });
     };
-    const p = spawn('ffmpeg', ['-y', '-loglevel', 'error'].concat(args), { stdio: ['ignore', 'ignore', 'pipe'] });
+    const p = spawn(FFMPEG, ['-y', '-loglevel', 'error'].concat(args), { stdio: ['ignore', 'ignore', 'pipe'] });
     p.stderr.on('data', (d) => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
     const timer = setTimeout(() => { try { p.kill('SIGKILL'); } catch (e) { /* ignore */ } }, timeoutMs || 900000);
     p.on('error', (e) => { err = e.message; finish(-1); });
@@ -500,7 +501,7 @@ function toWatchOpus(buf, ext) {
   const outPath = tmpFile('.ogg');
   fs.writeFileSync(inPath, buf);
   try {
-    const r = spawnSync('ffmpeg', [
+    const r = spawnSync(FFMPEG, [
       '-y', '-loglevel', 'error', '-i', inPath,
       '-ar', '16000', '-ac', '1', '-c:a', 'libopus', '-b:a', '16k',
       '-vbr', 'off', '-frame_duration', '20', '-f', 'ogg', outPath,
@@ -632,7 +633,7 @@ function extractThumbJpeg(buf, ext) {
   const outPath = tmpFile('.jpg');
   fs.writeFileSync(inPath, buf);
   try {
-    const r = spawnSync('ffmpeg', [
+    const r = spawnSync(FFMPEG, [
       '-y', '-loglevel', 'error', '-i', inPath, '-vframes', '1',
       '-vf', 'scale=480:-2', '-q:v', '4', outPath,
     ], { timeout: 60000 });

@@ -51,21 +51,46 @@ function crc32(buf) {
 // ZIP 规范里「是否 UTF-8」只由通用标志的第 11 位决定。国内 Windows 上打的包
 // 这一位经常是 0，文件名其实是 GBK —— 直接按 utf8 解会得到一串问号，
 // 中文名的封面图就找不到了。
-const utf8Strict = new TextDecoder('utf-8', { fatal: true });
+//
+// ⚠️ 安卓 App 里内置的 libnode 是 `--without-intl` 编的，`new TextDecoder(..., {fatal:true})`
+// 会直接抛 ERR_NO_ICU（模块加载阶段就崩，整个服务起不来）。所以这里分两条路：
+//   · 有 ICU：用 fatal 严格解码，遇到非法 UTF-8 直接抛，靠 catch 走 GBK
+//   · 无 ICU：只能用宽松解码，再靠「结果里有没有 U+FFFD 替换字符」判断是不是 UTF-8
+let utf8Strict = null;
+let utf8Loose = null;
+try {
+  utf8Strict = new TextDecoder('utf-8', { fatal: true });
+} catch (e) {
+  try {
+    utf8Loose = new TextDecoder('utf-8');
+  } catch (e2) {
+    utf8Loose = null;   // 连宽松都不支持，退回 Buffer 的 toString
+  }
+}
+
 let gbkDecoder = null;
 function decodeName(raw, utf8Flag) {
   if (utf8Flag) return raw.toString('utf8');
-  try {
-    return utf8Strict.decode(raw);
-  } catch (e) {
-    if (gbkDecoder === null) {
-      try { gbkDecoder = new TextDecoder('gbk'); } catch (e2) { gbkDecoder = false; }
+
+  if (utf8Strict) {
+    try {
+      return utf8Strict.decode(raw);
+    } catch (e) {
+      /* 不是合法 UTF-8，往下走 GBK 回退 */
     }
-    if (gbkDecoder) {
-      try { return gbkDecoder.decode(raw); } catch (e3) { /* 落到 latin1 */ }
-    }
-    return raw.toString('latin1');
+  } else {
+    const text = utf8Loose ? utf8Loose.decode(raw) : raw.toString('utf8');
+    // 宽松解码不会抛错，只能靠替换字符识别「这不是 UTF-8」
+    if (text.indexOf('\uFFFD') < 0) return text;
   }
+
+  if (gbkDecoder === null) {
+    try { gbkDecoder = new TextDecoder('gbk'); } catch (e2) { gbkDecoder = false; }
+  }
+  if (gbkDecoder) {
+    try { return gbkDecoder.decode(raw); } catch (e3) { /* 落到 latin1 */ }
+  }
+  return raw.toString('latin1');
 }
 
 // ---------- 找 EOCD ----------

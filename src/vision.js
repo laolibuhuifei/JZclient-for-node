@@ -10,6 +10,8 @@
 // 才会调 ffmpeg 转一次（项目本来就硬依赖 ffmpeg，切视频/语音都在用）。
 'use strict';
 
+const { FFMPEG, FFPROBE } = require('./ffbin');
+
 const { spawn } = require('child_process');
 const log = require('./logger');
 
@@ -81,7 +83,7 @@ function toJpeg(buf, maxEdge) {
 
     let child;
     try {
-      child = spawn('ffmpeg', [
+      child = spawn(FFMPEG, [
         '-v', 'error',
         '-i', 'pipe:0',
         // 等比缩到 maxEdge×maxEdge 以内，小图不放大

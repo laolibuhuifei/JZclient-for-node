@@ -1260,6 +1260,18 @@ macOS 用 Finder 右键压缩也行，装的时候会自动跳过 `__MACOSX/` �
 
 非 AMR 格式需要本机安装 `ffmpeg` 进行转码。
 
+**手表上语音显示「1 秒」而且点不开**
+
+先在日志里搜 `语音载荷`（要 `WP_LOG=debug`），正常长这样：
+
+```
+语音载荷 {"vocTime":7,"audioType":1,"shareType":0,"groupId":"…","resoureKey":"…","storeAddr":"https://…"}
+```
+
+`audioType` 是 `1` 表示 Opus、`0` 表示 AMR，**必须和文件真实格式一致**：手表照这个值挑解码器，填错了就会把 Opus 的字节按 AMR 的 20ms/帧去数 —— 显示出来只有 1 秒左右，而且根本放不出声。
+
+这个值来自 `message.js` 的 `buildVoice()`，它写在语音消息 `extra` 字段里。`extra` 必须是**扁平**的 `{"audioType":1,"shareType":0,"voiceType":0}`，不能包一层 `VoiceExtraEntity`（原版的 `VoiceExtraEntity.toString()` 恰好长成嵌套的样子，别照着它抄）。
+
 **长语音报「音频切分失败（需要 ffmpeg）」**
 
 微聊单条语音上限 60 秒，超过 58 秒会走自动切段，这一步依赖 `ffmpeg`（切分）和 `ffprobe`（量时长）。两个都在 `ffmpeg` 的发行包里，装完确认 `ffmpeg -version` 和 `ffprobe -version` 都能跑。另外 `data:` 或 `base64://` 传的超长音频可能撞上 OneBot HTTP 请求体 32MB 上限，改用 `http(s)` 地址或降低码率即可。

@@ -10,6 +10,7 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
 
 // ---------- 基础读取 ----------
 
@@ -334,6 +335,15 @@ class Font {
 // 关键点：**必须真的能解析出 glyf 表**才算数 —— Noto Sans CJK 的 .ttc 是 CFF 轮廓，
 // 文件名看着像 TrueType，读进去却画不出字。
 const CJK_CANDIDATES = [
+  // 项目自带的字体（打包了就优先用它，不用猜系统装了什么）。
+  // 修复：anjianhe —— 以前这里只有 Linux/macOS 路径，Windows 上永远「找不到字体」，
+  // B 站搜索结果图 / 评论长图会直接报「这台机器上找不到可用的中文 TrueType 字体」
+  path.join(__dirname, 'assets', 'fonts', 'cat-book.ttf'),
+  // Windows
+  'C:\\Windows\\Fonts\\msyh.ttc',
+  'C:\\Windows\\Fonts\\msyhbd.ttc',
+  'C:\\Windows\\Fonts\\simhei.ttf',
+  'C:\\Windows\\Fonts\\simsun.ttc',
   // Linux（云端实例）
   '/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf',
   '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
@@ -351,6 +361,9 @@ const CJK_CANDIDATES = [
 // ⚠️ 必须有这一层：DroidSansFallbackFull 是「后备字体」，只有中日韩，
 // cmap 里根本没有 A-Z 和 0-9。只用一个中文字体的话，标题里的英文和所有数字会画成空白。
 const LATIN_CANDIDATES = [
+  path.join(__dirname, 'assets', 'fonts', 'cat-book.ttf'),
+  'C:\\Windows\\Fonts\\arial.ttf',
+  'C:\\Windows\\Fonts\\segoeui.ttf',
   '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
   '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
   '/System/Library/Fonts/Supplemental/Arial.ttf',

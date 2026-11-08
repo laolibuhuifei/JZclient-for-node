@@ -126,7 +126,36 @@ const DISPLAY_PREFIX = /^\[(?:转发|转发文本|提示|颜文字|文字提示|
 //   1) 先看 describe 出来的展示文本（和聊天面板完全同源），剥掉装饰前缀
 //   2) 再按字段逐个兜底（顶层 text/content → inner 里的常见正文字段）
 // 传入第二个参数 described 时优先用它，保证「面板能看到的文字，AI 也一定能看到」。
+// 服务端会把「电量 / 步数」这类设备上报也塞进 content 字段，parseMessage 就把它
+// 当成 kind=text 的正文（text = body.text || body.content）。AI 一旦能正常触发，
+// 手表每分钟报一次电量就触发一次模型调用 —— 一天上千次，回复内容还是「97」。
+//
+// 判据：整段正文是一个 JSON 对象、且不含任何「里面还有话」的字段。
+//   {"battery":97}            → 系统上报，丢掉
+//   {"battery":97,"charging":true} → 丢掉
+//   {"content":"你好"}        → 有 content，可能是真消息，保留
+//   "你好"                    → 不是 JSON，保留
+const READABLE_KEYS = ['content', 'text', 'msg', 'desc', 'message', 'contentText'];
+function isSystemJson(s) {
+  const t = String(s == null ? '' : s).trim();
+  if (t.length < 2 || t.charAt(0) !== '{' || t.charAt(t.length - 1) !== '}') return false;
+  let o;
+  try { o = JSON.parse(t); } catch (e) { return false; }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return false;
+  if (!Object.keys(o).length) return false;
+  for (let i = 0; i < READABLE_KEYS.length; i++) {
+    if (Object.prototype.hasOwnProperty.call(o, READABLE_KEYS[i])) return false;
+  }
+  return true;
+}
+
+// 对外只暴露这一个入口：内部逻辑算完，再把系统上报滤掉。
 function aiTextOf(parsed, described) {
+  const out = pickAiText(parsed, described);
+  return isSystemJson(out) ? '' : out;
+}
+
+function pickAiText(parsed, described) {
   if (!parsed || typeof parsed !== 'object') return '';
   const kind = String(parsed.kind || '');
   if (AI_TEXT_KINDS.indexOf(kind) < 0) return '';

@@ -117,3 +117,29 @@ test('B 站点播命令：普通聊天不会被误判成命令', () => {
   const r = flow({ content: '搜索结果好少啊', text: '搜索结果好少啊' }, 1, '搜索');
   assert.strictEqual(biliBot.parseCommand(r.text), null);
 });
+
+// ============ 设备上报不能进 AI ============
+// 线上真实故障：手表每分钟上报一次电量，服务端把 {"battery":97} 塞进 content 字段，
+// parseMessage 当成 kind=text 的正文 → 每分钟触发一次模型调用，一天上千次，
+// 回复内容还是「97」。这类系统上报必须挡在 AI 之前。
+test('设备上报（电量/步数）不进 AI', () => {
+  for (const body of [{ battery: 97 }, { battery: 97, charging: true }, { step: 1234 }]) {
+    const r = flow({ content: JSON.stringify(body), text: JSON.stringify(body) }, 1, '你好');
+    assert.strictEqual(r.text, '', '系统上报不该产出正文: ' + JSON.stringify(body));
+    assert.strictEqual(r.hit, false);
+  }
+});
+
+test('带 content 的 JSON 仍然算正文（别把真消息一起挡了）', () => {
+  const raw = JSON.stringify({ content: '你好' });
+  const r = flow({ content: raw, text: raw }, 1, '你好');
+  assert.strictEqual(r.text, raw);
+});
+
+test('普通文本和残缺 JSON 都不受影响', () => {
+  const a = flow({ content: '你好', text: '你好' }, 1, '你好');
+  assert.strictEqual(a.text, '你好');
+  assert.strictEqual(a.hit, true);
+  const b = flow({ content: '{不是JSON', text: '{不是JSON' }, 1, '你好');
+  assert.strictEqual(b.text, '{不是JSON');
+});

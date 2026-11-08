@@ -278,7 +278,10 @@ test('normalizeAi：脏数据收敛', () => {
       null,
     ],
   });
-  assert.deepStrictEqual(a.keywords, []);
+  // keywords 是字符串时按分隔符拆开保留，不能丢成空数组。
+  // 老配置（手改过 config.json / 早期版本）里真有字符串形式，
+  // 丢掉等于「升级后关键词全没了」，和「AI 怎么都不触发」是同一副面孔。
+  assert.deepStrictEqual(a.keywords, ['不是数组']);
   assert.strictEqual(a.temperature, 2);
   assert.strictEqual(a.trigger, 'auto');
   assert.strictEqual(a.keywordsMode, 'auto');

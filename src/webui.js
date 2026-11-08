@@ -1332,10 +1332,69 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     });
   }
 
+  // ===== 云端更新提示 =====
+  //
+  // 只有托管实例才有这套：平台注入 JZ_CONSOLE_URL（平台地址）、INSTANCE_SECRET
+  // （实例密钥）、JZ_SUBDOMAIN（实例标识）。本地直接跑的时候这三个都没有，
+  // 整块静默跳过 —— 不能因为「本地版没有平台」就报错或弹窗。
+  //
+  // 认证靠实例密钥做 HMAC：sign = HMAC-SHA256(secret, `${sub}\n${ts}`)。
+  // 平台按 subdomain 查到实例、解出自己那份密钥再验一遍，
+  // 所以外面的人知道接口地址也调不动（没有密钥）。
+  //
+  // 结果缓存 10 分钟：一个用户可能开好几个标签页，不能每页都去打一次平台。
+  const updateState = { at: 0, data: null };
+
+  function updateCfg() {
+    const base = String(process.env.JZ_CONSOLE_URL || '').trim().replace(/\/+$/, '');
+    const sub = String(process.env.JZ_SUBDOMAIN || '').trim();
+    const sec = String(process.env.INSTANCE_SECRET || '');
+    if (!base || !sub || !sec) return null;
+    return { base, sub, sec };
+  }
+
+  function updateSign(c, ts) {
+    return crypto.createHmac('sha256', c.sec).update(c.sub + '\n' + String(ts)).digest('hex');
+  }
+
+  // 问平台：有新版吗？日志是什么？强制吗？
+  async function checkUpdate(force) {
+    const c = updateCfg();
+    if (!c) return { managed: false };
+    if (!force && updateState.data && Date.now() - updateState.at < 10 * 60 * 1000) {
+      return Object.assign({ managed: true, cached: true }, updateState.data);
+    }
+    const ts = Date.now();
+    const url = c.base + '/api/instance/update-info?sub=' + encodeURIComponent(c.sub)
+      + '&ts=' + ts + '&sign=' + updateSign(c, ts);
+    try {
+      const j = await httpJson(url, { timeout: 6000 });
+      const d = (j && j.data) || {};
+      updateState.at = Date.now();
+      updateState.data = d;
+      return Object.assign({ managed: true }, d);
+    } catch (e) {
+      // 平台暂时连不上（重启中、网络抖动）不算错误，安静返回上一次的结果
+      if (log.isEnabled('debug')) log.debug('update', '查更新失败：' + e.message);
+      return Object.assign({ managed: true, error: e.message }, updateState.data || {});
+    }
+  }
+
+  // 点了「更新并重启」→ 让平台重启这个实例（新进程自然加载新代码）
+  async function applyUpdate() {
+    const c = updateCfg();
+    if (!c) throw new Error('本地运行，没有可更新的平台');
+    const ts = Date.now();
+    const url = c.base + '/api/instance/apply-update?sub=' + encodeURIComponent(c.sub)
+      + '&ts=' + ts + '&sign=' + updateSign(c, ts);
+    const j = await httpJson(url, { method: 'POST', timeout: 8000 });
+    if (!j || j.ok === false) throw new Error((j && (j.error || j.message)) || '平台拒绝了更新请求');
+    return j.data || j;
+  }
+
   async function fetchYiyan(force) {
     const now = Date.now();
     if (!force && yiyanCache && now - yiyanCache.at < 24 * 3600 * 1000) return yiyanCache;
-
     // 主源: 用户指定的 tenapi
     if (now - yiyanFailAt > 10 * 60 * 1000) {
       try {
@@ -2818,6 +2877,18 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
     if (parts[1] === 'watches') return ok(res, { watches: await watchList(query.get('refresh') === '1') });
     if (parts[1] === 'notices') return ok(res, { notices: ensure(await api.getNoticeNew()) });
+
+    // 云端更新：查有没有新版 / 用户在弹窗里点了「更新并重启」
+    // check 是只读的，apply 会让平台重启本实例（连接会断，前端负责等它回来）
+    if (parts[1] === 'update') {
+      if ((parts[2] === 'check' || !parts[2]) && req.method === 'GET') {
+        return ok(res, await checkUpdate(query.get('force') === '1'));
+      }
+      if (parts[2] === 'apply' && req.method === 'POST') {
+        return ok(res, await applyUpdate());
+      }
+      throw new Error('接口不存在');
+    }
 
     // 主页: 系统/进程资源 + 账号概览(前端每 3 秒轮询)
     if (parts[1] === 'system') return ok(res, await sysInfo());

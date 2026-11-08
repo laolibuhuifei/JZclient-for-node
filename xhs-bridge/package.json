@@ -1,0 +1,16 @@
+{
+  "name": "xhs-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "独立的小红书签名/自动化桥接服务：给 JZClient 等调用方提供普通 HTTP 接口",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "playwright-core": "^1.65.0"
+  }
+}

@@ -19,7 +19,11 @@ const { fetchFavicon } = require('./favicon');
 const linkLib = require('./link-presets');
 const { startOneBot } = require('./onebot');
 const bili = require('./bilibili');
+const biliLogin = require('./bili-login');
+const xhs = require('./xhs');
 const biliBot = require('./bili-bot');
+const xhsBot = require('./xhs-bot');
+const xhsSearch = require('./xhs-search');
 const biliComment = require('./bili-comment');
 const biliSearch = require('./bili-search');
 const { PluginManager, normalizeManifest, PLUGIN_MODE, MANAGED_HINT } = require('./plugin');
@@ -367,6 +371,23 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   }
 
   const AUTH_TOKEN = ensureToken();
+
+  // ===== 访问密码 =====
+  // 首次用令牌进来的人设置密码，之后只用密码。密码 scrypt 加盐，配置里没有明文。
+  function hasPassword() {
+    const w = cfg.webui || {};
+    return !!(w.passwordHash && w.passwordSalt);
+  }
+  function pwdHash(pw, salt) {
+    return crypto.scryptSync(String(pw), String(salt), 32).toString('hex');
+  }
+  function pwdCookieValue() {
+    if (!hasPassword()) return '';
+    return crypto.createHash('sha256').update('pwd:' + cfg.webui.passwordHash).digest('hex');
+  }
+  function pwdCookie() {
+    return `${AUTH_COOKIE}=${pwdCookieValue()}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${AUTH_TTL}`;
+  }
   // Cookie 里不存明文令牌, 存 sha256; 令牌本身高熵, 不可逆推
   const AUTH_HASH = crypto.createHash('sha256').update(AUTH_TOKEN).digest('hex');
   const authFails = new Map(); // ip -> { count, at }
@@ -392,6 +413,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   function isAuthed(req) {
     const v = parseCookies(req)[AUTH_COOKIE];
     if (v && safeEqual(v, AUTH_HASH)) return true;
+    const ph = pwdCookieValue();
+    if (v && ph && safeEqual(v, ph)) return true;
     // 也接受 Authorization: Bearer <token>，方便 curl / 脚本直接调 API
     const m = /^Bearer\s+(\S+)\s*$/i.exec(String(req.headers.authorization || ''));
     if (m && safeEqual(m[1], AUTH_TOKEN)) return true;
@@ -569,6 +592,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   let imReconnects = 0;               // 重连次数(诊断)
   let imLastError = '';               // 最近一次连接错误(诊断)
   let chatTargets = null;
+  let lastTargetsRefresh = 0;
   const chatLog = new Map();
   let onebots = new Map();            // watchId -> 实例(每块表一套端口/令牌/会话范围)
   let onebotKeys = new Map();         // watchId -> [会话 key], 该实例只推这些会话
@@ -834,6 +858,13 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   const biliQuota = new Map();              // watchId -> { day, n } 当天已点播条数
   const biliMissAt = new Map();             // chatKey -> 上次提醒「没开点播」的时间(防刷屏)
   const biliLastPlay = new Map();           // `${watchId}|${chatKey}` -> { bvid, title, at } 供 /评论 用
+  // ===== 小红书点播 =====
+  const XHS_SEARCH_TTL = xhsBot.SEARCH_TTL;
+  const XHS_MAX_RESULTS = xhsBot.MAX_RESULTS;
+  const xhsSearchCache = new Map();         // `${watchId}|${chatKey}` -> { at, keyword, list }
+  const xhsQuota = new Map();               // watchId -> { day, n }
+  const xhsMissAt = new Map();              // chatKey -> 上次提醒时间
+  const xhsAutoSent = new Set();            // 最近发出的自动回复，防止回显自触发
 
   // 某块表实际生效的会话范围(手选优先, 没手选就按手表名自动匹配)
   function biliScopeKeys(wid) {
@@ -862,6 +893,254 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     }
     if (on.length === 1 && !biliScopeKeys(on[0]).length) return String(on[0]);
     return '';
+  }
+
+  // ===== 小红书：范围判定（和 B 站同一套规则，配置分开） =====
+  function xhsScopeKeys(wid) {
+    const c = (cfg.xhsBots || {})[wid] || {};
+    const manual = (c.targets || []).filter(Boolean);
+    return manual.length ? manual.slice() : autoKeysFor(wid);
+  }
+
+  function xhsAnyEnabled() {
+    const bots = cfg.xhsBots || {};
+    return Object.keys(bots).some((w) => bots[w] && bots[w].enabled);
+  }
+
+  function xhsWatchOf(key) {
+    const bots = cfg.xhsBots || {};
+    const on = Object.keys(bots).filter((w) => bots[w] && bots[w].enabled);
+    for (const wid of on) {
+      if (xhsScopeKeys(wid).indexOf(key) >= 0) return String(wid);
+    }
+    // 只启用了一块表：它没匹配上的会话也归它。线上踩过：手表发消息用的群 id
+    // 和会话列表里的家庭群差一位，严格匹配会让命令永远「不在范围」。
+    if (on.length === 1) return String(on[0]);
+    return '';
+  }
+
+  async function xhsReply(key, text) {
+    try { await sendChat({ key, kind: 'text', text }); }
+    catch (e) { log.warn('xhs', '回复失败: ' + (e && e.message ? e.message : e)); }
+  }
+
+  // ===== 小红书：播放历史 / 收藏 =====
+  const XHS_STORE_FILE = path.join(os.homedir(), '.watch-parent-cli', 'xhs-play.json');
+
+  function xhsStoreLoad() {
+    try { return JSON.parse(fs.readFileSync(XHS_STORE_FILE, 'utf8')) || {}; } catch (e) { return {}; }
+  }
+  function xhsStoreSave(d) {
+    try {
+      fs.mkdirSync(path.dirname(XHS_STORE_FILE), { recursive: true });
+      fs.writeFileSync(XHS_STORE_FILE, JSON.stringify(d));
+    } catch (e) { log.warn('xhs', '历史保存失败: ' + e.message); }
+  }
+  function xhsStoreOf(d, wid) {
+    if (!d[wid]) d[wid] = { history: [], fav: [] };
+    return d[wid];
+  }
+  function xhsPushHistory(wid, item) {
+    const d = xhsStoreLoad();
+    const s = xhsStoreOf(d, wid);
+    s.history = [{
+      title: item.title || '', href: item.href, author: item.author || '', video: !!item.video,
+      token: item.token || '', kw: item.kw || '', index: item.index || 0, at: Date.now(),
+    }]
+      .concat((s.history || []).filter((x) => x.href !== item.href)).slice(0, 30);
+    xhsStoreSave(d);
+  }
+  function xhsFormatStore(list, title) {
+    const arr = Array.isArray(list) ? list : [];
+    if (!arr.length) return title + '：还没有记录';
+    const lines = arr.slice(0, 10).map((x, i) => (i + 1) + '. ' + xhsBot.clip(x.title || '无标题', 24)
+      + (x.video ? '' : '（图文）'));
+    return title + '（共 ' + arr.length + ' 条）\n' + lines.join('\n') + '\n回复 /小红书 ' + (title.indexOf('收藏') >= 0 ? '播放收藏' : '播放历史') + ' 序号';
+  }
+
+  // 发一条笔记：视频发视频，图文发正文 + 前 N 张图
+  async function xhsSendNote(wid, key, item, c) {
+    let note;
+    try { note = await xhs.note(cfg, item.href, item.token); }
+    catch (e) {
+      // 老记录没有 token、或 token 过期：退回「搜索 + 点击」现场取一次
+      if (item.kw && item.index) {
+        try { note = await xhs.noteByClick(cfg, item.kw, item.index); }
+        catch (e2) { log.warn('xhs', '点击兜底也失败: ' + e2.message); throw e; }
+      } else { throw e; }
+    }
+    if (false) { /* 保留结构 */ }
+    if (note && note.needsLogin) { await xhsReply(key, '[小红书] 登录态失效了，去网页重新扫码'); return false; }
+    if (!note) { await xhsReply(key, '[小红书] 拿不到这条笔记的内容'); return false; }
+
+    const title = String(note.title || item.title || '').trim();
+    const desc = String(note.desc || '').trim();
+
+    if (note.videoUrl) {
+      const dur = Number(note.duration) || 0;
+      if (c.maxDuration && dur > c.maxDuration) {
+        await xhsReply(key, '[小红书] 这条 ' + xhsBot.fmtDuration(dur) + '，超过本表上限 '
+          + Math.round(c.maxDuration / 60) + ' 分钟，不发了');
+        return false;
+      }
+      let file;
+      try { file = await downloadToTmp(note.videoUrl, 'video'); }
+      catch (e) {
+        log.warn('xhs', `手表 ${wid} 下载失败: ` + e.message);
+        await xhsReply(key, '[小红书] 下载失败：' + e.message);
+        return false;
+      }
+      try {
+        await sendChat({ key, kind: 'video', src: file, duration: dur });
+        log.info('xhs', `手表 ${wid} 已发出视频：` + xhsBot.clip(title, 30));
+        xhsPushHistory(wid, item);
+        return true;
+      } catch (e) {
+        await xhsReply(key, '[小红书] 发送失败：' + e.message);
+        return false;
+      }
+    }
+
+    const imgs = Array.isArray(note.images) ? note.images.filter(Boolean) : [];
+    if (!imgs.length) {
+      await xhsReply(key, '[小红书] 这条既没有视频也没有图片（可能已下架）');
+      return false;
+    }
+    // 图文：先发标题+正文（截断），再发图片，最多 maxImages 张
+    const head = '[小红书] ' + (title || '图文笔记')
+      + (desc ? '\n' + xhsBot.clip(desc, 180) : '');
+    await xhsReply(key, head);
+    const max = Math.max(1, Math.min(9, Number(c.maxImages) || 4));
+    let sent = 0;
+    for (const u of imgs.slice(0, max)) {
+      try {
+        const f = await downloadToTmp(u, 'image');
+        await sendChat({ key, kind: 'image', src: f });
+        sent++;
+      } catch (e) {
+        log.warn('xhs', `手表 ${wid} 发图失败: ` + e.message);
+      }
+    }
+    if (!sent) { await xhsReply(key, '[小红书] 图片全部发送失败'); return false; }
+    log.info('xhs', `手表 ${wid} 已发图文 ${sent}/${imgs.length} 张：` + xhsBot.clip(title, 30));
+    xhsPushHistory(wid, item);
+    return true;
+  }
+
+  async function xhsSendSearchImage(key, keyword, list) {
+    const r = await xhsSearch.renderSearch(list, { keyword, limit: 10 });
+    await sendBiliPng(key, r.png, 'xhs-search');
+    return r;
+  }
+
+  async function xhsHandle(wid, key, cmd) {
+    const c = device.normalizeXhsWatch((cfg.xhsBots || {})[wid] || {});
+    if (cmd.kind === 'help') { await xhsReply(key, xhsBot.HELP); return; }
+
+    if (cmd.kind === 'search') {
+      if (!cmd.arg) { await xhsReply(key, '用法：/小红书 搜索 关键词\n例如：/小红书 搜索 猫咪'); return; }
+      await xhsReply(key, '[小红书] 正在搜索「' + xhsBot.clip(cmd.arg, 20) + '」…防风控会慢一点，稍等');
+      let r;
+      try { r = await xhs.search(cfg, cmd.arg, XHS_MAX_RESULTS); }
+      catch (e) {
+        log.warn('xhs', `手表 ${wid} 搜索失败: ` + e.message);
+        await xhsReply(key, '[小红书] 搜索失败：' + e.message);
+        return;
+      }
+      if (r && r.needsLogin) { await xhsReply(key, '[小红书] 还没登录。先打开网页「小红书」页扫码登录，再试一次。'); return; }
+      const list = ((r && r.items) || []).slice(0, XHS_MAX_RESULTS)
+        .map((x, i) => Object.assign({ index: i + 1, kw: cmd.arg }, x));
+      if (!list.length) { await xhsReply(key, '[小红书] 没搜到结果，换个关键词试试'); return; }
+      xhsSearchCache.set(wid + '|' + key, { at: Date.now(), keyword: cmd.arg, list });
+      if (xhsSearchCache.size > 200) {
+        const first = xhsSearchCache.keys().next();
+        if (!first.done) xhsSearchCache.delete(first.value);
+      }
+      log.info('xhs', `手表 ${wid} 搜索「${cmd.arg}」得到 ${list.length} 条`);
+      if (c.searchImage) {
+        try {
+          const img = await xhsSendSearchImage(key, cmd.arg, list);
+          log.info('xhs', `手表 ${wid} 已发出搜索图 ${img.width}x${img.height}`);
+          return;
+        } catch (e) {
+          log.warn('xhs', '搜索图失败，回退文字: ' + e.message);
+        }
+      }
+      await xhsReply(key, xhsBot.formatList(cmd.arg, list));
+      return;
+    }
+
+    if (cmd.kind === 'history' || cmd.kind === 'favList') {
+      const s = xhsStoreOf(xhsStoreLoad(), wid);
+      await xhsReply(key, xhsFormatStore(cmd.kind === 'history' ? s.history : s.fav,
+        cmd.kind === 'history' ? '点播历史' : '收藏'));
+      return;
+    }
+
+    if (cmd.kind === 'save') {
+      const s = xhsStoreOf(xhsStoreLoad(), wid);
+      const last = (s.history || [])[0];
+      if (!last) { await xhsReply(key, '还没有点播过内容，先 /小红书 搜索 关键词'); return; }
+      const d = xhsStoreLoad();
+      const st = xhsStoreOf(d, wid);
+      st.fav = [last].concat((st.fav || []).filter((x) => x.href !== last.href)).slice(0, 50);
+      xhsStoreSave(d);
+      await xhsReply(key, '[小红书] 已收藏：' + xhsBot.clip(last.title, 30));
+      return;
+    }
+
+    if (cmd.kind === 'dmList') {
+      let r;
+      try { r = await xhs.chats(cfg); }
+      catch (e) { await xhsReply(key, '[小红书] 拉会话失败：' + e.message); return; }
+      if (r && r.needsLogin) { await xhsReply(key, '[小红书] 还没登录，先去网页扫码'); return; }
+      const items = (r && r.items) || [];
+      if (!items.length) { await xhsReply(key, '[小红书] 没有会话（或页面结构变了）'); return; }
+      await xhsReply(key, '[小红书] 会话（' + items.length + '）：\n'
+        + items.slice(0, 10).map((x, i) => (i + 1) + '. ' + xhsBot.clip(x.name, 20)).join('\n')
+        + '\n发送：/小红书 私信 发 会话名 内容');
+      return;
+    }
+
+    if (cmd.kind === 'dmSend') {
+      if (!cmd.to || !cmd.text) { await xhsReply(key, '用法：/小红书 私信 发 会话名 内容'); return; }
+      await xhsReply(key, '[小红书] 正在发送给「' + xhsBot.clip(cmd.to, 12) + '」…');
+      let r;
+      try { r = await xhs.send(cfg, { to: cmd.to, text: cmd.text, confirm: true }); }
+      catch (e) { await xhsReply(key, '[小红书] 发送失败：' + e.message); return; }
+      await xhsReply(key, r && r.ok ? '[小红书] 已发送' : '[小红书] 发送未确认，去网页看一眼');
+      return;
+    }
+
+    // play / playHistory / playFav
+    const store = xhsStoreOf(xhsStoreLoad(), wid);
+    let item = null;
+    if (cmd.kind === 'play') {
+      const n = Number(String(cmd.arg).replace(/[^0-9]/g, ''));
+      if (!n) { await xhsReply(key, '用法：/小红书 播放 序号（要先 /小红书 搜索 关键词）'); return; }
+      const hit = xhsSearchCache.get(wid + '|' + key);
+      if (!hit || Date.now() - hit.at > XHS_SEARCH_TTL) {
+        await xhsReply(key, '搜索结果过期了，先 /小红书 搜索 关键词 再挑序号');
+        return;
+      }
+      item = hit.list.find((x) => x.index === n);
+      if (!item) { await xhsReply(key, '没有第 ' + n + ' 条，刚才只搜到 ' + hit.list.length + ' 条'); return; }
+    } else {
+      const n = Number(String(cmd.arg).replace(/[^0-9]/g, ''));
+      const arr = cmd.kind === 'playFav' ? (store.fav || []) : (store.history || []);
+      if (!arr.length) { await xhsReply(key, cmd.kind === 'playFav' ? '收藏夹是空的' : '历史是空的'); return; }
+      if (!n) { await xhsReply(key, '用法：/小红书 ' + (cmd.kind === 'playFav' ? '播放收藏' : '播放历史') + ' 序号'); return; }
+      item = arr[n - 1];
+      if (!item) { await xhsReply(key, '没有第 ' + n + ' 条'); return; }
+    }
+
+    if (!biliBot.takeQuota(xhsQuota, wid, c.maxPerDay)) {
+      await xhsReply(key, '今天的小红书点播次数用完了（每天 ' + c.maxPerDay + ' 条），明天再来吧');
+      return;
+    }
+    await xhsReply(key, '[小红书] 第 ' + (item.index || '') + ' 条：' + xhsBot.clip(item.title, 30) + '\n正在解析，稍等…');
+    const okSent = await xhsSendNote(wid, key, item, c);
+    if (!okSent) biliBot.refundQuota(xhsQuota, wid);
   }
 
   // 把某块表的会话范围翻成人能看懂的名字
@@ -1157,7 +1436,33 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       targets: targets.map((t) => ({ key: t.key, name: t.name, type: t.type })),
       // 评论长图的全局设置。sessdata 是敏感 Cookie, 界面上用密码框显示, 但既然本机
       // 服务已经要访问令牌了, 这里照实返回, 否则用户改不了自己填过的值
+      // 小红书按手表的点播配置
+      xhsAutoReplyEnabled: !!cfg.xhsAutoReplyEnabled,
+      xhsAutoReply: Array.isArray(cfg.xhsAutoReply) ? cfg.xhsAutoReply : [],
+      xhsWatches: wids.map((wid) => {
+        const c = device.normalizeXhsWatch((cfg.xhsBots || {})[wid] || {});
+        const manual = (c.targets || []).filter(Boolean);
+        return {
+          watchId: wid,
+          name: nameOf(wid),
+          configured: !!(cfg.xhsBots || {})[wid],
+          enabled: !!c.enabled,
+          keys: manual.length ? manual : autoKeysFor(wid),
+          auto: !manual.length,
+          maxDuration: c.maxDuration,
+          maxBytes: c.maxBytes,
+          maxPerDay: c.maxPerDay,
+          maxImages: c.maxImages,
+          searchImage: c.searchImage,
+        };
+      }),
       comment: biliCommentCfg(),
+      // B 站账号登录态。这里只读内存/配置，不发网络请求；想知道 Cookie 是否还有效，
+      // 前端另外调 /api/bili/login/status（那个才会去问 B 站）。
+      login: {
+        loggedIn: biliLogin.isLoggedIn(),
+        account: biliLogin.publicAccount(biliLogin.account()),
+      },
     };
   }
 
@@ -1449,6 +1754,20 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     return null;
   }
 
+  // 会话列表里没有的 dialogId：不丢弃，按消息本身建一个临时会话。
+  // 线上踩过：家庭群 id 和列表里差一位，所有命令都被静默丢掉。
+  function fallbackTarget(m) {
+    const did = Number(m && m.dialogId) || 0;
+    const iid = Number(m && m.imAccountId) || 0;
+    if (did > 0) {
+      return { key: 'g:' + did, type: 'group', name: '会话 ' + did, sub: '自动识别', dialogId: did, peers: [] };
+    }
+    if (iid > 0) {
+      return { key: 's:' + iid, type: 'single', name: '手表 ' + iid, sub: '自动识别', receiverId: iid, peers: [] };
+    }
+    return null;
+  }
+
   function agreeTypeFromSource(src) {
     const map = { 0: 'remote', 1: 'recommend', 2: 'recommendAudit', 3: 'interphone', 4: 'classGroup', 7: 'blueToothAudit', 8: 'geniusNumber' };
     return map[Number(src)] || String(src);
@@ -1623,11 +1942,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (!b || typeof b !== 'object') return false;
     // 新式信封: msgNewType 存在, 属于聊天消息(文本/表情/图片/语音/视频/位置/转发等)
     if (b.msgNewType != null && Number(b.msgNewType) > 0) return false;
-    // ⚠️ 带会话信息(dialogId / imAccountId)的一定是聊天消息。
-    // 业务推送是账号级的, 没有会话。以前只看 contentType>=1000 就判业务推送,
-    // 手表发来的 contentType=1000 的消息会被整条丢掉, 用户侧表现为「收不到手表消息」。
-    if (m.dialogId || m.imAccountId) return false;
-    // 老式业务推送: body.type 是通知类型, content 一般是字符串 JSON
+    // 老式业务推送: body.type 是通知类型, content 一般是字符串 JSON。
+    // 必须在「有 dialogId 就是聊天」之前判断 —— 手表的业务上报常常也带着
+    // 家庭群 dialogId，先看会话会把电量/位置当成聊天文本发给机器人。
     const t = Number(b.type);
     if (t === 27) { // 电量
       const c = parsePushContent(b);
@@ -1642,6 +1959,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       const c = parsePushContent(b);
       return !!(c && (c.latitude != null || c.longitude != null));
     }
+    // 带会话信息(dialogId / imAccountId)的其余消息才是聊天消息
+    if (m.dialogId || m.imAccountId) return false;
     // contentType >= 1000 或 body.type >= 1000 的是服务端通知
     if (m.contentType >= 1000) return true;
     if (t >= 1000 && typeof b.content === 'string') return true;
@@ -1725,8 +2044,23 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     const selfImId = im && im.imAccountId != null ? String(im.imAccountId) : '';
     const msgImId = m.imAccountId != null ? String(m.imAccountId) : '';
     if (selfImId && msgImId && selfImId === msgImId) return;
+    // 任何带 dialogId 的帧都先把会话登记上（包括状态/业务帧）。
+    // 否则机器人想往手表实际在用的会话发消息时会报「会话不存在」。
+    if (m.dialogId) {
+      chatTargets = chatTargets || [];
+      if (!chatTargets.some((t) => t.type === 'group' && String(t.dialogId) === String(m.dialogId))) {
+        chatTargets.push({
+          key: 'g:' + m.dialogId, type: 'group', name: '会话 ' + m.dialogId,
+          sub: '自动识别', dialogId: m.dialogId, peers: [],
+        });
+      }
+    }
     const parsed = parseMessage(m.msgType, m.raw);
     const text = describe(parsed);
+    // 可当命令/AI 输入的原文：普通文本直接用，转发文本取 inner.content（describe 会加 [转发] 前缀）
+    const cmdText = parsed.kind === 'text' ? String(parsed.text || '')
+      : parsed.kind === 'relay_text' ? String((parsed.inner && (parsed.inner.content || parsed.inner.text)) || parsed.text || '')
+      : '';
     // 调试: 表情消息记录 inner 字段, 便于确认字段名
     if (log.isEnabled('debug') && (parsed.kind === 'emoji' || parsed.kind === 'kaomoji')) {
       try { log.debug('im', 'emoji ' + JSON.stringify(parsed.inner || parsed.body).slice(0, 300)); } catch (e) { /* ignore */ }
@@ -1746,21 +2080,86 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
     // 会话 key 提前算: B 站点播命令要按会话判断归属, 命中后也不能再让 AI 抢答一遍。
     // 用 text || bodyText 判空：describe 给不出的正文，bodyText 可能给得出。
-    const key = (text || bodyText) ? resolveChatKey(m) : null;
+    let key = (text || bodyText) ? resolveChatKey(m) : null;
+    // 映射失败时：先刷新一次会话表，再按消息自带 dialogId 建档，绝不丢消息
+    if ((text || bodyText) && !key) {
+      if (Date.now() - lastTargetsRefresh > 60000) {
+        lastTargetsRefresh = Date.now();
+        const keep = (chatTargets || []).filter((t) => t.sub === '自动识别');
+        loadChatTargets(true).then((list) => {
+          if (!Array.isArray(list)) return;
+          for (const k of keep) if (!list.some((x) => x.key === k.key)) list.push(k);
+          chatTargets = list;
+        }).catch(() => {});
+      }
+      key = resolveChatKey(m);
+      if (!key) {
+        const fb = fallbackTarget(m);
+        if (fb) {
+          chatTargets = chatTargets || [];
+          if (!chatTargets.some((x) => x.key === fb.key)) chatTargets.push(fb);
+          key = fb.key;
+          log.info('im', '未登记的会话，已自动建档 ' + key);
+        }
+      }
+    }
     // 没开点播就完全不解析命令 —— 这个功能没配置时必须彻底静默
     const biliOn = biliAnyEnabled();
-    let biliCmd = (biliOn && key && bodyText) ? biliBot.parseCommand(bodyText) : null;
+
+    // 命令用的正文：普通文本走 bodyText，转发文本取内层内容（去掉 [转发] 前缀）
+    const _t = key ? String(cmdText || bodyText || '').trim() : '';
+    if (key && _t) {
+      log.info('im', '文本消息 key=' + key + ' kind=' + parsed.kind + ' ' + JSON.stringify(_t.slice(0, 60)));
+    }
+    if (key && /^(?:[/／](?:小红书|xhs|red)|(?:小红书|xhs|red)[\s:：])/i.test(_t)) {
+      log.info('xhs', '收到候选命令 key=' + key + ' on=' + xhsAnyEnabled());
+    }
+
+    // 小红书命令带自己的前缀，先解析；命中了就不再走 B 站
+    const xhsOn = xhsAnyEnabled();
+    let xhsCmd = (xhsOn && key && _t) ? xhsBot.parseCommand(_t) : null;
+    let xhsWid = xhsCmd ? xhsWatchOf(key) : '';
+    if (xhsCmd && !xhsWid && xhsOn) {
+      const last = xhsMissAt.get(key) || 0;
+      if (Date.now() - last > 60000) {
+        xhsMissAt.set(key, Date.now());
+        xhsReply(key, '这条会话没开小红书点播。去「微聊 → 小红书点播」把本会话勾上再发。').catch(() => {});
+      }
+      return;
+    }
+    if (xhsCmd && xhsWid) { xhsHandle(xhsWid, key, xhsCmd).catch((e) => log.warn('xhs', String(e && e.message || e))); return; }
+
+    let biliCmd = (biliOn && key && _t) ? biliBot.parseCommand(_t) : null;
     let biliWid = biliCmd ? biliWatchOf(key) : '';
     // 单聊里搜完直接回一个数字也算「播放第 N 条」: 列表就摆在上面, 让人再敲一遍
     // /播放 太别扭。只在单聊生效(群里说个数字太容易误触), 10 分钟内有效。
     if (biliOn && !biliCmd && key && /^s:/.test(key) && bodyText) {
-      const bare = String(bodyText).trim();
+      const bare = String(_t).trim();
       if (/^\d{1,2}$/.test(bare)) {
         const wid = biliWatchOf(key);
         const hit = wid ? biliSearchCache.get(wid + '|' + key) : null;
         if (hit && Date.now() - hit.at < BILI_BARE_TTL) {
           biliCmd = { kind: 'play', arg: bare };
           biliWid = wid;
+        }
+      }
+    }
+
+    // 小红书关键词自动回复（默认关闭，规则形如 [{ match:'在吗', reply:'在的' }]）
+    if (!xhsCmd && _t && cfg.xhsAutoReplyEnabled && Array.isArray(cfg.xhsAutoReply)) {
+      const wid2 = xhsWatchOf(key);
+      // 自己发出的自动回复会被平台回显成「收到」，不排除会自己回自己
+      if (wid2 && !xhsAutoSent.has(_t)) {
+        const hit = cfg.xhsAutoReply.find((r) => r && r.match && String(_t).indexOf(String(r.match)) >= 0);
+        if (hit && hit.reply) {
+          const reply = String(hit.reply);
+          xhsAutoSent.add(reply);
+          if (xhsAutoSent.size > 30) {
+            const first = xhsAutoSent.values().next();
+            if (!first.done) xhsAutoSent.delete(first.value);
+          }
+          xhsReply(key, reply).catch(() => {});
+          log.info('xhs', '自动回复命中「' + hit.match + '」');
         }
       }
     }
@@ -1773,7 +2172,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     //   - 会话没勾选 → info，并把当前启用的会话 key 一起打出来，方便对照
     //   - 关键词没命中 → info，打出归一化后的关键词和文本前缀
     //   - 命中 → info，打出单聊/群、命中方式（exact/prefix/contains）
-    if (aiRunning && !biliCmd) {
+    if (aiRunning && !biliCmd && !xhsCmd) {
       const aiText = bodyText;
       const aiKey = key || resolveChatKey(m);
       // 这张图能不能交给模型看：类型对、拿到 URL、用户没关识图
@@ -1972,7 +2371,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     const tick = () => {
       if (!cfg.token) return;
       ensureIM()
-        .then((c) => logState('后台监听在线 imAccountId=' + c.imAccountId))
+        .then((c) => {
+          logState('后台监听在线 imAccountId=' + c.imAccountId);
+          // 主动拉一次离线/漏推的消息。平台的下推绑定会失效（在线但只收心跳），
+          // 只靠 PUSH 会漏消息；同步是幂等的，多拉一次不会重复。
+          return c.sync().catch(() => {});
+        })
         .catch((e) => logState('后台监听连接失败: ' + (e && e.message ? e.message : e)));
     };
     tick();
@@ -1980,8 +2384,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (imTimer.unref) imTimer.unref();
   }
 
-  async function loadChatTargets() {
-    if (chatTargets) return chatTargets;
+  async function loadChatTargets(force) {
+    if (chatTargets && !force) return chatTargets;
     const data = ensure(await api.getDialogAccounts());
     const targets = [];
     (data.familyDialogs || []).forEach((fd) => {
@@ -2749,6 +3153,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       const ctx = {
         method: req.method,
         path: '/' + rest.slice(1).join('/'),
+        // 声明式接口名：/api/plugin/<id>/api/<name>。为空时退回 onRequest 兜底
+        api: rest.slice(1).join('/'),
         query: q,
         body,
         headers: {
@@ -2947,7 +3353,55 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     // ===== 微聊 B 站点播(按手表) =====
     // 配置只有按手表这一种: cfg.biliBots[watchId], 每块表自己的开关/会话范围/限额
     if (parts[1] === 'bili') {
+      // ===== B 站账号登录（扫码 / 手动 SESSDATA）=====
+      if (parts[2] === 'login') {
+        if (parts[3] === 'qr' && req.method === 'GET') return ok(res, await biliLogin.createQr());
+        if (parts[3] === 'poll' && req.method === 'GET') return ok(res, await biliLogin.pollQr(query.get('key')));
+        if (parts[3] === 'status' && req.method === 'GET') return ok(res, await biliLogin.status());
+        if (parts[3] === 'logout' && req.method === 'POST') return ok(res, biliLogin.logout());
+        if (parts[3] === 'sessdata' && req.method === 'POST') {
+          const b = await readBody(req);
+          return ok(res, await biliLogin.loginWithSessdata(b.sessdata));
+        }
+        throw new Error('未知的 B 站登录接口');
+      }
+
       if (!parts[2] && req.method === 'GET') return ok(res, await biliState());
+
+      // 保存某块表的小红书点播设置
+      if (parts[2] === 'xhs-watch' && req.method === 'POST') {
+        const b = await readBody(req);
+        const wid = String(b.watchId || '').trim();
+        if (!wid) throw new Error('缺少 watchId');
+        const c = device.normalizeXhsWatch((cfg.xhsBots || {})[wid] || {});
+        if (b.enabled != null) c.enabled = !!b.enabled;
+        if (b.maxDuration != null) c.maxDuration = clampInt(b.maxDuration, 0, 3600, c.maxDuration);
+        if (b.maxBytes != null) c.maxBytes = clampInt(b.maxBytes, 0, 100 * 1024 * 1024, c.maxBytes);
+        if (b.maxPerDay != null) c.maxPerDay = clampInt(b.maxPerDay, 0, 999, c.maxPerDay);
+        if (b.maxImages != null) c.maxImages = clampInt(b.maxImages, 1, 9, c.maxImages);
+        if (b.targets != null) {
+          c.targets = (Array.isArray(b.targets) ? b.targets : []).map(String).filter((x) => /^[sg]:.+/.test(x));
+        }
+        cfg.xhsBots = cfg.xhsBots || {};
+        cfg.xhsBots[wid] = c;
+        device.save(cfg);
+        log.info('xhs', `手表 ${wid} 的小红书点播已${c.enabled ? '启用' : '关闭'}`);
+        return ok(res, await biliState());
+      }
+
+      // 小红书关键词自动回复（全局开关 + 规则）
+      if (parts[2] === 'xhs-autoreply' && req.method === 'POST') {
+        const b = await readBody(req);
+        cfg.xhsAutoReplyEnabled = !!b.enabled;
+        cfg.xhsAutoReply = (Array.isArray(b.rules) ? b.rules : [])
+          .map((r) => ({ match: String((r && r.match) || '').trim(), reply: String((r && r.reply) || '').trim() }))
+          .filter((r) => r.match && r.reply)
+          .slice(0, 20);
+        device.save(cfg);
+        log.info('xhs', '自动回复已' + (cfg.xhsAutoReplyEnabled ? '启用' : '关闭')
+          + '，规则 ' + cfg.xhsAutoReply.length + ' 条');
+        return ok(res, await biliState());
+      }
 
       // 保存某块表的点播设置
       if (parts[2] === 'watch' && req.method === 'POST') {
@@ -3040,6 +3494,63 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
     // ===== 对外 API: 加好友口令 / 好友管理 =====
     // 令牌只有按手表这一种: extApi[watchId], 令牌即身份, 只能操作自己那块表
+    if (parts[1] === 'dev' && parts[2] === 'im' && parts[3] === 'sync' && req.method === 'POST') {
+      if (String(process.env.JZ_ALLOW_INJECT || '') !== '1') throw new Error('注入未开启');
+      const c = await ensureIM();
+      await c.sync();
+      return ok(res, { synced: true, imAccountId: c.imAccountId, syncKey: c.syncKey });
+    }
+
+    // 仅在 JZ_ALLOW_INJECT=1 时开放的仿真入口：注入一条「手表发来的」消息，
+    // 用来验证「收消息 -> 解析 -> 机器人回复 -> 发送到手表」整条链路。
+    if (parts[1] === 'dev' && parts[2] === 'inject' && req.method === 'POST') {
+      if (String(process.env.JZ_ALLOW_INJECT || '') !== '1') throw new Error('注入未开启');
+      const b = await readBody(req);
+      const text = String(b.text || '');
+      const iid = Number(b.imAccountId || 0);
+      const did = Number(b.dialogId || 0);
+      const mt = Number(b.msgType || 1);
+      const body = mt === 20
+        ? { type: 20, content: text }
+        : { type: 1, text };
+      onImMessage({
+        msgType: mt, dialogId: did, imAccountId: iid,
+        createTime: Date.now(), body, raw: JSON.stringify(body), source: 'dev',
+      });
+      return ok(res, { injected: true, text, imAccountId: iid, dialogId: did });
+    }
+
+    // ===== 小红书桥接（独立服务 xhs-bridge）=====
+    if (parts[1] === 'xhs') {
+      if (!parts[2] && req.method === 'GET') {
+        const c = xhs.conf(cfg);
+        let health = null;
+        let err = '';
+        try { health = await xhs.health(cfg); } catch (e) { err = e.message; }
+        return ok(res, { config: { baseUrl: c.baseUrl, hasToken: !!c.token }, health, error: err });
+      }
+      if (parts[2] === 'config' && req.method === 'POST') {
+        const b = await readBody(req);
+        cfg.xhs = Object.assign({}, cfg.xhs, {
+          baseUrl: String(b.baseUrl || cfg.xhs.baseUrl || '').trim(),
+          token: String(b.token == null ? cfg.xhs.token : b.token).trim(),
+        });
+        device.save(cfg);
+        return ok(res, xhs.conf(cfg));
+      }
+      if (parts[2] === 'login' && parts[3] === 'qr' && req.method === 'GET') return ok(res, await xhs.qr(cfg, query.get('refresh') === '1'));
+      if (parts[2] === 'login' && parts[3] === 'status' && req.method === 'GET') return ok(res, await xhs.status(cfg));
+      if (parts[2] === 'login' && parts[3] === 'open' && req.method === 'POST') return ok(res, await xhs.open(cfg));
+      if (parts[2] === 'login' && parts[3] === 'logout' && req.method === 'POST') return ok(res, await xhs.logout(cfg));
+      if (parts[2] === 'publish' && req.method === 'POST') return ok(res, await xhs.publish(cfg, await readBody(req)));
+      if (parts[2] === 'chats' && req.method === 'GET') return ok(res, await xhs.chats(cfg));
+      if (parts[2] === 'send' && req.method === 'POST') return ok(res, await xhs.send(cfg, await readBody(req)));
+      if (parts[2] === 'screenshot' && req.method === 'GET') return ok(res, await xhs.screenshot(cfg));
+      if (parts[2] === 'safety' && req.method === 'GET') return ok(res, await xhs.safety(cfg));
+      if (parts[2] === 'safety' && req.method === 'POST') return ok(res, await xhs.setSafety(cfg, await readBody(req)));
+      throw new Error('未知的小红书接口');
+    }
+
     if (parts[1] === 'genius-api') {
       const state = async () => {
         const per = cfg.extApi || {};
@@ -4522,14 +5033,55 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       // ===== 令牌接口(免鉴权) =====
       if (parts[0] === 'api' && parts[1] === 'auth') {
         if (parts[2] === 'status') {
-          return sendJson(res, 200, { ok: true, data: { authed: isAuthed(req) } });
+          return sendJson(res, 200, {
+            ok: true, data: { authed: isAuthed(req), hasPassword: hasPassword() },
+          });
+        }
+        // 设置 / 重置访问密码：必须持令牌（Cookie、Bearer 或 body.token）
+        if (parts[2] === 'setup' && req.method === 'POST') {
+          const b = await readBody(req);
+          const pw = String(b.password || '');
+          if (pw.length < 6 || pw.length > 64) {
+            return sendJson(res, 400, { ok: false, error: '密码长度需要 6–64 位' });
+          }
+          const byToken = isAuthed(req) || safeEqual(String(b.token || '').trim(), AUTH_TOKEN);
+          if (!byToken) {
+            return sendJson(res, 403, { ok: false, error: '需要访问令牌才能设置密码' });
+          }
+          const salt = crypto.randomBytes(16).toString('hex');
+          cfg.webui = Object.assign({}, cfg.webui, {
+            passwordSalt: salt,
+            passwordHash: pwdHash(pw, salt),
+            passwordSetAt: Date.now(),
+          });
+          device.save(cfg);
+          res.setHeader('Set-Cookie', pwdCookie());
+          log.info('webui', '访问密码已设置/更新');
+          return sendJson(res, 200, { ok: true, data: { authed: true, hasPassword: true } });
         }
         if (parts[2] === 'login' && req.method === 'POST') {
           const ip = clientIp(req);
           if (authBlocked(ip)) {
-            return sendJson(res, 429, { ok: false, error: '令牌错误次数过多，请 10 分钟后再试' });
+            return sendJson(res, 429, { ok: false, error: '尝试次数过多，请 10 分钟后再试' });
           }
           const b = await readBody(req);
+          const pw = String(b.password || '');
+          if (pw) {
+            if (!hasPassword()) {
+              return sendJson(res, 409, { ok: false, error: '还没设置密码，请先用令牌登录' });
+            }
+            const h = pwdHash(pw, cfg.webui.passwordSalt);
+            if (!safeEqual(h, cfg.webui.passwordHash)) {
+              noteAuthFail(ip);
+              log.warn('webui', `密码错误 ip=${ip}`);
+              await new Promise((r) => setTimeout(r, 500));
+              return sendJson(res, 401, { ok: false, error: '密码不正确' });
+            }
+            authFails.delete(ip);
+            res.setHeader('Set-Cookie', pwdCookie());
+            log.info('webui', `密码验证通过 ip=${ip}`);
+            return sendJson(res, 200, { ok: true, data: { authed: true, hasPassword: true } });
+          }
           if (!safeEqual(String(b.token || '').trim(), AUTH_TOKEN)) {
             noteAuthFail(ip);
             log.warn('webui', `令牌错误 ip=${ip}`);
@@ -4539,7 +5091,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           authFails.delete(ip);
           res.setHeader('Set-Cookie', authCookie());
           log.info('webui', `令牌验证通过 ip=${ip}`);
-          return sendJson(res, 200, { ok: true, data: { authed: true } });
+          return sendJson(res, 200, { ok: true, data: { authed: true, hasPassword: hasPassword() } });
         }
         if (parts[2] === 'logout' && req.method === 'POST') {
           res.setHeader('Set-Cookie', `${AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);

@@ -84,6 +84,16 @@ const DEFAULTS = {
   biliBots: {},
   // B 站评论长图的公共设置。sessdata 是账号级的(B 站登录 Cookie), 不按手表分:
   // 不填只能拿到热门的前 3 条评论, 填了才能翻页拿全
+  // 小红书按手表的点播设置（结构对齐 biliBots）
+  xhsBots: {},
+  // 小红书桥接服务（独立进程 xhs-bridge）的地址和令牌
+  xhs: {
+    enabled: true,
+    baseUrl: 'http://127.0.0.1:18811',
+    token: '',
+  },
+  // B 站账号登录态（扫码后写入）。属于凭证，只存本机配置，不进仓库
+  biliAccount: null,
   biliComment: {
     sessdata: '',
     maxComments: 60,     // 最多抓多少条主楼评论
@@ -233,6 +243,35 @@ function biliInt(v, min, max, def) {
   return i;
 }
 
+function xhsWatchDefaults() {
+  return {
+    enabled: false, targets: [], maxDuration: 900, maxBytes: 100 * 1024 * 1024, maxPerDay: 10,
+    searchImage: true, maxImages: 4,
+  };
+}
+
+function normalizeXhsWatch(raw) {
+  const d = xhsWatchDefaults();
+  const r = raw && typeof raw === 'object' ? raw : {};
+  return {
+    enabled: !!r.enabled,
+    targets: Array.isArray(r.targets) ? r.targets.map(String).filter(Boolean) : [],
+    maxDuration: biliInt(r.maxDuration, 0, 3600, d.maxDuration),
+    maxBytes: biliInt(r.maxBytes, 0, d.maxBytes, d.maxBytes),
+    maxPerDay: biliInt(r.maxPerDay, 0, 999, d.maxPerDay),
+    searchImage: r.searchImage !== false,
+    maxImages: biliInt(r.maxImages, 1, 9, d.maxImages),
+  };
+}
+
+function normalizeXhsBots(raw) {
+  const out = {};
+  if (raw && typeof raw === 'object') {
+    Object.keys(raw).forEach((k) => { out[String(k)] = normalizeXhsWatch(raw[k]); });
+  }
+  return out;
+}
+
 function normalizeBiliWatch(raw) {
   const d = biliWatchDefaults();
   const r = raw && typeof raw === 'object' ? raw : {};
@@ -295,6 +334,7 @@ function load() {
       const cfg = Object.assign({}, DEFAULTS, JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')));
       cfg.ai = normalizeAi(cfg.ai);
       cfg.webui = Object.assign({}, DEFAULTS.webui, cfg.webui || {});
+      cfg.xhs = Object.assign({}, DEFAULTS.xhs, cfg.xhs || {});
       // 老配置里的 onebot.http / ws / wsClient / enabled 属于「全局实例」时代。
       // 现在只有按手表的实例了, 但直接丢掉会让老用户已经接好的端口和令牌全废,
       // 所以先摘到 onebotLegacy 里(不可枚举, 不会被写回文件), 交给 webui.js 的
@@ -314,6 +354,7 @@ function load() {
       cfg.onebotWatches = normalizeOnebotWatches(cfg.onebotWatches);
       cfg.extApi = normalizeExtApi(cfg.extApi);
       cfg.biliBots = normalizeBiliBots(cfg.biliBots);
+      cfg.xhsBots = normalizeXhsBots(cfg.xhsBots);
       cfg.biliComment = normalizeBiliComment(cfg.biliComment);
       cfg.plugins = normalizePlugins(cfg.plugins);
       cfg.links = normalizeLinks(cfg.links);
@@ -322,6 +363,7 @@ function load() {
   } catch (e) { /* 损坏则用默认 */ }
   return Object.assign({}, DEFAULTS, {
     webui: Object.assign({}, DEFAULTS.webui),
+    xhs: Object.assign({}, DEFAULTS.xhs),
     onebot: Object.assign({}, DEFAULTS.onebot),
     ai: normalizeAi(null),
     biliComment: Object.assign({}, DEFAULTS.biliComment),
@@ -330,6 +372,7 @@ function load() {
     onebotWatches: {},
     extApi: {},
     biliBots: {},
+    xhsBots: {},
   });
 }
 
@@ -376,5 +419,6 @@ module.exports = {
   // 按手表配置的归一化工具(webui 保存单个手表的 OneBot / 点播配置时要用)
   onebotWatchDefaults, normalizeOnebotWatch, normalizeExtApi,
   biliWatchDefaults, normalizeBiliWatch, normalizeBiliBots, normalizeBiliComment,
+  xhsWatchDefaults, normalizeXhsWatch, normalizeXhsBots,
   normalizePlugins, normalizeLinks, normalizeAi,
 };

@@ -109,7 +109,22 @@ function matchKeyword(text, keywords, mode) {
 
 // 这些 kind 都带「能读出来的文本」，可以交给 AI。
 // 只放文本类：语音/图片/视频/位置等不参与，避免把「[图片] https://...」喂给模型。
-const AI_TEXT_KINDS = ['text', 'relay_text', 'hint', 'text_hint', 'kaomoji', 'unknown', 'raw'];
+// 只认「人发出来的文本类消息」。
+// hint / text_hint / unknown / raw 大多是业务推送和系统提示（电量、位置、话费余额、同步状态…），
+// auto 模式下会被无脑回复 —— 线上表现就是「AI 疯狂发消息」。这条线必须收窄。
+const AI_TEXT_KINDS = ['text', 'relay_text', 'kaomoji'];
+
+// 业务/数据推送：信封里没有正文，content 却是一段 JSON（电量、位置、话费、同步状态等）。
+// 这类消息即使被解析成 kind=text，也不该交给 AI。修复：anjianhe
+function isDataPush(parsed) {
+  const b = parsed && parsed.body;
+  if (!b || typeof b !== 'object' || Array.isArray(b)) return false;
+  const hasText = typeof b.text === 'string' && b.text.trim() !== '';
+  const hasNew = typeof b.msgNewContent === 'string' && b.msgNewContent.trim() !== '';
+  if (hasText || hasNew) return false;
+  const c = typeof b.content === 'string' ? b.content.trim() : '';
+  return !!c && /^[\{\[]/.test(c);
+}
 
 // describe() 给「人类看」的展示文本加的装饰前缀，喂给 AI 前要剥掉
 const DISPLAY_PREFIX = /^\[(?:转发|转发文本|提示|颜文字|文字提示|原始消息|消息\s*[-\d]*)\]\s*/;
@@ -126,37 +141,9 @@ const DISPLAY_PREFIX = /^\[(?:转发|转发文本|提示|颜文字|文字提示|
 //   1) 先看 describe 出来的展示文本（和聊天面板完全同源），剥掉装饰前缀
 //   2) 再按字段逐个兜底（顶层 text/content → inner 里的常见正文字段）
 // 传入第二个参数 described 时优先用它，保证「面板能看到的文字，AI 也一定能看到」。
-// 服务端会把「电量 / 步数」这类设备上报也塞进 content 字段，parseMessage 就把它
-// 当成 kind=text 的正文（text = body.text || body.content）。AI 一旦能正常触发，
-// 手表每分钟报一次电量就触发一次模型调用 —— 一天上千次，回复内容还是「97」。
-//
-// 判据：整段正文是一个 JSON 对象、且不含任何「里面还有话」的字段。
-//   {"battery":97}            → 系统上报，丢掉
-//   {"battery":97,"charging":true} → 丢掉
-//   {"content":"你好"}        → 有 content，可能是真消息，保留
-//   "你好"                    → 不是 JSON，保留
-const READABLE_KEYS = ['content', 'text', 'msg', 'desc', 'message', 'contentText'];
-function isSystemJson(s) {
-  const t = String(s == null ? '' : s).trim();
-  if (t.length < 2 || t.charAt(0) !== '{' || t.charAt(t.length - 1) !== '}') return false;
-  let o;
-  try { o = JSON.parse(t); } catch (e) { return false; }
-  if (!o || typeof o !== 'object' || Array.isArray(o)) return false;
-  if (!Object.keys(o).length) return false;
-  for (let i = 0; i < READABLE_KEYS.length; i++) {
-    if (Object.prototype.hasOwnProperty.call(o, READABLE_KEYS[i])) return false;
-  }
-  return true;
-}
-
-// 对外只暴露这一个入口：内部逻辑算完，再把系统上报滤掉。
 function aiTextOf(parsed, described) {
-  const out = pickAiText(parsed, described);
-  return isSystemJson(out) ? '' : out;
-}
-
-function pickAiText(parsed, described) {
   if (!parsed || typeof parsed !== 'object') return '';
+  if (isDataPush(parsed)) return '';          // 数据推送不是「人说的话」
   const kind = String(parsed.kind || '');
   if (AI_TEXT_KINDS.indexOf(kind) < 0) return '';
   const inner = parsed.inner || parsed.body || {};
@@ -278,5 +265,6 @@ module.exports = {
   sessionKeyOf,
   matchSession,
   toImId,
+  isDataPush,
   AI_TEXT_KINDS,
 };

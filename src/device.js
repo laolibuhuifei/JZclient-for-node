@@ -112,13 +112,9 @@ function normalizeAi(raw) {
     if (!Number.isFinite(n)) return def;
     return Math.min(max, Math.max(min, n));
   };
-  // keywords 允许是数组（正常）或字符串（手改过 config.json、或早期版本留下的脏数据）。
-  // 字符串必须拆开而不是丢掉 —— 直接给空数组等于「升级后关键词全没了」，
-  // 那正是这次要修的「AI 怎么都不触发」的另一副面孔。
-  const kwList = Array.isArray(r.keywords)
-    ? r.keywords
-    : (typeof r.keywords === 'string' ? r.keywords.split(/[,，、;；|/\n\r\t\s]+/) : []);
-  const keywords = kwList.map((x) => String(x == null ? '' : x).trim()).filter(Boolean);
+  const keywords = Array.isArray(r.keywords)
+    ? r.keywords.map((x) => String(x == null ? '' : x).trim()).filter(Boolean)
+    : [];
   const sessions = Array.isArray(r.sessions)
     ? r.sessions.filter((s) => s && typeof s === 'object' && (s.type === 'group' || s.type === 'single'))
       .map((s) => {

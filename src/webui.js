@@ -1430,9 +1430,18 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   const aiChains = new Map();
   // 「会话没启用」这条提示的限流时间戳（避免家庭群之类未勾选会话刷屏）
   const aiSkipLog = { at: 0 };
+  // 只回复这个时间窗内的消息（毫秒）。登录/重连时 IM 会把历史消息整批补发回来，
+  // 逐条回复的观感就是「AI 疯狂发消息」—— 窗口外的旧消息一律跳过。
+  const AI_FRESH_MS = 10 * 60 * 1000;
 
   function pushChat(key, msg) {
     const list = chatLog.get(key) || [];
+    // 服务端时钟通常比本机慢几秒，而 AI 回复用的是 Date.now()，
+    // 结果就是「回复」在面板里排到「提问」前面。这里让时间戳单调递增。
+    // 修复：anjianhe
+    const last = list.length ? Number(list[list.length - 1].time) || 0 : 0;
+    const t = Number(msg && msg.time) || Date.now();
+    if (last && t < last) msg = Object.assign({}, msg, { time: last + 1 });
     list.push(msg);
     if (list.length > 200) list.splice(0, list.length - 200);
     chatLog.set(key, list);
@@ -1579,12 +1588,38 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     try { return JSON.parse(b.content); } catch (e) { return null; }
   }
 
+  // 数据推送的正文特征：纯 JSON，且带这些业务字段（流量余额、话术分析、位置、电量…）。
+  // 线上真实样例：
+  //   {"restData":9332.3,"threshold":10240,"updateTime":...}
+  //   {"noteType":1,"sendNumber":"10086","type":0,"analysis":"..."}
+  // 这类消息即使带了会话信息（dialogId/imAccountId），也不是「人说的话」——
+  // 以前会被当成聊天塞进面板（显示成一行 JSON），auto 模式下还会被 AI 逐条回复。
+  // 修复：anjianhe
+  const DATA_PAYLOAD_KEYS = /"(?:restData|threshold|noteType|sendNumber|analysis|battery|latitude|longitude|poiNew|descNew|updateTime)"\s*:/;
+  function isDataPayload(b) {
+    if (!b || typeof b !== 'object') return false;
+    // 信封本身就是数据对象
+    if (b.restData != null || b.threshold != null || b.noteType != null
+      || b.sendNumber != null || b.analysis != null) return true;
+    // 正文是 JSON 字符串
+    const cands = [b.text, b.content];
+    for (let i = 0; i < cands.length; i++) {
+      const v = cands[i];
+      if (typeof v !== 'string') continue;
+      const s = v.trim();
+      if (s.charAt(0) === '{' && DATA_PAYLOAD_KEYS.test(s)) return true;
+    }
+    return false;
+  }
+
   // 判断业务推送: 必须是旧式消息(无 msgNewType), 否则即使是同号类型也是聊天
   function isBusinessMessage(m) {
     const b = m.body || {};
     if (!b || typeof b !== 'object') return false;
     // 新式信封: msgNewType 存在, 属于聊天消息(文本/表情/图片/语音/视频/位置/转发等)
     if (b.msgNewType != null && Number(b.msgNewType) > 0) return false;
+    // 数据推送优先级最高：即使带了会话信息，正文是纯业务 JSON 的也不是聊天
+    if (isDataPayload(b)) return true;
     // ⚠️ 带会话信息(dialogId / imAccountId)的一定是聊天消息。
     // 业务推送是账号级的, 没有会话。以前只看 contentType>=1000 就判业务推送,
     // 手表发来的 contentType=1000 的消息会被整条丢掉, 用户侧表现为「收不到手表消息」。
@@ -1733,8 +1768,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (aiRunning && !biliCmd) {
       const aiText = bodyText;
       const aiKey = key || resolveChatKey(m);
+      // 历史消息不回复：IM 重连/首次登录会补发整批旧消息，逐条回 = 刷屏
+      const ageMs = m.createTime ? Date.now() - Number(m.createTime) : 0;
       if (!aiText) {
         if (log.isEnabled('debug')) log.debug('ai', `跳过：这条消息没有可回复的正文 kind=${parsed.kind}`);
+      } else if (ageMs > AI_FRESH_MS) {
+        if (log.isEnabled('debug')) log.debug('ai', `跳过：历史消息（${Math.round(ageMs / 60000)} 分钟前）`);
       } else {
         const found = aiSessionOf(m, aiKey);
         if (!found.sess) {

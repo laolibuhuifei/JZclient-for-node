@@ -105,9 +105,25 @@ test('aiTextOf：正文只在信封内层时也能取到（parsed.text 为空）
   assert.strictEqual(trig.aiTextOf(parsed), '帮我看看作业');
 });
 
-test('aiTextOf：hint 类型走 inner.content', () => {
-  const parsed = { kind: 'text_hint', text: '', inner: { content: '该喝水了' } };
-  assert.strictEqual(trig.aiTextOf(parsed, '[提示] 该喝水了'), '该喝水了');
+test('aiTextOf：提示类(hint)不交给 AI —— 系统提示不是用户发言', () => {
+  const parsed = { kind: 'text_hint', text: '', inner: { content: '表数据已更新' } };
+  assert.strictEqual(trig.aiTextOf(parsed, '[提示] 表数据已更新'), '');
+  assert.strictEqual(trig.aiTextOf({ kind: 'hint', text: '注意安全' }, '[提示] 注意安全'), '');
+});
+
+test('aiTextOf：未知类型/raw 不交给 AI（多半是业务数据）', () => {
+  assert.strictEqual(trig.aiTextOf({ kind: 'unknown', text: '{"type":9}' }, '[消息 9] {"type":9}'), '');
+  assert.strictEqual(trig.aiTextOf({ kind: 'raw', text: '[原始消息] 02' }, '[原始消息] 02'), '');
+});
+
+test('aiTextOf：业务推送(JSON content)被拦掉', () => {
+  const battery = { kind: 'text', text: '', body: { type: 27, content: '{"battery":24}' } };
+  assert.strictEqual(trig.aiTextOf(battery, '{"battery":24}'), '');
+  const loc = { kind: 'text', text: '', body: { type: 9, content: '{"latitude":30,"longitude":120}' } };
+  assert.strictEqual(trig.aiTextOf(loc), '');
+  // 正常聊天不受影响
+  const chat = { kind: 'text', text: '你好', body: { text: '你好', content: '你好' } };
+  assert.strictEqual(trig.aiTextOf(chat, '你好'), '你好');
 });
 
 test('aiTextOf：媒体类消息不参与（图片/语音/位置）', () => {
@@ -117,8 +133,8 @@ test('aiTextOf：媒体类消息不参与（图片/语音/位置）', () => {
   });
 });
 
-test('aiTextOf：raw 去掉 [原始消息] 前缀', () => {
-  assert.strictEqual(trig.aiTextOf({ kind: 'raw', text: '[原始消息] 你好' }, '[原始消息] 你好'), '你好');
+test('aiTextOf：raw 不参与（避免把 JSON 当人话）', () => {
+  assert.strictEqual(trig.aiTextOf({ kind: 'raw', text: '[原始消息] 你好' }, '[原始消息] 你好'), '');
 });
 
 // ============ 会话匹配 ============
@@ -278,10 +294,7 @@ test('normalizeAi：脏数据收敛', () => {
       null,
     ],
   });
-  // keywords 是字符串时按分隔符拆开保留，不能丢成空数组。
-  // 老配置（手改过 config.json / 早期版本）里真有字符串形式，
-  // 丢掉等于「升级后关键词全没了」，和「AI 怎么都不触发」是同一副面孔。
-  assert.deepStrictEqual(a.keywords, ['不是数组']);
+  assert.deepStrictEqual(a.keywords, []);
   assert.strictEqual(a.temperature, 2);
   assert.strictEqual(a.trigger, 'auto');
   assert.strictEqual(a.keywordsMode, 'auto');

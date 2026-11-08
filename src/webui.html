@@ -5004,6 +5004,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         // 触发方式和提示词是「怎么用」，不是「连哪」，托管模式也该让用户自己调
         '<div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px">' +
         '<button class="btn tonal small" id="aiTrig">触发方式</button>' +
+        '<button class="btn tonal small" id="aiVision">识图</button>' +
         '<button class="btn tonal small" id="aiPrompt">系统提示词</button></div></div>';
     } else {
       html += '<div class="card"><div class="card-title">接口配置</div>' +
@@ -5014,12 +5015,17 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         '<div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px">' +
         '<button class="btn tonal small" id="aiCfg">修改接口</button>' +
         '<button class="btn tonal small" id="aiTrig">触发方式</button>' +
+        '<button class="btn tonal small" id="aiVision">识图</button>' +
         '<button class="btn tonal small" id="aiPrompt">系统提示词</button></div></div>';
     }
 
     html += '<div class="card"><div class="card-title">触发方式</div>' +
       '<div class="row"><span>模式</span><span class="value">' + (c.trigger === 'keyword' ? '关键词触发' : '自动回复') + '</span></div>' +
-      '<div class="row"><span>关键词</span><span class="value">' + esc((c.keywords || []).join(' / ') || '-') + '</span></div></div>';
+      '<div class="row"><span>关键词</span><span class="value">' + esc((c.keywords || []).join(' / ') || '-') + '</span></div>' +
+      // 识图状态放在这里而不是单独一张卡：它本来就是「什么消息会触发」的一部分
+      '<div class="row"><span>识图</span><span class="value">' + (c.vision !== false ? '开启（图片消息也交给 AI 看）' : '关闭（图片消息直接跳过）') + '</span></div>' +
+      (c.vision !== false ? '<p class="muted" style="margin:8px 0 0;line-height:1.6">关键词模式下，纯图片消息不会触发（没有文字可匹配）；图片配文字时按文字判断，图会一起发给模型。</p>' : '') +
+      '</div>';
     html += '</div>';
 
     html += '<div class="card" style="margin-top:14px"><div class="toolbar"><div class="card-title" style="margin:0">启用 AI 的会话</div>' +
@@ -5094,6 +5100,28 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     if (prompt) prompt.onclick = function(){
       openForm('系统提示词', [{ name:'systemPrompt', label:'内容', value: c.systemPrompt || '' }], '保存', async function(v){
         await post('/api/ai/prompt', v);
+        toast('已保存'); load();
+      });
+    };
+    // 识图：开关 + 单图上限 + 看图提示词。
+    // 上限按 MB 填，换算成字节再提交 —— 让用户填 4194304 太难为人了
+    var vis = $('#aiVision');
+    if (vis) vis.onclick = function(){
+      openForm('识图设置', [
+        { name:'vision', label:'识别图片消息', type:'select', value: c.vision !== false ? 'on' : 'off', options:[
+          { value:'on', label:'开启（图片消息也交给 AI 看）' },
+          { value:'off', label:'关闭（图片消息直接跳过）' }
+        ]},
+        { name:'visionMaxMB', label:'单张图上限（MB，超了会先压缩）', type:'number',
+          value: Math.round((c.visionMaxBytes || 4194304) / 1048576 * 10) / 10 },
+        { name:'visionPrompt', label:'看图提示词（只在带图时追加到系统提示词后面）', type:'textarea',
+          value: c.visionPrompt || '' }
+      ], '保存', async function(v){
+        await post('/api/ai/vision', {
+          vision: v.vision === 'on',
+          visionMaxBytes: Math.round((Number(v.visionMaxMB) || 4) * 1048576),
+          visionPrompt: v.visionPrompt || ''
+        });
         toast('已保存'); load();
       });
     };

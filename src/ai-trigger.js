@@ -111,6 +111,19 @@ function matchKeyword(text, keywords, mode) {
 // 只放文本类：语音/图片/视频/位置等不参与，避免把「[图片] https://...」喂给模型。
 const AI_TEXT_KINDS = ['text', 'relay_text', 'hint', 'text_hint', 'kaomoji', 'unknown', 'raw'];
 
+// 这些 kind 是「图」，有 URL 就可以交给多模态模型看。
+// 单独一张表是因为它们的正文恒为空：describe() 只会给出「[图片 640x480] https://…」，
+// 那种装饰文本喂给模型毫无意义，必须走 image_url 而不是 content.text。
+//   6   photo              普通图片
+//   37  live_photo         实况照片
+//   21  video_call_photo   视频通话抓拍
+//   33  relay_live_photo   转发的实况照片
+const AI_IMAGE_KINDS = ['photo', 'live_photo', 'video_call_photo', 'relay_live_photo'];
+
+function isImageKind(kind) {
+  return AI_IMAGE_KINDS.indexOf(String(kind == null ? '' : kind)) >= 0;
+}
+
 // describe() 给「人类看」的展示文本加的装饰前缀，喂给 AI 前要剥掉
 const DISPLAY_PREFIX = /^\[(?:转发|转发文本|提示|颜文字|文字提示|原始消息|消息\s*[-\d]*)\]\s*/;
 
@@ -278,5 +291,7 @@ module.exports = {
   sessionKeyOf,
   matchSession,
   toImId,
+  isImageKind,
   AI_TEXT_KINDS,
+  AI_IMAGE_KINDS,
 };

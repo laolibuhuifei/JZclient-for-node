@@ -63,6 +63,15 @@ const DEFAULTS = {
     // 新增：anjianhe
     maxTokens: 0,
     systemPrompt: '你是一个家长端聊天助手。请用简短、口语化的中文回复，不要使用表情符号。',
+    // 识图：手表发来图片时也交给 AI 看（要求模型支持视觉输入）。
+    // 关掉就回到老行为 —— 图片消息直接跳过，AI 一声不吭。
+    vision: true,
+    // 单张图上限（原图字节数）。超了先用 ffmpeg 缩到 1280 再试，还超就放弃本条识图。
+    // 上限封在 5MB：base64 会涨到 1.37 倍，平台网关的请求体上限是 8MB，
+    // 再大就会被平台以 413 拒掉，用户看到的只是「AI 没回」
+    visionMaxBytes: 4 * 1024 * 1024,
+    // 只在「这条消息带图」时追加到系统提示词后面，用来告诉模型怎么看待图片
+    visionPrompt: '用户发来的是图片，请直接看图回答，不要复述图片的描述文字。',
     sessions: [],        // 启用 AI 的会话 { key, type, name, receiverId|dialogId }
   },
   // 按手表分开的 OneBot 实例: watchId -> { enabled, http:{}, ws:{}, wsClient:{}, targets:[] }
@@ -147,6 +156,11 @@ function normalizeAi(raw) {
     timeoutMs: num(r.timeoutMs, 5000, 600000, d.timeoutMs),
     maxTokens: num(r.maxTokens, 0, 32000, d.maxTokens),
     systemPrompt: r.systemPrompt == null ? d.systemPrompt : String(r.systemPrompt),
+    // vision 用 !== false 而不是 Boolean：老配置里根本没这个字段，
+    // 取 false 会把升级后的识图功能默认关掉，用户还以为没做
+    vision: r.vision !== false,
+    visionMaxBytes: num(r.visionMaxBytes, 256 * 1024, 5 * 1024 * 1024, d.visionMaxBytes),
+    visionPrompt: r.visionPrompt == null ? d.visionPrompt : String(r.visionPrompt),
     sessions,
   };
 }

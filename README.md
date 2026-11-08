@@ -805,8 +805,42 @@ WebUI 每 30 秒同步一次电量与上报时间，不需要手动刷新页面�
 - `keywordsMode`：关键词匹配方式，`auto`（前缀优先 + 词边界包含，默认）/ `prefix` / `contains`
 - `systemPrompt`：系统提示词
 - `sessions`：启用自动回复的会话
+- `vision`：是否把图片消息也交给 AI 看（默认开启）
+- `visionMaxBytes`：单张图上限，默认 4MB，超了先压缩
+- `visionPrompt`：只在带图时追加到系统提示词后面
 
 配置保存在本地运行期配置文件中，不会提交到仓库。
+
+### 识图（图片消息）
+
+手表发来图片时，AI 会先把图读下来、转成 base64，再以 OpenAI 兼容的
+`image_url` part 发出去，模型看到的是真图，不是 `[图片]` 这行字。
+
+```
+手表的 photo 消息
+  → message.mediaUrl() 取 source.downloadUrl
+  → src/vision.js 下载（15 秒超时、只认 http(s)、拒内网地址）
+  → 按文件头判格式（不信 Content-Type）
+  → JPEG/PNG/WebP/GIF 且不超限 → 直接 base64
+  → HEIC 或超限 → ffmpeg 缩到 1280 以内转 JPEG，还超就放弃本条
+  → 拼成 [{type:'text'},{type:'image_url',image_url:{url:'data:...'}}]
+```
+
+几个刻意的取舍：
+
+- **触发规则**：`auto` 模式下纯图片也回；`keyword` 模式下纯图片不触发（没有文字可匹配，
+  一律放行等于把「关键词触发」变成「所有图片都回」）。图配文时按文字判断，图跟着一起发。
+- **历史里不存图**：只留 `[发来一张图片]` 占位。base64 一张图几 MB，攒几轮内存和 token 一起爆，
+  而下一轮再带一遍旧图对回答没有任何帮助。
+- **图片读取失败不致命**：有正文就按纯文本答，正文也没有（纯图片消息）才放弃，
+  日志里会写清是 `http-404` / `timeout` / `not-image` / `too-large` 哪一步没成。
+- **单图上限 5MB 封顶**：base64 会涨到 1.37 倍，平台网关的请求体上限是 8MB，再大就会被 413 拒掉。
+
+托管平台用的是 DeepSeek 官方上游，`deepseek-chat`（v4.1 flash 的非思考模式）本身就支持视觉输入，
+不需要额外换模型。实测一张 320×240 的图约 220 prompt tokens、700ms 返回。
+
+自建网关时能不能识图取决于模型本身：不支持视觉的模型会返回 400，
+日志里是 `回复失败 xxx: 接口 400: …`。
 
 ### 关键词/自动回复「怎么发都不触发」的排查与修复
 
@@ -841,7 +875,8 @@ node --test
 ```
 
 零依赖，只用 Node 内置 test runner（Node ≥ 18）。覆盖关键词归一化与匹配、会话匹配的多路兜底、
-真实 IM 信封的正文提取，以及 `deepseek-flash` / `deepseek-reasoner` 的请求参数构造。
+真实 IM 信封的正文提取、`deepseek-flash` / `deepseek-reasoner` 的请求参数构造，以及识图链路
+（文件头嗅探、内网地址拦截、下载编码、多模态消息组装 —— 见 `test/vision.test.js`）。
 
 
 ## 微聊 B 站点播

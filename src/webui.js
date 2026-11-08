@@ -12,6 +12,7 @@ const sso = require('./sso');
 const { ImClient } = require('./im');
 const { chat: aiChat } = require('./ai');
 const aiTrigger = require('./ai-trigger');
+const vision = require('./vision');
 const { parseMessage, describe, mediaUrl, buildText, buildEmoji, buildLocation, buildLink, buildPhoto, buildVideo, buildVoice, buildKaomoji, EMOJI_PRESET, LINK_APP_NAME } = require('./message');
 const { loadImageSource, uploadImage, uploadVoice, uploadVideo, directVideo, probeDuration, splitAudio, splitVideo, cleanupSplit, downloadToTmp } = require('./upload');
 const { fetchFavicon } = require('./favicon');
@@ -1504,7 +1505,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     aiRunning = true;
     log.info('ai', `已自动启动（${reason}）model=${rt.model || '(默认)'} `
       + `trigger=${cfg.ai.trigger || 'auto'} keywords=${(cfg.ai.keywords || []).length} `
-      + `sessions=${cfg.ai.sessions.length} managed=${AI_MANAGED}`);
+      + `sessions=${cfg.ai.sessions.length} vision=${cfg.ai.vision !== false ? 'on' : 'off'} managed=${AI_MANAGED}`);
     return true;
   }
 
@@ -1525,7 +1526,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     return k.indexOf('s:') === 0 ? k.slice(2) : '';
   }
 
-  function queueAiReply(sess, text) {
+  // 图片消息的占位正文。图片本身走 image_url part，文字只负责「这是一张图」这件事，
+  // 让模型知道该看图而不是去理解这句占位符。
+  const IMAGE_PLACEHOLDER = '（发来一张图片，请看看是什么）';
+
+  function queueAiReply(sess, text, imageUrl) {
     // 托管模式下 aiRuntime() 会换成平台的网关地址和实例令牌，
     // 其余字段（temperature / 提示词）还是用户自己配的
     const a = aiRuntime();
@@ -1542,12 +1547,44 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           throw new Error('会话没有可用的接收方 id（配置里缺 receiverId / dialogId）');
         }
         const to = aiTrigger.toImId(rawId);
+
+        // 有图就先把图读成 data URL。失败不算致命：正文还在就按纯文本答，
+        // 正文也没有（纯图片消息）就只能放弃 —— 但日志里要说清是哪一步没成
+        let dataUrl = '';
+        if (imageUrl) {
+          const got = await vision.toDataUrl(imageUrl, { maxBytes: a.visionMaxBytes });
+          if (got.ok) {
+            dataUrl = got.dataUrl;
+            log.debug('ai', `图片已读取 ${got.mime} ${got.bytes} 字节 ${got.ms}ms`);
+          } else {
+            log.warn('ai', `图片读取失败(${got.reason})，本条按纯文本处理: ${String(imageUrl).slice(0, 120)}`);
+          }
+        }
+        const bodyText = String(text || '').trim();
+        if (!dataUrl && !bodyText) throw new Error('图片读不出来，这条没有可回复的内容');
+
+        // 系统提示词：带图时追加 visionPrompt（用户可改），告诉模型该怎么用图
+        const sys = [a.systemPrompt || ''];
+        if (dataUrl && a.visionPrompt) sys.push(String(a.visionPrompt));
+        const sysText = sys.filter(Boolean).join('\n');
+
+        // 多模态 user 消息：文字在前、图在后（和主流网关的示例顺序一致）
+        const userContent = dataUrl
+          ? [{ type: 'text', text: bodyText || IMAGE_PLACEHOLDER }, { type: 'image_url', image_url: { url: dataUrl } }]
+          : bodyText;
+
         const h = aiHistory.get(chainKey) || [];
-        const msgs = [{ role: 'system', content: a.systemPrompt || '' }]
+        const msgs = [{ role: 'system', content: sysText }]
           .concat(h)
-          .concat([{ role: 'user', content: text }]);
+          .concat([{ role: 'user', content: userContent }]);
         const reply = await aiChat(a, msgs);
-        const nh = h.concat([{ role: 'user', content: text }, { role: 'assistant', content: reply }]);
+
+        // 历史里只留文字：base64 一张图就几 MB，攒几轮内存和 token 一起爆，
+        // 而且下一轮再带一遍图对回答没有任何帮助
+        const histUser = dataUrl
+          ? (bodyText ? bodyText + ' ' : '') + '[发来一张图片]'
+          : bodyText;
+        const nh = h.concat([{ role: 'user', content: histUser }, { role: 'assistant', content: reply }]);
         if (nh.length > 20) nh.splice(0, nh.length - 20);
         aiHistory.set(chainKey, nh);
 
@@ -1555,7 +1592,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         const r = sess.type === 'group'
           ? await c.sendGroupText(to, c.imAccountId, reply)
           : await c.sendText(to, reply);
-        log.info('ai', `回复已发送 ${chainKey} ${r && r.ok ? 'OK' : '失败'} 长度=${String(reply).length}`);
+        log.info('ai', `回复已发送 ${chainKey} ${r && r.ok ? 'OK' : '失败'} 长度=${String(reply).length}`
+          + (dataUrl ? ' 含图' : ''));
         const key = chatKeyOfSession(sess);
         if (key) pushChat(key, { self: true, text: '[AI] ' + reply + (r && r.ok ? '' : '（发送失败）'), time: Date.now() });
       } catch (e) {
@@ -1701,6 +1739,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     // 修复：anjianhe
     const bodyText = aiTrigger.aiTextOf(parsed, text);
 
+    // 图片消息：正文恒为空（describe 只给出「[图片 640x480] https://…」这种装饰文本），
+    // 但只要有 URL 就能交给多模态模型看。vision 关掉时退回老行为（直接跳过）。
+    const isImg = aiTrigger.isImageKind(parsed.kind);
+    const imgUrl = isImg ? mediaUrl(parsed) : '';
+
     // 会话 key 提前算: B 站点播命令要按会话判断归属, 命中后也不能再让 AI 抢答一遍。
     // 用 text || bodyText 判空：describe 给不出的正文，bodyText 可能给得出。
     const key = (text || bodyText) ? resolveChatKey(m) : null;
@@ -1733,8 +1776,13 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (aiRunning && !biliCmd) {
       const aiText = bodyText;
       const aiKey = key || resolveChatKey(m);
-      if (!aiText) {
-        if (log.isEnabled('debug')) log.debug('ai', `跳过：这条消息没有可回复的正文 kind=${parsed.kind}`);
+      // 这张图能不能交给模型看：类型对、拿到 URL、用户没关识图
+      const wantImg = !!(isImg && imgUrl && cfg.ai.vision !== false);
+      if (!aiText && !wantImg) {
+        if (log.isEnabled('debug')) {
+          log.debug('ai', `跳过：这条消息没有可回复的正文 kind=${parsed.kind}`
+            + (isImg ? `（识图${cfg.ai.vision === false ? '已关闭' : (imgUrl ? '没有图片地址' : '有图但地址为空')}）` : ''));
+        }
       } else {
         const found = aiSessionOf(m, aiKey);
         if (!found.sess) {
@@ -1748,18 +1796,28 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
             log.info('ai', `跳过：这条会话没在「启用 AI 的会话」里 ${detail}（同类提示每分钟最多一条）`);
           }
         } else {
-          const trig = aiShouldTrigger(aiText);
+          // 关键词模式下「纯图片」不触发：没有文字就没有可匹配的东西，
+          // 一律放行等于把「关键词触发」变成「所有图片都回」，那不是用户要的。
+          // 图配文时按文字判定，图跟着一起发过去。
+          const trig = aiText
+            ? aiShouldTrigger(aiText)
+            : (cfg.ai.trigger === 'keyword'
+              ? { hit: false, keyword: null, how: '' }
+              : { hit: true, keyword: null, how: 'image' });
           if (!trig.hit) {
             if (log.isEnabled('debug')) {
               log.debug('ai', `跳过：关键词未命中 mode=${cfg.ai.keywordsMode || 'auto'} `
                 + `keywords=${JSON.stringify((cfg.ai.keywords || []).slice(0, 10))} `
-                + `text=${JSON.stringify(aiText.slice(0, 40))}`);
+                + `text=${JSON.stringify(aiText.slice(0, 40))}`
+                + (wantImg ? '（纯图片消息，关键词模式下不触发）' : ''));
             }
           } else {
             log.info('ai', `触发 → ${found.sess.type === 'group' ? '群' : '单聊'} `
               + `${aiTrigger.sessionKeyOf(found.sess)} `
-              + `(${trig.how}${trig.keyword ? ':' + trig.keyword : ''}) 文本=${JSON.stringify(aiText.slice(0, 30))}`);
-            queueAiReply(found.sess, aiText);
+              + `(${trig.how}${trig.keyword ? ':' + trig.keyword : ''}) `
+              + (wantImg ? `图片=yes ` : '')
+              + `文本=${JSON.stringify(aiText.slice(0, 30))}`);
+            queueAiReply(found.sess, aiText, wantImg ? imgUrl : '');
           }
         }
       }
@@ -3255,6 +3313,20 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         device.save(cfg);
         return ok(res, { systemPrompt: a.systemPrompt });
       }
+      // 识图设置：开关 + 单图上限 + 看图提示词。
+      // 托管模式下这些都属于「怎么用」，不是「连哪」，所以照常允许改
+      if (parts[2] === 'vision' && req.method === 'POST') {
+        const b = await readBody(req);
+        if (b.vision != null) a.vision = b.vision !== false && b.vision !== 'false';
+        if (b.visionMaxBytes != null && b.visionMaxBytes !== '') {
+          const n = Number(b.visionMaxBytes);
+          if (Number.isFinite(n)) a.visionMaxBytes = Math.min(5 * 1024 * 1024, Math.max(256 * 1024, n));
+        }
+        if (b.visionPrompt != null) a.visionPrompt = String(b.visionPrompt);
+        device.save(cfg);
+        log.info('ai', `识图设置已更新 vision=${a.vision !== false} maxBytes=${a.visionMaxBytes}`);
+        return ok(res, { vision: a.vision !== false, visionMaxBytes: a.visionMaxBytes, visionPrompt: a.visionPrompt });
+      }
       if (parts[2] === 'start' && req.method === 'POST') {
         // 优化/修复：anjianhe —— 启动失败要说清楚是缺地址、缺模型还是缺会话；
         // 启动成功则落盘 autoStart，进程重启后自动恢复
@@ -3334,6 +3406,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           keywordsMode: a.keywordsMode || 'auto',
           timeoutMs: a.timeoutMs,
           systemPrompt: a.systemPrompt || '',
+          // 识图：托管模式下模型由平台定，能不能看图取决于上游模型，
+          // 所以这里只回「用户有没有开」，不保证一定可用（自检会暴露真实能力）
+          vision: a.vision !== false,
+          visionMaxBytes: a.visionMaxBytes,
+          visionPrompt: a.visionPrompt || '',
         },
         sessions: a.sessions,
         // autoStart=true 表示「上次是开着的」，进程重启会自动恢复

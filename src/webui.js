@@ -4314,6 +4314,15 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         ensure(await api.setParentAuditSwitch(id, b.v ? 1 : 0));
         return ok(res, { result: true });
       }
+      // 单个设置项开关（隐私/健康监测这类）。switchId 是服务端的常量表，
+      // 只能改 status，不认识的 id 服务端会自己拒掉。
+      if (req.method === 'POST' && parts[4] === 'privacy') {
+        const b = await readBody(req);
+        const sid = Number(b.switchId);
+        if (!sid) throw new Error('缺少 switchId');
+        ensure(await api.updatePrivacyItem(sid, b.status ? 1 : 0));
+        return ok(res, { result: true, switchId: sid, status: b.status ? 1 : 0 });
+      }
       throw new Error('不支持的方法');
     }
 

@@ -51,6 +51,12 @@ function timestamp() {
   const d = new Date();
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
+// 今天 0 点（毫秒）。「今日使用时长」的 createDate 要的是这一天的起点
+function todayStart(ts) {
+  const d = ts ? new Date(ts) : new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
 
 class ApiClient {
   constructor(cfg) {
@@ -746,10 +752,13 @@ class ApiClient {
       Object.assign({ watchId }, data), { host: STORE_HOST });
   }
 
-  // 今日已用时长(returnType 固定 2, 不传日期)
-  getTodayUse(watchId, model) {
+  // 今日已用时长(returnType 固定 2)
+  // createDate 是「查哪一天」，原版 TodayUseParam 里有这个字段(Long, 当天 0 点)。
+  // 不传时服务端默认成今天，跨天/补查历史就对不上了，所以显式给上。
+  getTodayUse(watchId, model, date) {
     return this.request('POST', `/appstore/appDuration/getDurationAlready?uuid=${requestUuid()}`,
-      { watchId, model: model || '', returnType: 2 }, { host: STORE_HOST });
+      { watchId, model: model || '', returnType: 2, createDate: Number(date) || todayStart() },
+      { host: STORE_HOST });
   }
 
   // 单应用时长设置(未验证, 暂未接入 UI)
@@ -781,11 +790,36 @@ class ApiClient {
     return this.request('POST', `/watchswitch/getSubSwitch?uuid=${requestUuid()}`, { watchId });
   }
 
-  // 手表设置项读取: 服务端返回每项的 name/description, 可直接用于展示
-  // 写入接口(/settingSwitch/update) 线上返回 000007, 暂只读
+  // 手表设置项（隐私 / 健康监测这一类的开关）
+  //
+  // 原版 com.xtc.settings.net.appsettingswitch.AppSettingSwitchHttpService：
+  //   读 POST /watchswitch-service/settingSwitch/getAppSetting          { mobileId, switchIdList }
+  //   写 POST /watchswitch-service/settingSwitch/updateAppSettingSwitch { mobileId, switchId, status }
+  //
+  // ⚠️ 这组接口的参数是 **mobileId（家长账号 ID）**，不是 watchId。
+  // 而且服务端是「路径 + 参数名」配套校验的，实测：
+  //   getAppSetting + mobileId → 000001（原版这套）
+  //   getAppSetting + watchId  → 000007
+  //   appGetSetting + watchId  → 000001（另一套）
+  //   appGetSetting + mobileId → 000007
+  // 所以读写要成套用，别混搭。
+  //
+  // 之前这里写死 appGetSetting + watchId，又断言「写入接口 /settingSwitch/update
+  // 返回参数错误，仅展示」—— 那个路径本来就不对，原版写入是 updateAppSettingSwitch，
+  // 于是设置页的开关一直只能看不能改。000007 在这套网关里是「路径/网关不对」的意思，
+  // 不是「接口不可用」，遇到别急着判定废弃。
   getPrivacyItems(watchId, switchIds) {
-    return this.request('POST', `/watchswitch-service/settingSwitch/appGetSetting?uuid=${requestUuid()}`,
-      { watchId, switchIdList: switchIds || [] }, { host: CONTACT_HOST });
+    if (!this.cfg.mobileId) throw new Error('缺少 mobileId（家长账号 ID），无法读取手表设置项');
+    return this.request('POST', `/watchswitch-service/settingSwitch/getAppSetting?uuid=${requestUuid()}`,
+      { mobileId: this.cfg.mobileId, switchIdList: switchIds || [] }, { host: CONTACT_HOST });
+  }
+
+  // 单个设置项开关。status: 1=开 0=关（AppSettingSwitchConstant.SwitchValue）
+  updatePrivacyItem(switchId, status) {
+    if (!this.cfg.mobileId) throw new Error('缺少 mobileId（家长账号 ID），无法修改手表设置项');
+    return this.request('POST', `/watchswitch-service/settingSwitch/updateAppSettingSwitch?uuid=${requestUuid()}`,
+      { mobileId: this.cfg.mobileId, switchId: Number(switchId), status: Number(status) ? 1 : 0 },
+      { host: CONTACT_HOST });
   }
 
   // ============ 手表设置补全: 流量/语言/时区/话费提醒 ============
@@ -883,10 +917,13 @@ class ApiClient {
     const src = list[0];
     // 只回传 NewClassMode 声明的字段，避免服务端拒绝多余字段
     const mode = {};
-    ['classId', 'classWeek', 'createTime', 'holidaySwitch', 'id', 'timePeriod', 'title', 'type', 'watchId']
+    ['classId', 'classWeek', 'createTime', 'holidaySwitch', 'id', 'timePeriod', 'title', 'type', 'tempSwitch', 'watchId']
       .forEach((k) => { if (src[k] !== undefined && src[k] !== null) mode[k] = src[k]; });
     mode.classSwitch = disabled ? 1 : 0;
-    mode.tempSwitch = 0;
+    // tempSwitch 是「临时禁用」，和总开关是两个独立参数：
+    // 原版 ClassModeNewPresenter.o(mode, classSwitch, tempSwitch) 分别写入两者。
+    // 以前这里无条件写 0，用户开着临时禁用、经我们动一下总开关就被抹掉了。
+    mode.tempSwitch = Number(src.tempSwitch) || 0;
     return this.request('PUT', '/smartwatch/classmode/v2/update', mode);
   }
 

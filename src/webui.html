@@ -5967,9 +5967,9 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
           priv.forEach(function(x){
             h += '<div class="row"><span>' + esc(x.name || ('开关 ' + x.switchId)) +
               (x.description ? '<br><span class="muted">' + esc(x.description) + '</span>' : '') +
-              '</span><span class="value">' + (Number(x.status) === 1 ? '开启' : '关闭') + '</span></div>';
+              '</span><label class="switch"><input type="checkbox" data-priv="' + esc(x.switchId) + '"' +
+              (Number(x.status) === 1 ? ' checked' : '') + '><span></span></label></div>';
           });
-          h += '<div class="muted" style="margin-top:8px">隐私项写入接口线上返回参数错误，当前仅展示</div>';
         }
         cc.innerHTML = h;
         var sw2 = $('#parentAudit');
@@ -5982,6 +5982,25 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
             toast(sw2.checked ? '已开启加好友家长审核' : '已关闭加好友家长审核');
           } catch(e){ toast(e.message, true); sw2.checked = !sw2.checked; }
         };
+        // 设置项开关：写失败就把勾选状态弹回去，别让界面显示成功
+        cc.querySelectorAll('input[data-priv]').forEach(function(box){
+          box.onchange = async function(){
+            var sid = Number(box.getAttribute('data-priv'));
+            var want = box.checked ? 1 : 0;
+            box.disabled = true;
+            try {
+              await api('/api/watch/' + encodeURIComponent(state.id) + '/chatcontrol/privacy', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({ switchId: sid, status: want })
+              });
+              toast(want ? '已开启' : '已关闭');
+            } catch(e){
+              toast(e.message, true);
+              box.checked = !box.checked;
+            }
+            box.disabled = false;
+          };
+        });
       }).catch(function(e){ cc.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; });
     }
   }

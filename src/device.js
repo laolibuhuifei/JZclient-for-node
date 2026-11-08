@@ -119,10 +119,13 @@ function normalizeAi(raw) {
     ? r.sessions.filter((s) => s && typeof s === 'object' && (s.type === 'group' || s.type === 'single'))
       .map((s) => {
         const out = { key: String(s.key || ''), type: s.type, name: String(s.name || '') };
+        // 注意：dialogId / receiverId 保持原类型，不要转字符串。
+        // im.js 的 tlv() 对 number 用大端整数编码、对 string 用 UTF-8，
+        // 一旦转成字符串，发消息时服务端认不出接收方，直接「发送失败」。
         if (s.type === 'group') {
-          if (s.dialogId != null && s.dialogId !== '') out.dialogId = String(s.dialogId);
+          if (s.dialogId != null && s.dialogId !== '') out.dialogId = s.dialogId;
         } else if (s.receiverId != null && s.receiverId !== '') {
-          out.receiverId = String(s.receiverId);
+          out.receiverId = s.receiverId;
         }
         return out;
       })

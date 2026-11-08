@@ -1534,8 +1534,14 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     const prev = aiChains.get(chainKey) || Promise.resolve();
     const p = prev.then(async () => {
       try {
-        const to = sess.type === 'group' ? String(sess.dialogId || '') : String(receiverOfSession(sess));
-        if (!to) throw new Error('会话没有可用的接收方 id（配置里缺 receiverId / dialogId）');
+        // 发送目标必须是**整数**：im.js 的 tlv() 对 number 走大端整数编码，对 string 走 UTF-8。
+        // 这里如果传字符串，服务端认不出接收方，AI 会「生成了回复但一直发送失败」。
+        // （这是我们自己踩过的坑，修复：anjianhe）
+        const rawId = sess.type === 'group' ? sess.dialogId : receiverOfSession(sess);
+        if (rawId == null || rawId === '') {
+          throw new Error('会话没有可用的接收方 id（配置里缺 receiverId / dialogId）');
+        }
+        const to = aiTrigger.toImId(rawId);
         const h = aiHistory.get(chainKey) || [];
         const msgs = [{ role: 'system', content: a.systemPrompt || '' }]
           .concat(h)
@@ -1547,7 +1553,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
         const c = await ensureIM();
         const r = sess.type === 'group'
-          ? await c.sendGroupText(sess.dialogId, c.imAccountId, reply)
+          ? await c.sendGroupText(to, c.imAccountId, reply)
           : await c.sendText(to, reply);
         log.info('ai', `回复已发送 ${chainKey} ${r && r.ok ? 'OK' : '失败'} 长度=${String(reply).length}`);
         const key = chatKeyOfSession(sess);
@@ -1688,17 +1694,24 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       try { log.debug('im', 'emoji ' + JSON.stringify(parsed.inner || parsed.body).slice(0, 300)); } catch (e) { /* ignore */ }
     }
 
-    // 会话 key 提前算: B 站点播命令要按会话判断归属, 命中后也不能再让 AI 抢答一遍
-    const key = text ? resolveChatKey(m) : null;
+    // 统一取「可读正文」：聊天面板能显示出来的文字，命令解析和 AI 都必须拿得到。
+    // 旧代码这里只认 parsed.kind === 'text' && parsed.text，而部分固件把正文放在
+    // 信封内层（msgNewContent），describe() 能找到、parsed.text 却是空串 —— 于是
+    // 「B 站点播没反应」和「AI 不触发」会一起出现。现在两处吃同一份正文。
+    // 修复：anjianhe
+    const bodyText = aiTrigger.aiTextOf(parsed, text);
+
+    // 会话 key 提前算: B 站点播命令要按会话判断归属, 命中后也不能再让 AI 抢答一遍。
+    // 用 text || bodyText 判空：describe 给不出的正文，bodyText 可能给得出。
+    const key = (text || bodyText) ? resolveChatKey(m) : null;
     // 没开点播就完全不解析命令 —— 这个功能没配置时必须彻底静默
     const biliOn = biliAnyEnabled();
-    let biliCmd = (biliOn && key && parsed.kind === 'text' && parsed.text)
-      ? biliBot.parseCommand(parsed.text) : null;
+    let biliCmd = (biliOn && key && bodyText) ? biliBot.parseCommand(bodyText) : null;
     let biliWid = biliCmd ? biliWatchOf(key) : '';
     // 单聊里搜完直接回一个数字也算「播放第 N 条」: 列表就摆在上面, 让人再敲一遍
     // /播放 太别扭。只在单聊生效(群里说个数字太容易误触), 10 分钟内有效。
-    if (biliOn && !biliCmd && key && /^s:/.test(key) && parsed.kind === 'text') {
-      const bare = String(parsed.text || '').trim();
+    if (biliOn && !biliCmd && key && /^s:/.test(key) && bodyText) {
+      const bare = String(bodyText).trim();
       if (/^\d{1,2}$/.test(bare)) {
         const wid = biliWatchOf(key);
         const hit = wid ? biliSearchCache.get(wid + '|' + key) : null;
@@ -1718,7 +1731,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     //   - 关键词没命中 → info，打出归一化后的关键词和文本前缀
     //   - 命中 → info，打出单聊/群、命中方式（exact/prefix/contains）
     if (aiRunning && !biliCmd) {
-      const aiText = aiTrigger.aiTextOf(parsed, text);
+      const aiText = bodyText;
       const aiKey = key || resolveChatKey(m);
       if (!aiText) {
         if (log.isEnabled('debug')) log.debug('ai', `跳过：这条消息没有可回复的正文 kind=${parsed.kind}`);

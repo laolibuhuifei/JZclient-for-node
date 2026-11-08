@@ -229,6 +229,18 @@ function matchSession(sessions, ctx) {
   return single || null;
 }
 
+// IM 协议里的 accountId / dialogId 是**整数**：im.js 的 tlv() 对 number 走 numBytes
+// （大端整数），对 string 走 UTF-8。如果发送前把 id 变成了字符串，服务端就认不出接收方，
+// 表现是「AI 生成了回复但一直发送失败」。所以发消息前必须还原成 number。
+// 超出 JS 安全整数（2^53-1）的 id 保留字符串，宁可让上层报错也不悄悄改号。
+function toImId(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  const s = String(v == null ? '' : v).trim();
+  if (!/^\d+$/.test(s)) return s;
+  const n = Number(s);
+  return Number.isSafeInteger(n) ? n : s;
+}
+
 module.exports = {
   normText,
   splitKeywords,
@@ -236,5 +248,6 @@ module.exports = {
   aiTextOf,
   sessionKeyOf,
   matchSession,
+  toImId,
   AI_TEXT_KINDS,
 };

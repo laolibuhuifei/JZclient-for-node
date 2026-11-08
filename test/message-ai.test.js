@@ -11,6 +11,7 @@ const assert = require('node:assert');
 
 const { parseMessage, describe } = require('../src/message');
 const trig = require('../src/ai-trigger');
+const biliBot = require('../src/bili-bot');
 
 // 把一条原始消息跑完整条链路，返回 { kind, shown, text, hit }
 function flow(envelope, msgType, keyword) {
@@ -78,4 +79,41 @@ test('状态回执(type>=1000)不应该进 AI 判定', () => {
   assert.strictEqual(r.parsed.kind, 'status');
   assert.strictEqual(r.text, '');
   assert.strictEqual(r.hit, false);
+});
+
+// ============ B 站点播命令：和 AI 共用同一份正文 ============
+test('B 站点播命令：普通文本信封能识别 /搜索', () => {
+  const r = flow({ content: '/搜索 小猪佩奇', text: '/搜索 小猪佩奇' }, 1, '搜索');
+  const cmd = biliBot.parseCommand(r.text);
+  assert.ok(cmd);
+  assert.strictEqual(cmd.kind, 'search');
+  assert.strictEqual(cmd.arg, '小猪佩奇');
+});
+
+test('B 站点播命令：正文在信封内层（msgNewType=20）时也能识别', () => {
+  // 旧代码只看 parsed.text，这里会是空串 → 命令解析不出来 → 点播没反应
+  const r = flow({
+    content: '', text: '', msgNewType: 20,
+    msgNewContent: JSON.stringify({ content: '/搜索 小猪佩奇' }),
+  }, 1, '搜索');
+  assert.strictEqual(r.text, '/搜索 小猪佩奇');
+  const cmd = biliBot.parseCommand(r.text);
+  assert.ok(cmd, '内层正文应该也能被命令解析器识别');
+  assert.strictEqual(cmd.kind, 'search');
+});
+
+test('B 站点播命令：裸词带参数也能识别（不带斜杠）', () => {
+  const r = flow({
+    content: '', text: '', msgNewType: 1,
+    msgNewContent: JSON.stringify({ content: '搜索 小猪佩奇' }),
+  }, 1, '搜索');
+  const cmd = biliBot.parseCommand(r.text);
+  assert.ok(cmd);
+  assert.strictEqual(cmd.kind, 'search');
+  assert.strictEqual(cmd.arg, '小猪佩奇');
+});
+
+test('B 站点播命令：普通聊天不会被误判成命令', () => {
+  const r = flow({ content: '搜索结果好少啊', text: '搜索结果好少啊' }, 1, '搜索');
+  assert.strictEqual(biliBot.parseCommand(r.text), null);
 });

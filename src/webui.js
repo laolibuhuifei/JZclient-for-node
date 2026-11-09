@@ -255,6 +255,56 @@ async function loadLinkImage(src, limit) {
   return loaded;
 }
 
+// ===== 会话 ID 的归一化与匹配（纯函数，不碰网络，可以直接单测） =====
+//
+// 家庭群的 IM 会话 ID 服务端有两个字段：imDialogId（旧）和 upgradeImDialogId（新）。
+// 迁移期间线上三种状态都有：
+//   · 两个值相同              → 取哪个都行
+//   · 旧值为空、只剩 upgrade  → 只认旧值的话家庭群根本登记不进来
+//   · 旧值还在但已经过期      → 只认旧值的话群消息全部匹配失败
+//
+// 2026-11-09 那批用户「收不到手表消息」就是第三种：旧 ID 1128491383，
+// 手表发来的消息带新 ID 1128491384，差 1，严格相等直接匹配不上，消息被丢弃。
+//
+// 所以：所有候选都收进数组，发送用第一个（优先 upgrade），匹配时任一命中就算。
+
+function chatIdsOf(fd, family) {
+  const raw = [
+    fd && fd.upgradeImDialogId,
+    fd && fd.imDialogId,
+    family && family.upgradeImDialogId,
+    family && family.imDialogId,
+  ];
+  const out = [];
+  for (const v of raw) {
+    if (v === undefined || v === null) continue;
+    const s = String(v).trim();
+    if (!s || s === '0' || s === 'null' || s === 'undefined') continue;
+    if (out.indexOf(s) < 0) out.push(s);
+  }
+  return out;
+}
+
+// 把一条 IM 消息映射到会话 key（'s:xxx' / 'g:xxx'），认不出来返回 null
+function matchChatKey(targets, m) {
+  if (!targets || !targets.length || !m) return null;
+  const did = String(m.dialogId == null ? '' : m.dialogId);
+
+  if (did && did !== '0') {
+    const g = targets.find((t) => t.type === 'group'
+      && (t.aliasIds && t.aliasIds.length ? t.aliasIds : [String(t.dialogId)])
+        .some((x) => String(x) === did));
+    if (g) return g.key;
+  }
+
+  // 单聊：按对方 imAccountId 匹配。
+  // 群消息的 tag11 不是发送者账号（线上见过 255 这种值），所以这段只对单聊有意义。
+  const s = targets.find((t) => t.type === 'single'
+    && (String(t.receiverId) === String(m.imAccountId) || String(t.receiverId) === did));
+  if (s) return s.key;
+  return null;
+}
+
 async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSecret } = {}) {
   // 日志默认 info(请求/响应都打印); WP_LOG=debug 追加请求体等细节, WP_LOG=warn 只看告警
   const prevLevel = log.levelName();
@@ -1499,13 +1549,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   }
 
   function resolveChatKey(m) {
-    if (!chatTargets) return null;
-    const g = chatTargets.find((t) => t.type === 'group' && String(t.dialogId) === String(m.dialogId));
-    if (g) return g.key;
-    const s = chatTargets.find((t) => t.type === 'single'
-      && (String(t.receiverId) === String(m.imAccountId) || String(t.receiverId) === String(m.dialogId)));
-    if (s) return s.key;
-    return null;
+    return matchChatKey(chatTargets, m);
   }
 
   function agreeTypeFromSource(src) {
@@ -1885,13 +1929,28 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (!text) return;
     if (!key) {
       // 会话列表没就绪(或这条消息来自没登记过的会话)时消息会被丢掉。
-      // 静默丢弃最难排查, 这里限流告警一句
+      // 静默丢弃最难排查, 这里限流告警一句。
+      // 2026-11-09 补：把「我们手里到底有哪些会话 ID」一起打出来 ——
+      // 上次就是群 ID 差 1，日志里只有消息的 dialogId，看不出是 ID 对不上。
       const now = Date.now();
       if (now - lastDropWarn.at > 60000) {
         lastDropWarn.at = now;
         lastDropWarn.n++;
+        const groups = (chatTargets || [])
+          .filter((t) => t.type === 'group')
+          .map((t) => (t.aliasIds && t.aliasIds.length ? t.aliasIds : [t.dialogId]));
+        const singles = (chatTargets || [])
+          .filter((t) => t.type === 'single')
+          .map((t) => t.receiverId);
         log.warn('im', `收到手表消息但找不到对应会话(已丢弃 ${lastDropWarn.n} 条): `
-          + JSON.stringify({ dialogId: m.dialogId, imAccountId: m.imAccountId, msgType: m.msgType, targets: (chatTargets || []).length }));
+          + JSON.stringify({
+            dialogId: m.dialogId,
+            imAccountId: m.imAccountId,
+            msgType: m.msgType,
+            targets: (chatTargets || []).length,
+            knownGroups: groups,
+            knownSingles: singles,
+          }));
       }
       return;
     }
@@ -2039,6 +2098,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (imTimer.unref) imTimer.unref();
   }
 
+  // 家庭群的 IM 会话 ID 有两个字段：imDialogId（旧）和 upgradeImDialogId（新）。
+  // 迁移期间三种状态都有，所以全收成别名数组 —— 细节和线上踩坑记录见 chatIdsOf() 的注释。
   async function loadChatTargets() {
     if (chatTargets) return chatTargets;
     const data = ensure(await api.getDialogAccounts());
@@ -2057,14 +2118,15 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           peers: accounts,
         });
       }
-      const dialogId = fd.imDialogId || family.imDialogId;
-      if (dialogId) {
+      const ids = chatIdsOf(fd, family);
+      if (ids.length) {
         targets.push({
-          key: 'g:' + dialogId,
+          key: 'g:' + ids[0],        // 展示用主 ID（优先 upgrade）
           type: 'group',
           name: '家庭群',
           sub: accounts.map((a) => a.name).filter(Boolean).join('、'),
-          dialogId,
+          dialogId: ids[0],          // 发送用，和匹配保持一致
+          aliasIds: ids,             // 匹配用：新旧 ID 全认
           peers: accounts,
         });
       }
@@ -4781,4 +4843,4 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   };
 }
 
-module.exports = { startWebUI };
+module.exports = { startWebUI, chatIdsOf, matchChatKey };

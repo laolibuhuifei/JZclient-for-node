@@ -104,8 +104,10 @@ function buildCookie(sessdata) {
   return (async () => {
     let cookie = '';
     try { cookie = await bili.getCookie(); } catch (e) { /* 没 buvid 也能试 */ }
+    // getCookie 已经带上扫码登录的 SESSDATA 了，这里只在没登录时补手填的那份，
+    // 否则会拼出两个同名 SESSDATA，B 站会按第一个（空的）算。
     const sd = String(sessdata || '').trim();
-    if (sd) cookie = (cookie ? cookie + '; ' : '') + 'SESSDATA=' + sd;
+    if (sd && cookie.indexOf('SESSDATA=') < 0) cookie = (cookie ? cookie + '; ' : '') + 'SESSDATA=' + sd;
     return cookie;
   })();
 }

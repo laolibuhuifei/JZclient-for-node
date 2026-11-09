@@ -23,6 +23,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const log = require('./logger');
+const biliLogin = require('./bili-login');
 
 const API = 'https://api.bilibili.com';
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
@@ -89,7 +90,16 @@ async function getCookie(force) {
   } catch (e) {
     log.debug('bili', '取 buvid 失败: ' + e.message);
   }
-  return cookieCache.cookie || '';
+  return mergeAccountCookie(cookieCache.cookie || '');
+}
+
+// 登录后的 Cookie（SESSDATA 等）拼在 buvid 后面。没登录就原样返回。
+function mergeAccountCookie(cookie) {
+  let acc = '';
+  try { acc = biliLogin.accountCookie(); } catch (e) { acc = ''; }
+  if (!acc) return cookie || '';
+  if (!cookie) return acc;
+  return cookie + '; ' + acc;
 }
 
 // ---------- wbi 签名 ----------
@@ -254,8 +264,12 @@ async function getPages(bvid) {
 // qn=32 是 480P，未登录通常能拿到；拿不到会自动降级
 async function getPlayUrl(bvid, cid) {
   const cookie = await getCookie();
+  // 登录后能拿到更高清晰度（720P）。未登录仍然按 480P 要，免得直接失败。
+  let logged = false;
+  try { logged = biliLogin.isLoggedIn(); } catch (e) { logged = false; }
+  const qn = logged ? 64 : 32;
   const qs = 'bvid=' + encodeURIComponent(bvid) + '&cid=' + encodeURIComponent(cid)
-    + '&qn=32&fnval=1&fnver=0&fourk=0&platform=html5&high_quality=1';
+    + '&qn=' + qn + '&fnval=1&fnver=0&fourk=0&platform=html5&high_quality=1';
   const r = await httpJson(API + '/x/player/playurl?' + qs, { headers: { Cookie: cookie } });
   if (!r || r.code !== 0) {
     throw new Error('取播放地址失败：' + (r ? (r.message || ('code=' + r.code)) : '无响应'));

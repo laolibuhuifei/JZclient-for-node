@@ -109,6 +109,13 @@ main{max-width:1120px;margin:0 auto;padding:0 20px 48px}
 .btn.text{background:transparent;color:var(--primary);padding:0 12px}
 .btn.danger{background:var(--error);color:#fff}
 .btn.small{min-height:32px;padding:0 12px;font-size:12px}
+/* 小红书页：白底卡片上按钮统一黑色，保证对比度 */
+.xhs-page .btn{background:#111111;color:#ffffff;border:1px solid #111111}
+.xhs-page .btn:hover{background:#333333;border-color:#333333}
+.xhs-page .btn.tonal{background:#ffffff;color:#111111;border:1px solid #111111}
+.xhs-page .btn.tonal:hover{background:#f2f2f2}
+.xhs-page .btn:disabled{opacity:.45;cursor:not-allowed}
+.xhs-page .btn.text{background:transparent;color:#111111;border:0}
 .icon-btn{
   min-height:40px;padding:0 14px;border-radius:999px;font-size:13px;
   border:1px solid var(--outline-variant);color:var(--on-surface-variant)
@@ -545,11 +552,13 @@ main{max-width:var(--app-max);margin:0 auto;padding:0 14px 100px}
 
 /* ===== 封底: powered by + Node.js 吉祥物 ===== */
 .app-footer{
-  display:flex;align-items:center;justify-content:center;gap:9px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;
   margin-top:40px;padding:20px 0 6px;
   border-top:1px solid var(--outline-variant);
   font-size:12px;line-height:1;color:var(--on-surface-variant);letter-spacing:.2px;
 }
+.app-footer .footer-line{display:flex;align-items:center;justify-content:center;gap:9px}
+.app-footer .footer-update{color:var(--on-surface-variant);opacity:.85}
 .app-footer .mascot{
   height:22px;width:auto;display:block;flex:none;
   /* 极简主题下略微降饱和, 悬停恢复原色 */
@@ -1245,8 +1254,11 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     <section class="watch-strip" id="watchStrip"></section>
     <section class="content" id="content"><div class="loading">加载中…</div></section>
     <footer class="app-footer">
-      <img class="mascot" src="/assets/node-mascot.svg" alt="Node.js" width="20" height="23">
-      <span>powered by <a href="https://github.com/laolibuhuifei" target="_blank" rel="noopener noreferrer"><b>laolibuhuifei</b></a></span>
+      <div class="footer-line">
+        <img class="mascot" src="/assets/node-mascot.svg" alt="Node.js" width="20" height="23">
+        <span>powered by <a href="https://github.com/laolibuhuifei" target="_blank" rel="noopener noreferrer"><b>laolibuhuifei</b></a></span>
+      </div>
+      <div class="footer-line footer-update">更新 by 小忆</div>
     </footer>
   </main>
 </div>
@@ -1256,12 +1268,13 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
   <div class="auth-card">
     <img src="/assets/icon.png" alt="">
     <h2>JZClientForNode</h2>
-    <p class="auth-tip">请输入访问令牌。令牌在启动 <code>npm start</code> 的终端里显示，也可以用带 <code>?token=</code> 的链接直接进入。</p>
+    <p class="auth-tip" id="authTip">请输入访问密码。第一次使用请用带 <code>?token=</code> 的链接打开，登录后会提示设置密码。</p>
     <form id="authForm">
-      <input type="password" id="authToken" placeholder="访问令牌" autocomplete="off" spellcheck="false">
+      <input type="password" id="authToken" placeholder="访问密码" autocomplete="current-password" spellcheck="false">
       <button type="submit" id="authBtn">进入</button>
     </form>
     <p class="auth-err" id="authErr"></p>
+    <p class="auth-tip" style="margin-top:10px"><a href="#" id="authModeToggle" style="font-size:12px">用访问令牌登录</a></p>
   </div>
 </div>
 <div class="modal hidden" id="modal"><div class="modal-card" id="modalCard"></div></div>
@@ -1272,6 +1285,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     { tab:'chat', label:'聊天', icon:'chat' },
     { tab:'location', label:'定位', icon:'pin' },
     { tab:'more', label:'功能', icon:'grid' },
+    { tab:'xhs', label:'小红书', icon:'book' },
     { tab:'me', label:'我的', icon:'user' }
   ];
   var FEATURES = [
@@ -1288,19 +1302,20 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     overview:'概览', friends:'好友', profile:'宝贝资料', contacts:'通讯录',
     guard:'安全区域', settings:'设置', health:'健康', apps:'应用', wifi:'WiFi',
     alarms:'闹钟', ai:'AI 助手', hidden:'隐藏功能', bind:'绑定手表', account:'账号',
-    announcements:'公告', logs:'实时日志', plugins:'插件'
+    announcements:'公告', logs:'实时日志', plugins:'插件', xhs:'小红书'
   };
   var PAGE_SUBS = {
     home:'运行状态与账号概览', chat:'与手表和家庭群的会话', location:'实时位置与历史轨迹',
     more:'设备、通讯、安全与系统管理', me:'账号与设备信息', announcements:'历史公告与更新说明',
-    logs:'服务运行日志，实时推送'
+    logs:'服务运行日志，实时推送', xhs:'扫码登录、发视频、私信与群聊（走独立桥接服务）'
   };
   var NAV_ICONS = {
     home:'<svg viewBox="0 0 24 24"><path d="M4 11.5 12 4l8 7.5"/><path d="M6.5 10v9.5h11V10"/></svg>',
     chat:'<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H7l-4 3v-6.5A8 8 0 0 1 11 4h2a8 8 0 0 1 8 8Z"/></svg>',
     pin:'<svg viewBox="0 0 24 24"><path d="M12 21s7-5.4 7-11a7 7 0 1 0-14 0c0 5.6 7 11 7 11Z"/><circle cx="12" cy="10" r="2.5"/></svg>',
     grid:'<svg viewBox="0 0 24 24"><rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/></svg>',
-    user:'<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/></svg>'
+    user:'<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/></svg>',
+    book:'<svg viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19v15H6.5A2.5 2.5 0 0 0 4 20.5v-15Z"/><path d="M4 20.5A2.5 2.5 0 0 1 6.5 18H19v3H6.5"/></svg>'
   };
   // 插件可以在 plugin.json 里挑一个图标名，没挑或者挑错了都用插头
   var PLUGIN_ICONS = {
@@ -1610,23 +1625,74 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
   }
   function hideGate(){ var g = $('#authGate'); if (g) g.classList.add('hidden'); }
 
+  // 登录方式：password（默认，设过密码后）/ token（首次或重置）
+  var gateMode = 'token';
+  function setGateMode(m){
+    gateMode = (m === 'password') ? 'password' : 'token';
+    var i = $('#authToken'), t = $('#authTip'), tg = $('#authModeToggle');
+    if (i) i.placeholder = gateMode === 'password' ? '访问密码' : '访问令牌';
+    if (t) t.innerHTML = gateMode === 'password'
+      ? '请输入访问密码。'
+      : '请输入访问令牌。令牌在启动日志里，也可以用带 <code>?token=</code> 的链接直接进入。';
+    if (tg) tg.textContent = gateMode === 'password' ? '用访问令牌登录' : '用访问密码登录';
+  }
+  async function refreshGateMode(){
+    try {
+      var r = await fetch('/api/auth/status');
+      var j = await r.json();
+      if (j && j.data) setGateMode(j.data.hasPassword ? 'password' : 'token');
+    } catch(e){ /* ignore */ }
+  }
+  var gateToggle = $('#authModeToggle');
+  if (gateToggle) gateToggle.onclick = function(ev){
+    ev.preventDefault();
+    setGateMode(gateMode === 'password' ? 'token' : 'password');
+    $('#authErr').textContent = '';
+  };
+  refreshGateMode();
+
+  function promptSetupPassword(){
+    openForm('设置访问密码', [
+      { name:'password', label:'新密码（6–64 位）', type:'password', required:true },
+      { name:'confirm', label:'再输入一次', type:'password', required:true },
+    ], '保存密码', async function(v){
+      var pw = String(v.password || '');
+      if (pw.length < 6) throw new Error('密码至少 6 位');
+      if (pw !== String(v.confirm || '')) throw new Error('两次输入不一致');
+      await api('/api/auth/setup', {
+        method:'POST', headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ password: pw }),
+      });
+      toast('访问密码已设置，下次可以直接用密码登录');
+    });
+  }
+  async function maybePromptPassword(){
+    try {
+      var r = await fetch('/api/auth/status');
+      var j = await r.json();
+      if (j && j.data && j.data.authed && !j.data.hasPassword) promptSetupPassword();
+    } catch(e){ /* ignore */ }
+  }
+
   async function submitToken(ev){
     if (ev) ev.preventDefault();
     var v = ($('#authToken').value || '').trim();
-    if (!v) { $('#authErr').textContent = '请输入访问令牌'; return; }
+    if (!v) { $('#authErr').textContent = gateMode === 'password' ? '请输入访问密码' : '请输入访问令牌'; return; }
     var btn = $('#authBtn');
     btn.disabled = true;
     $('#authErr').textContent = '';
     try {
+      var body = gateMode === 'password' ? { password: v } : { token: v };
       var r = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: v })
+        body: JSON.stringify(body)
       });
       var j = await r.json();
-      if (!j.ok) throw new Error(j.error || '令牌不正确');
+      if (!j.ok) throw new Error(j.error || '登录失败');
       hideGate();
       await boot();
+      if (!j.data || !j.data.hasPassword) promptSetupPassword();
     } catch(e){
       $('#authErr').textContent = e.message;
     } finally {
@@ -1999,6 +2065,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     var seq = ++loadSeq;
     if (state.chatPoll) { clearInterval(state.chatPoll); state.chatPoll = null; }
     if (state.homePoll) { clearInterval(state.homePoll); state.homePoll = null; }
+    if (state.xhsPoll) { clearInterval(state.xhsPoll); state.xhsPoll = null; }
     // 离开日志页必须断开 SSE, 否则会一直挂着一条长连接在后台推数据
     stopLogStream();
     var navBox = $('#nav');
@@ -2008,7 +2075,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     destroyMap();
     setLoading();
     // 插件页和插件管理页不依赖具体某块手表，没绑表也要能进
-    var noWatchTabs = ['home', 'announcements', 'account', 'bind', 'ai', 'chat', 'more', 'me', 'logs', 'plugins'];
+    var noWatchTabs = ['home', 'announcements', 'account', 'bind', 'ai', 'chat', 'more', 'me', 'logs', 'plugins', 'xhs'];
     if (!state.id && noWatchTabs.indexOf(state.tab) < 0 && state.tab.indexOf('plugin:') !== 0) {
       $('#content').innerHTML = '<div class="empty">' + esc(noWatchHint()) + '</div>';
       return;
@@ -2043,6 +2110,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       }
       else if (state.tab === 'overview') await run(api('/api/watch/' + id + '/overview'), renderOverview);
       else if (state.tab === 'plugins') await renderPlugins();
+      else if (state.tab === 'xhs') await renderXhs();
       else if (state.tab.indexOf('plugin:') === 0) {
         // 插件自己的界面用 iframe 装：样式和脚本都跟主界面隔离，
         // 插件里写的 CSS 不会把 WebUI 的按钮搞变形
@@ -2969,12 +3037,90 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         '<button class="btn small tonal" id="biliPrev">生成预览</button></div>' +
       '<div id="biliPrevOut" class="muted" style="font-size:12px;line-height:1.7;margin-top:10px;word-break:break-word"></div>';
 
+    // ===== B 站账号（扫码登录）=====
+    var lg = st.login || {};
+    var lgAcc = lg.account || {};
+    var loginOpen = obSecOpen ? !!obSecOpen['B 站账号'] : false;
+    var loginBody =
+      '<div id="biliLoginState">' +
+        (lg.loggedIn
+          ? '<div class="row"><span>当前账号</span><span class="value">' + esc(lgAcc.uname || ('UID ' + (lgAcc.mid || ''))) + '</span></div>' +
+            '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:6px">已登录：评论能翻页拿全，视频最高 720P。</div>'
+          : '<div class="muted" style="font-size:12px;line-height:1.7">未登录：评论只能拿热门前 3 条，视频最高 480P。扫码登录后立即生效，不用重登手表账号。</div>') +
+      '</div>' +
+      '<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">' +
+        '<button class="btn small" id="biliLoginQr">扫码登录</button>' +
+        '<button class="btn small tonal" id="biliLoginCheck">检查状态</button>' +
+        '<button class="btn small tonal" id="biliLoginOut">退出登录</button></div>' +
+      '<div id="biliQrOut" style="margin-top:10px"></div>' +
+      '<details style="margin-top:10px"><summary class="muted" style="font-size:12px;cursor:pointer">扫码不可用时：手动填 SESSDATA</summary>' +
+        '<label class="field" style="margin-top:8px"><span>SESSDATA</span>' +
+          '<input id="biliLoginSess" type="password" autocomplete="off" placeholder="浏览器 F12 → Application → Cookies 里复制"></label>' +
+        '<button class="btn small tonal" id="biliLoginSessSave">用这个 SESSDATA 登录</button></details>';
+
+    // ===== 小红书点播（和 B 站同一张卡片里，配置分开）=====
+    var xw = null;
+    var xlist = st.xhsWatches || [];
+    for (var xi = 0; xi < xlist.length; xi++) if (String(xlist[xi].watchId) === wid) { xw = xlist[xi]; break; }
+    if (!xw) xw = { watchId: wid, enabled: false, keys: [], auto: true, maxDuration: 900, maxBytes: 104857600, maxPerDay: 10 };
+    var xkeys = xw.keys || [];
+    var xDurMin = Math.round((Number(xw.maxDuration) || 0) / 60);
+    var xMb = Math.round((Number(xw.maxBytes) || 0) / 1024 / 1024);
+    var xhsOpen = obSecOpen ? !!obSecOpen['小红书点播'] : false;
+    var xopts = tgts.map(function(t){
+      var label = (t.type === 'group' ? '家庭群' : '单聊 · ' + (t.name || t.key)) + '（' + t.key + '）';
+      return '<label class="row" style="cursor:pointer;padding:8px 0">' +
+        '<span style="font-size:13px">' + esc(label) + '</span>' +
+        '<input class="xhs-key" type="checkbox" value="' + esc(t.key) + '"' +
+        (xkeys.indexOf(t.key) >= 0 ? ' checked' : '') +
+        ' style="width:18px;height:18px;flex:none"></label>';
+    }).join('');
+    var xhsBody =
+      '<div class="row"><span>状态</span><span class="value">' +
+        (xw.enabled ? '<span style="color:var(--success)">已启用</span>' : '未启用') + '</span></div>' +
+      '<div class="row"><span>会话范围</span><span class="value" style="font-size:12px;text-align:right">' +
+        (xw.auto ? '自动匹配' : '手动指定') + ' → ' +
+        (xkeys.length ? esc(xkeys.map(nameOfKey).join('、')) : '<span class="muted">没匹配到，去设置里手选会话</span>') + '</span></div>' +
+      '<div class="muted" style="font-size:12px;line-height:1.85;margin-top:10px">' +
+        '命令和 B 站分开，不会打架：<br>' +
+        '<code>/小红书 搜索 关键词</code> —— 回前 10 条，带序号<br>' +
+        '<code>/小红书 播放 序号</code> —— 下载并发视频（只支持视频笔记）<br>' +
+        '<code>/小红书 帮助</code> —— 用法<br>' +
+        'B 站仍是 <code>/搜索</code>、<code>/播放</code>，也可以写 <code>/b站 搜索</code> 明确指定。</div>' +
+      '<div class="ob-w-grid" style="margin-top:12px">' +
+        '<label class="field" style="margin-bottom:0"><span>单条时长上限（分钟，0=不限）</span><input id="xhsDur" type="number" min="0" max="60" value="' + esc(String(xDurMin)) + '"></label>' +
+        '<label class="field" style="margin-bottom:0"><span>单条大小上限（MB，最多 100）</span><input id="xhsSize" type="number" min="0" max="100" value="' + esc(String(xMb)) + '"></label>' +
+      '</div>' +
+      '<label class="field" style="margin-top:10px"><span>每天最多点播（条，0=不限）</span><input id="xhsDay" type="number" min="0" max="999" value="' + esc(String(xw.maxPerDay || 0)) + '"></label>' +
+      '<label class="field" style="margin-top:10px"><span>图文一次最多发几张（1–9）</span><input id="xhsImgs" type="number" min="1" max="9" value="' + esc(String(xw.maxImages || 4)) + '"></label>' +
+      '<div class="row" style="margin-top:10px"><span>启用本表的小红书点播</span>' + sw('xhsOn', !!xw.enabled) + '</div>' +
+      '<div style="margin-top:12px"><div class="muted" style="font-size:12px;margin-bottom:6px">生效会话（不选=按手表名自动匹配）</div>' + (xopts || '<div class="muted" style="font-size:12px">还没拉到会话列表，先去「微聊」页看一眼再回来</div>') + '</div>' +
+      '<div style="display:flex;gap:8px;margin-top:12px"><button class="btn small" id="xhsSave">保存</button></div>' +
+      '<div style="border-top:1px solid var(--outline-variant);margin-top:14px;padding-top:12px">' +
+        '<div class="row"><span>关键词自动回复</span>' + sw('xhsArOn', !!st.xhsAutoReplyEnabled) + '</div>' +
+        '<label class="field" style="margin-top:8px"><span>每行一条：关键词=回复</span>' +
+          '<textarea id="xhsArRules" rows="4" placeholder="在吗=在的\n作业=写完啦">' +
+          esc((st.xhsAutoReply || []).map(function(r){ return (r.match || '') + '=' + (r.reply || ''); }).join('\n')) +
+          '</textarea></label>' +
+        '<button class="btn small" id="xhsArSave" style="margin-top:8px">保存自动回复</button>' +
+      '</div>';
+
     html += '<div id="biliForm" class="hidden" style="border-top:1px solid var(--outline-variant);margin-top:14px;padding-top:14px">' +
       '<div class="ob-sec' + (isOpen ? ' open' : '') + '" data-sec="B 站点播">' +
         '<button type="button" class="ob-sec-head" aria-expanded="' + (isOpen ? 'true' : 'false') + '">' +
           '<span>本表设置<span class="ob-sec-sub"> · ' + esc(wname) + '</span></span>' +
           '<i class="ob-sec-arrow" aria-hidden="true"></i></button>' +
         '<div class="ob-sec-body">' + secBody + '</div></div>' +
+      '<div class="ob-sec' + (loginOpen ? ' open' : '') + '" data-sec="B 站账号" style="margin-top:10px">' +
+        '<button type="button" class="ob-sec-head" aria-expanded="' + (loginOpen ? 'true' : 'false') + '">' +
+          '<span>B 站账号<span class="ob-sec-sub"> · 全局设置</span></span>' +
+          '<i class="ob-sec-arrow" aria-hidden="true"></i></button>' +
+        '<div class="ob-sec-body">' + loginBody + '</div></div>' +
+      '<div class="ob-sec' + (xhsOpen ? ' open' : '') + '" data-sec="小红书点播" style="margin-top:10px">' +
+        '<button type="button" class="ob-sec-head" aria-expanded="' + (xhsOpen ? 'true' : 'false') + '">' +
+          '<span>小红书点播<span class="ob-sec-sub"> · 本表设置</span></span>' +
+          '<i class="ob-sec-arrow" aria-hidden="true"></i></button>' +
+        '<div class="ob-sec-body">' + xhsBody + '</div></div>' +
       '<div class="ob-sec' + (cmtOpen ? ' open' : '') + '" data-sec="评论长图" style="margin-top:10px">' +
         '<button type="button" class="ob-sec-head" aria-expanded="' + (cmtOpen ? 'true' : 'false') + '">' +
           '<span>评论长图<span class="ob-sec-sub"> · 全局设置</span></span>' +
@@ -3037,6 +3183,50 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
         toast(e.message || '保存失败', true);
         btn.disabled = false;
         btn.textContent = '保存';
+      }
+    };
+
+    if ($('#xhsArSave')) $('#xhsArSave').onclick = async function(){
+      var btn = this;
+      var rules = String(($('#xhsArRules') || {}).value || '').split('\n').map(function(line){
+        var i = line.indexOf('=');
+        if (i <= 0) return null;
+        return { match: line.slice(0, i).trim(), reply: line.slice(i + 1).trim() };
+      }).filter(Boolean);
+      btn.disabled = true; btn.textContent = '保存中…';
+      try {
+        await api('/api/bili/xhs-autoreply', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !!($('#xhsArOn') && $('#xhsArOn').checked), rules: rules }),
+        });
+        toast('自动回复已保存（' + rules.length + ' 条规则）');
+      } catch(e){ toast(e.message || '保存失败', true); }
+      finally { btn.disabled = false; btn.textContent = '保存自动回复'; }
+    };
+
+    if ($('#xhsSave')) $('#xhsSave').onclick = async function(){
+      var btn = this;
+      var picked = [];
+      box.querySelectorAll('.xhs-key').forEach(function(el){ if (el.checked) picked.push(el.value); });
+      var payload = {
+        watchId: wid,
+        enabled: $('#xhsOn').checked,
+        maxDuration: (Number(($('#xhsDur') || {}).value) || 0) * 60,
+        maxBytes: Math.min(100, Number(($('#xhsSize') || {}).value) || 0) * 1024 * 1024,
+        maxPerDay: Number(($('#xhsDay') || {}).value) || 0,
+        maxImages: Number(($('#xhsImgs') || {}).value) || 4,
+        targets: picked,
+      };
+      btn.disabled = true; btn.textContent = '保存中…';
+      try {
+        await api('/api/bili/xhs-watch', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+        toast(payload.enabled ? '已启用小红书点播' : '已关闭小红书点播');
+        await loadBiliCard();
+      } catch(e){
+        toast(e.message || '保存失败', true);
+        btn.disabled = false; btn.textContent = '保存';
       }
     };
 
@@ -3120,6 +3310,131 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       };
       img.src = url;
     }
+
+    // ===== B 站扫码登录 =====
+    var biliQrTimer = null;
+    function stopBiliQrPoll(){ if (biliQrTimer) { clearInterval(biliQrTimer); biliQrTimer = null; } }
+    function renderBiliLoginState(l){
+      var box = $('#biliLoginState');
+      if (!box) return;
+      if (l && l.loggedIn) {
+        var a = l.account || {};
+        box.innerHTML = '<div class="row"><span>当前账号</span><span class="value">' +
+          esc(a.uname || ('UID ' + (a.mid || ''))) + '</span></div>' +
+          '<div class="muted" style="font-size:12px;line-height:1.7;margin-top:6px">已登录：评论能翻页拿全，视频最高 720P。</div>';
+      } else {
+        box.innerHTML = '<div class="muted" style="font-size:12px;line-height:1.7">' +
+          (l && l.expired ? '登录已失效，请重新扫码。' : '未登录：评论只能拿热门前 3 条，视频最高 480P。') + '</div>';
+      }
+    }
+    function showBiliQr(data){
+      var out = $('#biliQrOut');
+      if (!out) return;
+      out.innerHTML = '';
+      var wrap = document.createElement('div');
+      wrap.style.cssText = 'display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap';
+      var img = new Image();
+      img.src = data.image;
+      img.alt = 'B 站登录二维码';
+      img.style.cssText = 'width:200px;height:200px;border-radius:10px;border:1px solid var(--outline-variant);background:#fff;padding:6px';
+      var tip = document.createElement('div');
+      tip.className = 'muted';
+      tip.style.cssText = 'font-size:12px;line-height:1.8;flex:1;min-width:160px';
+      tip.textContent = '用 B 站手机客户端扫一扫，确认后这里会自动跳转。二维码 3 分钟内有效。';
+      wrap.appendChild(img); wrap.appendChild(tip);
+      out.appendChild(wrap);
+      return tip;
+    }
+    if ($('#biliLoginQr')) $('#biliLoginQr').onclick = async function(){
+      var btn = this;
+      stopBiliQrPoll();
+      btn.disabled = true;
+      btn.textContent = '生成中…';
+      try {
+        var data = await api('/api/bili/login/qr');
+        var tip = showBiliQr(data);
+        btn.disabled = false;
+        btn.textContent = '重新生成';
+        biliQrTimer = setInterval(async function(){
+          try {
+            var r = await api('/api/bili/login/poll?key=' + encodeURIComponent(data.key));
+            if (tip) tip.textContent = r.message || '等待扫码…';
+            if (r.state === 'ok') {
+              stopBiliQrPoll();
+              if ($('#biliQrOut')) $('#biliQrOut').innerHTML = '';
+              renderBiliLoginState({ loggedIn: true, account: r.account });
+              toast('B 站登录成功' + (r.account && r.account.uname ? '：' + r.account.uname : ''));
+              await loadBiliCard();
+            } else if (r.state === 'expired' || r.state === 'error') {
+              stopBiliQrPoll();
+              if (tip) tip.textContent = r.message || '二维码失效，请重新生成';
+            }
+          } catch (e) {
+            stopBiliQrPoll();
+            if (tip) tip.textContent = '轮询失败：' + (e.message || '未知错误');
+          }
+        }, 2000);
+      } catch (e) {
+        toast('生成二维码失败：' + (e.message || '未知错误'), true);
+        btn.disabled = false;
+        btn.textContent = '扫码登录';
+      }
+    };
+    if ($('#biliLoginCheck')) $('#biliLoginCheck').onclick = async function(){
+      var btn = this;
+      btn.disabled = true;
+      btn.textContent = '检查中…';
+      try {
+        var r = await api('/api/bili/login/status');
+        renderBiliLoginState(r);
+        toast(r.loggedIn ? ('已登录：' + ((r.account && r.account.uname) || '')) : (r.expired ? '登录已失效' : '尚未登录'), !r.loggedIn);
+        if (r.loggedIn) await loadBiliCard();
+      } catch (e) {
+        toast('检查失败：' + (e.message || '未知错误'), true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '检查状态';
+      }
+    };
+    if ($('#biliLoginOut')) $('#biliLoginOut').onclick = async function(){
+      var btn = this;
+      btn.disabled = true;
+      btn.textContent = '退出中…';
+      try {
+        await api('/api/bili/login/logout', { method: 'POST' });
+        stopBiliQrPoll();
+        if ($('#biliQrOut')) $('#biliQrOut').innerHTML = '';
+        renderBiliLoginState({ loggedIn: false });
+        toast('已退出 B 站账号');
+        await loadBiliCard();
+      } catch (e) {
+        toast('退出失败：' + (e.message || '未知错误'), true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '退出登录';
+      }
+    };
+    if ($('#biliLoginSessSave')) $('#biliLoginSessSave').onclick = async function(){
+      var btn = this;
+      var sd = String((($('#biliLoginSess') || {}).value) || '').trim();
+      if (!sd) { toast('先填 SESSDATA', true); return; }
+      btn.disabled = true;
+      btn.textContent = '登录中…';
+      try {
+        var r = await api('/api/bili/login/sessdata', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessdata: sd }),
+        });
+        renderBiliLoginState({ loggedIn: true, account: r.account });
+        toast('B 站登录成功' + (r.account && r.account.uname ? '：' + r.account.uname : ''));
+        await loadBiliCard();
+      } catch (e) {
+        toast('登录失败：' + (e.message || '未知错误'), true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '用这个 SESSDATA 登录';
+      }
+    };
 
     if ($('#biliPrev')) $('#biliPrev').onclick = function(){
       var bv = String((($('#biliPrevBv') || {}).value) || '').trim();
@@ -3531,6 +3846,235 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
 
     $('#lkAuto').onchange = saveAuto;
     $('#lkSync').onclick = doSync;
+  }
+
+  // ===== 小红书：扫码登录 / 发视频 / 私信 =====
+  // 真正的浏览器在独立服务 xhs-bridge 里，这里只是把 HTTP 接口变成界面。
+  async function renderXhs(){
+    var st = {};
+    try { st = await api('/api/xhs'); } catch(e){ st = { error: e.message }; }
+    var h = st.health || null;
+    var cfg = st.config || {};
+    var online = !!h;
+    var html = ''
+      + '<div style="background:rgba(255,184,77,.08);border:1px solid rgba(255,184,77,.35);border-radius:10px;padding:12px 14px;margin-bottom:12px;font-size:12.5px;line-height:1.8">'
+      +   '<b>先登录，才能用。</b>小红书和 B 站不一样：不登录连搜索结果都看不到（会弹「登录后查看搜索结果」），'
+      +   '所以搜索、发视频、私信、群聊都依赖登录态。<br>'
+      +   '<b style="color:#c0392b">风险提示：</b>网页端登录和自动化操作有概率触发小红书风控'
+      +   '（验证码、限流、甚至账号异常）。建议用小号、降低频率；发布和私信默认只演练，确认后再真发。'
+      + '</div>'
+      + '<div class="card">'
+      +   '<div class="row"><span>桥接服务</span><span class="value">' + (online ? '在线 · ' + esc(cfg.baseUrl || '') : '离线 · ' + esc(st.error || '连不上')) + '</span></div>'
+      +   '<div class="row"><span>浏览器</span><span class="value">' + (h ? (h.browserRunning ? '运行中' : '未启动（首次操作会拉起）') : '—') + '</span></div>'
+      +   '<div class="row"><span>登录状态</span><span class="value" id="xhsState">检测中…</span></div>'
+      +   '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">'
+      +     '<button class="btn small" id="xhsQrBtn">扫码登录</button>'
+      +     '<button class="btn small tonal" id="xhsCheckBtn">刷新状态</button>'
+      +     '<button class="btn small tonal" id="xhsOutBtn">退出登录</button></div>'
+      +   '<div id="xhsQrOut" style="margin-top:12px"></div>'
+      + '</div>'
+      + '<div class="card" style="margin-top:12px"><h3 style="margin-top:0">发视频</h3>'
+      +   '<label class="field"><span>视频文件（服务器上的绝对路径）</span><input id="xhsFile" placeholder="/root/videos/demo.mp4"></label>'
+      +   '<label class="field" style="margin-top:10px"><span>标题</span><input id="xhsTitle" placeholder="最多 20 字"></label>'
+      +   '<label class="field" style="margin-top:10px"><span>正文</span><input id="xhsDesc" placeholder="正文 / 话题"></label>'
+      +   '<div class="row" style="margin-top:10px"><span>真正发布（不勾只演练）</span><label class="switch"><input type="checkbox" id="xhsConfirm"><span></span></label></div>'
+      +   '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
+      +     '<button class="btn small" id="xhsPubBtn">上传并发布</button></div>'
+      +   '<div id="xhsPubOut" class="muted" style="font-size:12px;margin-top:10px;word-break:break-word"></div></div>'
+      + '<div class="card" style="margin-top:12px"><h3 style="margin-top:0">私信 / 群聊</h3>'
+      +   '<label class="field"><span>收件人（昵称或群名）</span><input id="xhsTo" placeholder="例如 小林"></label>'
+      +   '<label class="field" style="margin-top:10px"><span>内容</span><input id="xhsText" placeholder="要发送的文字"></label>'
+      +   '<div class="row" style="margin-top:10px"><span>这是群聊</span><label class="switch"><input type="checkbox" id="xhsGroup"><span></span></label></div>'
+      +   '<div class="row" style="margin-top:10px"><span>真正发送（不勾只演练）</span><label class="switch"><input type="checkbox" id="xhsSendConfirm"><span></span></label></div>'
+      +   '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
+      +     '<button class="btn small" id="xhsListBtn">拉会话列表</button>'
+      +     '<button class="btn small tonal" id="xhsSendBtn">发送</button></div>'
+      +   '<div id="xhsImOut" class="muted" style="font-size:12px;margin-top:10px;word-break:break-word"></div></div>'
+      + '<div class="card" style="margin-top:12px"><h3 style="margin-top:0">桥接地址 / 令牌</h3>'
+      +   '<label class="field"><span>地址</span><input id="xhsBase" value="' + esc(cfg.baseUrl || '') + '"></label>'
+      +   '<label class="field" style="margin-top:10px"><span>令牌' + (cfg.hasToken ? '（已保存，留空不改）' : '') + '</span>'
+      +     '<input id="xhsToken" type="password" autocomplete="off" placeholder="xhs_..."></label>'
+      +   '<button class="btn small" id="xhsCfgBtn" style="margin-top:12px">保存</button></div>'
+      + '<div class="card" style="margin-top:12px"><h3 style="margin-top:0">防风控</h3>'
+      +   '<div class="muted" style="font-size:12px;line-height:1.8">'
+      +     '小红书看的是行为节奏：连续快速开页、翻页、发布，比真人快一个数量级就会触发验证码或限流。'
+      +     '这里的间隔是所有动作共用的，串行执行，不会并发。</div>'
+      +   '<div class="row" style="margin-top:10px"><span>暂停全部自动化</span><label class="switch"><input type="checkbox" id="xhsPaused"><span></span></label></div>'
+      +   '<div class="row" style="margin-top:10px"><span>只读模式（禁发布、禁私信）</span><label class="switch"><input type="checkbox" id="xhsReadonly"><span></span></label></div>'
+      +   '<div class="ob-w-grid" style="margin-top:10px">'
+      +     '<label class="field" style="margin-bottom:0"><span>最短间隔（秒）</span><input id="xhsMinInt" type="number" min="3" max="120"></label>'
+      +     '<label class="field" style="margin-bottom:0"><span>随机抖动（秒）</span><input id="xhsJitter" type="number" min="0" max="60"></label>'
+      +   '</div>'
+      +   '<div class="ob-w-grid" style="margin-top:10px">'
+      +     '<label class="field" style="margin-bottom:0"><span>每日搜索</span><input id="xhsLimSearch" type="number" min="0" max="500"></label>'
+      +     '<label class="field" style="margin-bottom:0"><span>每日读笔记</span><input id="xhsLimNote" type="number" min="0" max="500"></label>'
+      +   '</div>'
+      +   '<div class="ob-w-grid" style="margin-top:10px">'
+      +     '<label class="field" style="margin-bottom:0"><span>每日发布</span><input id="xhsLimPub" type="number" min="0" max="500"></label>'
+      +     '<label class="field" style="margin-bottom:0"><span>每日私信</span><input id="xhsLimDm" type="number" min="0" max="500"></label>'
+      +   '</div>'
+      +   '<div id="xhsUsage" class="muted" style="font-size:12px;margin-top:10px">用量读取中…</div>'
+      +   '<div style="display:flex;gap:8px;margin-top:12px"><button class="btn small" id="xhsSafetySave">保存设置</button>'
+      +     '<button class="btn small tonal" id="xhsSafetyNow">恢复默认</button></div></div>';
+    var box = $('#content');
+    box.innerHTML = '<div class="xhs-page">' + html + '</div>';
+
+    function setState(t, bad){ var e = $('#xhsState'); if (e) { e.textContent = t; e.style.color = bad ? 'var(--error,#e5484d)' : ''; } }
+    function shot(url, into){
+      var out = $(into); if (!out || !url) return;
+      var img = new Image();
+      img.src = url; img.style.cssText = 'display:block;max-width:100%;border-radius:10px;border:1px solid var(--outline-variant);margin-top:8px';
+      out.appendChild(img);
+    }
+
+    if ($('#xhsCheckBtn')) $('#xhsCheckBtn').onclick = async function(){
+      try {
+        var r = await api('/api/xhs/login/status', { timeout: 70000 });
+        setState(r.loggedIn ? ('已登录' + (r.user && r.user.nickname ? '：' + r.user.nickname : '')) : '未登录', !r.loggedIn);
+      } catch(e){ setState('检测失败：' + e.message, true); }
+    };
+
+    function stopQr(){ if (state.xhsPoll) { clearInterval(state.xhsPoll); state.xhsPoll = null; } }
+    if ($('#xhsQrBtn')) $('#xhsQrBtn').onclick = async function(){
+      var btn = this; var wasRegen = btn.textContent === '重新生成';
+      stopQr(); btn.disabled = true; btn.textContent = '生成中…';
+      try {
+        // 每次都强制重新生成：直接读页面上的图可能还是上一张（甚至已过期）
+        var d = await api('/api/xhs/login/qr?refresh=1&t=' + Date.now(), { timeout: 90000 });
+        if (d.loggedIn) { setState('已登录'); toast('已经登录了'); return; }
+        var out = $('#xhsQrOut'); out.innerHTML = '';
+        var img = new Image(); img.src = d.image;
+        img.style.cssText = 'width:200px;height:200px;border-radius:10px;background:#fff;padding:6px;border:1px solid var(--outline-variant);cursor:pointer';
+        img.title = '点击刷新二维码';
+        img.onclick = function(){ var b = $('#xhsQrBtn'); if (b && !b.disabled) b.click(); };
+        out.appendChild(img);
+        var tip = document.createElement('div'); tip.className = 'muted'; tip.style.cssText = 'font-size:12px;margin-top:8px;line-height:1.7';
+        tip.textContent = '用小红书 App 扫码，确认后这里会自动刷新。二维码约 3 分钟有效，过期就点图片或按钮重新生成。';
+        out.appendChild(tip);
+        toast('二维码已生成' + (wasRegen ? '（已刷新）' : ''));
+        btn.textContent = '重新生成';
+        state.xhsPoll = setInterval(async function(){
+          try {
+            var r = await api('/api/xhs/login/status', { timeout: 70000 });
+            if (r.loggedIn) {
+              stopQr(); setState('已登录' + (r.user && r.user.nickname ? '：' + r.user.nickname : ''));
+              tip.textContent = '登录成功'; toast('小红书登录成功');
+            }
+          } catch(e){ /* 轮询失败不打断 */ }
+        }, 3000);
+      } catch(e){ toast('生成二维码失败：' + e.message, true); btn.textContent = '扫码登录'; }
+      finally { btn.disabled = false; }
+    };
+
+    if ($('#xhsOutBtn')) $('#xhsOutBtn').onclick = async function(){
+      try { await api('/api/xhs/login/logout', { method: 'POST' }); setState('未登录', true); toast('已退出小红书'); }
+      catch(e){ toast('退出失败：' + e.message, true); }
+    };
+
+    if ($('#xhsPubBtn')) $('#xhsPubBtn').onclick = async function(){
+      var btn = this; var out = $('#xhsPubOut');
+      var payload = {
+        filePath: String(($('#xhsFile') || {}).value || '').trim(),
+        title: String(($('#xhsTitle') || {}).value || '').trim(),
+        desc: String(($('#xhsDesc') || {}).value || '').trim(),
+        confirm: !!($('#xhsConfirm') && $('#xhsConfirm').checked),
+      };
+      if (!payload.filePath) { toast('先填视频文件的绝对路径', true); return; }
+      btn.disabled = true; btn.textContent = '处理中…'; out.textContent = '正在上传，视频大时要等一会…';
+      try {
+        var r = await api('/api/xhs/publish', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), timeout: 200000 });
+        out.textContent = r.dryRun ? '演练完成：已上传并填好，未发布。' : (r.ok ? '已点击发布。' : (r.error || '完成'));
+        shot(r.screenshot, '#xhsPubOut');
+      } catch(e){ out.textContent = '失败：' + e.message; }
+      finally { btn.disabled = false; btn.textContent = '上传并发布'; }
+    };
+
+    if ($('#xhsListBtn')) $('#xhsListBtn').onclick = async function(){
+      var out = $('#xhsImOut'); out.textContent = '拉取中…';
+      try {
+        var r = await api('/api/xhs/chats', { timeout: 100000 });
+        out.textContent = '共 ' + (r.items || []).length + ' 个会话：' + (r.items || []).map(function(x){ return x.name; }).join(' / ');
+      } catch(e){ out.textContent = '失败：' + e.message; }
+    };
+
+    if ($('#xhsSendBtn')) $('#xhsSendBtn').onclick = async function(){
+      var btn = this; var out = $('#xhsImOut');
+      var payload = {
+        to: String(($('#xhsTo') || {}).value || '').trim(),
+        text: String(($('#xhsText') || {}).value || '').trim(),
+        group: !!($('#xhsGroup') && $('#xhsGroup').checked),
+        confirm: !!($('#xhsSendConfirm') && $('#xhsSendConfirm').checked),
+      };
+      btn.disabled = true; btn.textContent = '发送中…'; out.textContent = '正在打开会话…';
+      try {
+        var r = await api('/api/xhs/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), timeout: 100000 });
+        out.textContent = r.dryRun ? '演练完成：已填好，未发送。' : '已发送。';
+        shot(r.screenshot, '#xhsImOut');
+      } catch(e){ out.textContent = '失败：' + e.message; }
+      finally { btn.disabled = false; btn.textContent = '发送'; }
+    };
+
+    if ($('#xhsCfgBtn')) $('#xhsCfgBtn').onclick = async function(){
+      try {
+        await api('/api/xhs/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baseUrl: ($('#xhsBase') || {}).value, token: ($('#xhsToken') || {}).value }) });
+        toast('已保存'); await load();
+      } catch(e){ toast('保存失败：' + e.message, true); }
+    };
+
+    // ===== 防风控设置 =====
+    var safetyState = null;
+    function fillSafety(v){
+      safetyState = v;
+      if (!v) return;
+      if ($('#xhsMinInt')) $('#xhsMinInt').value = Math.round(v.minIntervalMs / 1000);
+      if ($('#xhsJitter')) $('#xhsJitter').value = Math.round(v.jitterMs / 1000);
+      if ($('#xhsLimSearch')) $('#xhsLimSearch').value = v.daily.search;
+      if ($('#xhsLimNote')) $('#xhsLimNote').value = v.daily.note;
+      if ($('#xhsLimPub')) $('#xhsLimPub').value = v.daily.publish;
+      if ($('#xhsLimDm')) $('#xhsLimDm').value = v.daily.dm;
+      if ($('#xhsPaused')) $('#xhsPaused').checked = !!v.paused;
+      if ($('#xhsReadonly')) $('#xhsReadonly').checked = !!v.readOnly;
+      var u = $('#xhsUsage');
+      if (u) u.textContent = '今天已用：搜索 ' + v.used.search + '/' + v.daily.search
+        + ' · 读笔记 ' + v.used.note + '/' + v.daily.note
+        + ' · 发布 ' + v.used.publish + '/' + v.daily.publish
+        + ' · 私信 ' + v.used.dm + '/' + v.daily.dm
+        + (v.paused ? ' · 已暂停' : '') + (v.readOnly ? ' · 只读' : '');
+    }
+    if ($('#xhsUsage')) {
+      api('/api/xhs/safety').then(fillSafety).catch(function(e){ if ($('#xhsUsage')) $('#xhsUsage').textContent = '读取失败：' + e.message; });
+    }
+    function saveSafety(patch){
+      return api('/api/xhs/safety', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) })
+        .then(function(v){ fillSafety(v); toast('防风控设置已保存'); return v; })
+        .catch(function(e){ toast('保存失败：' + e.message, true); throw e; });
+    }
+    if ($('#xhsPaused')) $('#xhsPaused').onchange = function(){
+      saveSafety({ paused: !!this.checked });
+    };
+    if ($('#xhsReadonly')) $('#xhsReadonly').onchange = function(){
+      saveSafety({ readOnly: !!this.checked });
+    };
+    if ($('#xhsSafetySave')) $('#xhsSafetySave').onclick = function(){
+      saveSafety({
+        readOnly: !!($('#xhsReadonly') && $('#xhsReadonly').checked),
+        minIntervalMs: Number(($('#xhsMinInt') || {}).value || 0) * 1000,
+        jitterMs: Number(($('#xhsJitter') || {}).value || 0) * 1000,
+        daily: {
+          search: Number(($('#xhsLimSearch') || {}).value || 0),
+          note: Number(($('#xhsLimNote') || {}).value || 0),
+          publish: Number(($('#xhsLimPub') || {}).value || 0),
+          dm: Number(($('#xhsLimDm') || {}).value || 0),
+        },
+      });
+    };
+    if ($('#xhsSafetyNow')) $('#xhsSafetyNow').onclick = function(){
+      saveSafety({ paused: false, readOnly: false, minIntervalMs: 8000, jitterMs: 5000, daily: { search: 30, note: 60, publish: 3, dm: 20 } });
+    };
+
+    // 进页面就顺手查一次登录态
+    $('#xhsCheckBtn') && $('#xhsCheckBtn').onclick && $('#xhsCheckBtn').click();
   }
 
   async function renderPlugins(){
@@ -6556,7 +7100,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
   } catch (e) { /* ignore */ }
   paintThemeBtn(themeChoice());
 
-  boot();
+  boot().then(maybePromptPassword).catch(function(){});
 })();
 </script>
 </body>

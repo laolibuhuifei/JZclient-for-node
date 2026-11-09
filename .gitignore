@@ -33,3 +33,7 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+
+# 小红书桥接运行期数据
+xhs-bridge/data/
+xhs-bridge/.browsers/

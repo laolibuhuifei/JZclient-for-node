@@ -145,6 +145,32 @@ function normalizeManifest(raw, fallbackId) {
     }
   }
 
+  // 自定义 HTTP 接口：声明后在 /api/plugin/<id>/api/<name> 上暴露，
+  // 由插件导出的 onApi(jz, ctx) 处理。声明是「契约」，没声明的名字一律拒绝。
+  const api = [];
+  if (Array.isArray(r.api)) {
+    if (r.api.length > 20) throw new Error('自定义接口最多声明 20 个');
+    for (const it of r.api) {
+      if (!it || typeof it !== 'object') continue;
+      const apiName = str(it.name, 32).toLowerCase();
+      if (!/^[a-z0-9][a-z0-9._-]{0,31}$/.test(apiName)) {
+        throw new Error('接口名「' + apiName + '」不合法：小写字母/数字/点/下划线/连字符，且以字母或数字开头');
+      }
+      if (api.some((x) => x.name === apiName)) throw new Error('接口名「' + apiName + '」重复了');
+      const method = String(it.method || 'POST').toUpperCase();
+      if (['GET', 'POST', 'PUT', 'DELETE', 'ANY'].indexOf(method) < 0) {
+        throw new Error('接口「' + apiName + '」的 method 只能是 GET/POST/PUT/DELETE/ANY');
+      }
+      api.push({
+        name: apiName,
+        method,
+        description: str(it.description, 120),
+        // auth 只影响展示；能进到这里的请求已经过了 WebUI 令牌校验
+        auth: it.auth !== false,
+      });
+    }
+  }
+
   // 外部界面：声明了才在导航栏出现
   let ui = null;
   if (r.ui && typeof r.ui === 'object') {
@@ -168,6 +194,7 @@ function normalizeManifest(raw, fallbackId) {
     permissions: perms,
     config,
     ui,
+    api,
   };
 }
 
@@ -1110,12 +1137,46 @@ class PluginManager {
   }
 
   // 插件自己的 HTTP 接口：/api/plugin/<id>/api/*
+  //
+  // 两种用法：
+  //   ctx.api 为空      → 老行为，交给导出的 onRequest 兜底；若插件声明了 api 清单，
+  //                       GET 直接返回清单，方便外部先发现再调用
+  //   ctx.api = "name"  → 只认 plugin.json 里声明过的名字，交给导出的 onApi 处理
   async handleRequest(id, req) {
     const p = this.get(id);
     if (!p) throw new Error('插件不存在');
     if (!p.loaded) throw new Error('插件没有正常运行' + (p.error ? '：' + p.error : ''));
+    const declared = p.manifest.api || [];
+    const name = String((req && req.api) || '').trim().toLowerCase();
+
+    if (name) {
+      const hit = declared.find((x) => x.name === name);
+      if (!hit) {
+        throw new Error('插件「' + p.manifest.name + '」没有声明接口 ' + name
+          + (declared.length ? '，可用的是：' + declared.map((x) => x.name).join('、') : ''));
+      }
+      const method = String((req && req.method) || 'GET').toUpperCase();
+      if (hit.method !== 'ANY' && hit.method !== method) {
+        throw new Error('接口 ' + name + ' 只接受 ' + hit.method + '，收到的是 ' + method);
+      }
+      if (!p.exports || typeof p.exports.onApi !== 'function') {
+        throw new Error('插件声明了接口 ' + name + '，但没有导出 onApi(jz, ctx)');
+      }
+      const ret = await withTimeout(
+        Promise.resolve().then(() => p.exports.onApi(p.api, Object.assign({}, req, { api: name }))),
+        T.request,
+        '插件接口 ' + name,
+      );
+      return normalizeHttpResponse(ret);
+    }
+
+    // 没指定具体接口：声明过清单的，GET 直接回清单
+    if (declared.length && String((req && req.method) || 'GET').toUpperCase() === 'GET') {
+      return normalizeHttpResponse({ ok: true, api: declared });
+    }
+
     if (!p.exports || typeof p.exports.onRequest !== 'function') {
-      throw new Error('这个插件没有提供 HTTP 接口（没导出 onRequest）');
+      throw new Error('这个插件没有提供 HTTP 接口（没导出 onRequest，也没在 plugin.json 里声明 api）');
     }
     const ret = await withTimeout(
       Promise.resolve().then(() => p.exports.onRequest(p.api, req)),

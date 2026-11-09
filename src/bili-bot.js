@@ -12,7 +12,7 @@ const SEARCH_TTL = 30 * 60 * 1000;       // 搜索结果保留 30 分钟，过�
 
 const HELP = [
   'B 站点播用法：',
-  '/搜索 关键词 —— 找视频，回前 10 条并标上序号（默认回一张带封面的图；/点歌 也行，不带斜杠也行）',
+  '/搜索 关键词 —— 找视频，回前 10 条并标上序号（也可以写 /b站 搜索，和 /小红书 区分）',
   '/播放 序号 —— 把上一条搜索结果里的第 N 条发过来（单聊里直接回个数字也行）',
   '/评论 —— 把刚点播的那个视频的评论区画成长图发过来（/评论 序号 也行）',
   '例：先发「/搜索 小猪佩奇」，再发「/播放 2」',
@@ -30,8 +30,11 @@ const OUT_OF_SCOPE = '这条会话没开点播。去「我的 → B 站点播」
 //   · 裸词形式只认中文词，且**必须带参数** —— 「搜索」两个字太容易出现在正常聊天里，
 //     放宽到「搜索不到」也算命令的话，正常说话都会被抢走
 function parseCommand(text) {
-  const raw = String(text || '').trim().replace(/^／/, '/');
+  let raw = String(text || '').trim().replace(/^／/, '/');
   if (!raw) return null;
+  // 显式前缀：/b站 搜索、/bili 播放 —— 和小红书的 /小红书 区分开
+  if (/^\/(?:b站|bilibili|bili)$/i.test(raw)) return { kind: 'help' };
+  raw = raw.replace(/^\/(?:b站|bilibili|bili)[\s:：]+/i, '/');
   const slash = raw.charAt(0) === '/';
   const body = slash ? raw.slice(1) : raw;
 

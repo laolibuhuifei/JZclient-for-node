@@ -147,6 +147,9 @@ class ImClient extends EventEmitter {
     this.registId = 0;
     this.imAccountId = Number(cfg.imAccountId) || 0;
     this.syncKey = Number(cfg.imSyncKey) || 0;
+    // 回执开关：IM_ACK=0 时完全不发下行回执/同步确认。
+    // 平台可能按账号维度把「已回执」当成已消费，手表重新拉列表时就看不到这条消息。
+    this.ackEnabled = String(process.env.IM_ACK || '1') !== '0';
     this.imDeviceId = cfg.imDeviceId || crypto.randomUUID().replace(/-/g, '').toUpperCase();
     this.connected = false;
     this._heartbeat = null;
@@ -251,8 +254,8 @@ class ImClient extends EventEmitter {
       }
       // 回执: 不回的话服务端认为消息没被消费, 会重复下发同一条(线上实测图片会成对出现),
       // 堆积到一定量之后新消息就不再推过来了 —— 用户侧看到的就是「收不到手表消息」
-      if (cmd === CMD.PUSH) this._pushAck(map.has(16) ? map.get(16).toString('utf8') : '');
-      this._ackSoon();
+      if (cmd === CMD.PUSH && this.ackEnabled) this._pushAck(map.has(16) ? map.get(16).toString('utf8') : '');
+      if (this.ackEnabled) this._ackSoon();
     } else if (cmd === CMD.SYNC_INFORM) {
       this.sync().catch(() => {});
     }
@@ -289,6 +292,12 @@ class ImClient extends EventEmitter {
     // 否则孩子连发两条「在吗」会被当成重复吞掉一条
     const ttl = msgId ? 300000 : 10000;
     const prev = this._seen.get(key);
+    // 去重前先记一笔：如果消息被当成重复丢掉，这里能看到，不会静默消失
+    try {
+      log.info('im', 'frame dialog=' + dialogId + ' from=' + imAccountId + ' type=' + msgType
+        + ' msgId=' + (msgId || '-') + ' len=' + msgRaw.length
+        + (prev && now - prev < ttl ? ' [重复丢弃]' : ''));
+    } catch (e) { /* ignore */ }
     if (prev && now - prev < ttl) return;
     this._seen.set(key, now);
     if (this._seen.size > 500) {
@@ -296,6 +305,12 @@ class ImClient extends EventEmitter {
     }
     let body = null;
     try { body = JSON.parse(msgRaw.toString('utf8')); } catch (e) { /* 非 JSON */ }
+    // 收包原文留一行：排查「消息到底有没有到」时，这是唯一可靠的证据
+    try {
+      log.info('im', 'recv dialog=' + dialogId + ' from=' + imAccountId + ' type=' + msgType
+        + ' src=' + (cmd === CMD.PUSH ? 'push' : 'sync') + ' len=' + msgRaw.length
+        + ' body=' + JSON.stringify(body || {}).slice(0, 160));
+    } catch (e) { /* ignore */ }
     this.emit('message', {
       source: cmd === CMD.PUSH ? 'push' : 'sync',
       dialogId,

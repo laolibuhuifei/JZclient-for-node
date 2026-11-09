@@ -1419,9 +1419,19 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       + '&ts=' + ts + '&sign=' + updateSign(c, ts);
     try {
       const j = await httpJson(url, { timeout: 6000 });
-      const d = (j && j.data) || {};
+      // 平台有两种返回形状：{ok, latest, ...}（老）和 {ok, data:{latest, ...}}（新）。
+      // 2026-11-10 之前这里只读 j.data，而平台当时就是平铺的 —— 每台实例都拿到
+      // 一个空对象，hasUpdate 永远 undefined，更新弹窗从来没弹出来过。
+      // 现在两种都认，平台再改形状也不会又瞎一次。
+      const d = (j && j.data && typeof j.data === 'object') ? j.data : (j || {});
       updateState.at = Date.now();
       updateState.data = d;
+      // 打一行就够：以后用户说「没弹窗」，看这条日志立刻知道是没新版、
+      // 还是平台没给对、还是前端跳过了，不用再逐层猜。
+      if (log.isEnabled('debug')) {
+        log.debug('update', `查更新 latest=${d.latest || '-'} running=${d.running || '-'}`
+          + ` hasUpdate=${d.hasUpdate} force=${d.force}`);
+      }
       return Object.assign({ managed: true }, d);
     } catch (e) {
       // 平台暂时连不上（重启中、网络抖动）不算错误，安静返回上一次的结果

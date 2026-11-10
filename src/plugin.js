@@ -452,6 +452,11 @@ class Plugin {
   }
 
   // 插件内部的 require：只能引自己的文件 + 几个安全的 Node 内置模块
+  //
+  // ⚠️ 相对路径的基准是「当前正在执行的那个文件所在目录」，不是插件根目录。
+  // 之前所有模块共用插件根，导致 lib/novel.js 里的 require('./yunzhi') 被解析成
+  // <root>/yunzhi.js（实际在 <root>/lib/yunzhi.js），插件一加载就报
+  // 「找不到插件内的文件: ./yunzhi」—— 2026-11-11 上架的两个插件全挂在这。
   makeRequire() {
     const self = this;
     const cache = new Map();
@@ -468,7 +473,8 @@ class Plugin {
       }
       // 和主入口一样：定义 + 调用写在一段脚本里，子模块里的死循环也能被 timeout 掐掉
       self.sandbox.__jz_mod__ = mod;
-      self.sandbox.__jz_req__ = req;
+      // 每个模块拿到的 require 都以它自己的目录为基准，和 Node 一致
+      self.sandbox.__jz_req__ = makeReq(path.dirname(full));
       self.sandbox.__jz_file__ = full;
       self.sandbox.__jz_dir__ = path.dirname(full);
       const wrapped = '(function (exports, require, module, __filename, __dirname) {\n' + code
@@ -484,29 +490,35 @@ class Plugin {
       return mod.exports;
     }
 
-    function req(name) {
-      const n = String(name || '');
-      // 这几个是纯计算/编解码，放给插件没风险
-      if (n === 'crypto' || n === 'zlib' || n === 'util' || n === 'path' || n === 'url' || n === 'querystring') {
-        return require(n);
-      }
-      if (n === 'fs' || n === 'child_process' || n === 'net' || n === 'http' || n === 'https') {
-        throw new Error('插件里不能用 require("' + n + '")。要发请求用 jz.fetch()，要存数据用 jz.store');
-      }
-      if (n.charAt(0) === '.') {
-        const base = path.resolve(self.dir, n);
-        if (!isInside(self.dir, base)) throw new Error('插件不能引用自己目录之外的文件: ' + n);
-        const tries = [base, base + '.js', base + '.json', path.join(base, 'index.js')];
-        for (const f of tries) {
-          if (fs.existsSync(f) && fs.statSync(f).isFile()) return loadFile(f);
+    // baseDir = 发起 require 的那个文件所在目录
+    function makeReq(baseDir) {
+      function req(name) {
+        const n = String(name || '');
+        // 这几个是纯计算/编解码，放给插件没风险
+        if (n === 'crypto' || n === 'zlib' || n === 'util' || n === 'path' || n === 'url' || n === 'querystring') {
+          return require(n);
         }
-        throw new Error('找不到插件内的文件: ' + n);
+        if (n === 'fs' || n === 'child_process' || n === 'net' || n === 'http' || n === 'https') {
+          throw new Error('插件里不能用 require("' + n + '")。要发请求用 jz.fetch()，要存数据用 jz.store');
+        }
+        if (n.charAt(0) === '.') {
+          const base = path.resolve(baseDir, n);
+          // 目录逃逸检查始终对比插件根，子目录里多写几层 .. 也跑不出去
+          if (!isInside(self.dir, base)) throw new Error('插件不能引用自己目录之外的文件: ' + n);
+          const tries = [base, base + '.js', base + '.json', path.join(base, 'index.js')];
+          for (const f of tries) {
+            if (fs.existsSync(f) && fs.statSync(f).isFile()) return loadFile(f);
+          }
+          throw new Error('找不到插件内的文件: ' + n);
+        }
+        throw new Error('插件里不能 require("' + n + '")，只能引自己的文件（./xxx）或 crypto/util/path/zlib/url/querystring');
       }
-      throw new Error('插件里不能 require("' + n + '")，只能引自己的文件（./xxx）或 crypto/util/path/zlib/url/querystring');
+      req.resolve = (n) => n;
+      return req;
     }
 
-    req.resolve = (n) => n;
-    return req;
+    // 入口文件就在插件根目录
+    return makeReq(self.dir);
   }
 
   // ---------- 注入给插件的 jz 对象 ----------

@@ -306,6 +306,10 @@ function matchChatKey(targets, m) {
 }
 
 async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSecret } = {}) {
+  // 兜底：不管从哪个入口进来（daemon / launcher / 测试脚本），都保证设备身份存在。
+  // 少了 ssoMac 的话登录会在 /app/rsakey 直接 010401，而且报错完全看不出原因。
+  try { device.ensureIdentity(cfg); } catch (e) { log.warn('device', '补设备身份失败: ' + e.message); }
+
   // 日志默认 info(请求/响应都打印); WP_LOG=debug 追加请求体等细节, WP_LOG=warn 只看告警
   const prevLevel = log.levelName();
   const envLevel = String(process.env.WP_LOG || '').toLowerCase().trim();

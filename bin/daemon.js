@@ -51,7 +51,12 @@ process.on('unhandledRejection', (e) => { recordErr('unhandledRejection', e); })
     const device = require('../src/device');
     const { startWebUI } = require('../src/webui');
 
-    const cfg = device.load();
+    // 必须先 ensureIdentity 再起 WebUI：
+    // 全新配置里 deviceId / ssoMac 都是 null，而 SSO 的签名参数里必须有 mac
+    // （ssoSign 会跳过 null，请求体却会发出 mac=，两边算出来的签名不一致）
+    // → 登录第一步 /app/rsakey 就返回 010401「签名无效」。
+    // 云端实例的 launcher.js 一直是这么做的，本地模式漏了，所以只有 APP 上首次登录会失败。
+    const cfg = device.ensureIdentity(device.load());
     // 强制锁回环。cli.js 的默认值是 0.0.0.0（方便电脑上局域网访问），
     // 但手机上那样等于把整个 WebUI 暴露给同一个 WiFi 的所有人。
     cfg.webui = Object.assign({}, cfg.webui, { port: PORT, host: HOST });

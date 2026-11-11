@@ -61,8 +61,12 @@ function post(urlPath, params, deviceId, nDeviceId) {
   const t0 = Date.now();
   const url = `https://${SSO_HOST}${urlPath}`;
   const all = Object.assign({}, params, { sign: ssoSign(url, params) });
+  // ⚠️ 这里必须和 ssoSign 用同一套过滤：签名会跳过 null/undefined，
+  // 请求体如果还把它们编码成空串（mac=），服务端按收到的参数重算签名就对不上 ——
+  // 表现就是一句没头没脑的 010401「签名无效」（2026-11-11 本地模式首次登录踩过）。
   const body = Object.entries(all)
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v === null || v === undefined ? '' : v)}`)
+    .filter(([, v]) => v !== null && v !== undefined)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join('&');
   return new Promise((resolve, reject) => {
     const req = https.request(url, {

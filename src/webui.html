@@ -1840,9 +1840,9 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     var box = $('#watchStrip');
     box.innerHTML = state.watches.map(function(w){
       var active = w.watchId === state.id ? ' active' : '';
-      var dot = (w.online || w.watchOnline) ? ' on' : '';
+      var dot = w.onlineStatus === true ? ' on' : '';
       var battery = w.battery != null ? ' · ' + w.battery + '%' : '';
-      return '<button class="watch-chip' + active + '" data-id="' + esc(w.watchId) + '">' +
+      return '<button class="watch-chip' + active + '" data-id="' + esc(w.watchId) + '" title="在线状态：' + onlineLabel(w.onlineStatus) + '">' +
         '<span class="dot' + dot + '"></span>' + esc(w.name || w.watchId) +
         '<span class="muted">' + esc(w.model || '') + battery + '</span></button>';
     }).join('');
@@ -2342,17 +2342,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       '</div>';
 
     // 手表列表(主页不做切换, 只做概览; 切换在顶部手表条里)
-    var ws = a.watches || [];
-    if (ws.length) {
-      html += '<div class="card"><div class="card-title">手表</div><div class="list">' +
-        ws.map(function(w){
-          return '<div class="list-item"><div class="list-main">' +
-            '<div class="list-title">' + dotInline(w.online) + esc(w.name) + '</div>' +
-            '<div class="list-sub">' + esc(w.model || '-') + ' · ' + (w.online ? '在线' : '离线') + '</div></div>' +
-            '<span class="battery-mini' + (w.battery != null && Number(w.battery) <= 20 ? ' low' : '') + '">' +
-            (w.battery != null ? esc(w.battery) + '%' : '-') + '</span></div>';
-        }).join('') + '</div></div>';
-    }
+    html += '<div id="homeWatches">' + homeWatchesHtml(a.watches || []) + '</div>';
 
     html += '</div>';
     $('#content').innerHTML = html;
@@ -2369,9 +2359,24 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     }, 3000);
   }
 
+  function homeWatchesHtml(ws){
+    if (!ws.length) return '';
+    return '<div class="card"><div class="card-title">手表</div><div class="list">' +
+      ws.map(function(w){
+        return '<div class="list-item"><div class="list-main">' +
+          '<div class="list-title">' + dotInline(w.online) + esc(w.name) + '</div>' +
+          '<div class="list-sub">' + esc(w.model || '-') + ' · ' + onlineLabel(w.online) + '</div></div>' +
+          '<span class="battery-mini' + (w.battery != null && Number(w.battery) <= 20 ? ' low' : '') + '">' +
+          (w.battery != null ? esc(w.battery) + '%' : '-') + '</span></div>';
+      }).join('') + '</div></div>';
+  }
+
   async function updateHome(){
     var d;
     try { d = await api('/api/system'); } catch (e) { return; }
+    if (state.tab !== 'home') return;
+    var watches = document.getElementById('homeWatches');
+    if (watches) watches.innerHTML = homeWatchesHtml((d.account && d.account.watches) || []);
     var s = d.system || {}, p = d.process || {};
     function setText(id, text){
       var el = document.getElementById(id);
@@ -3764,6 +3769,13 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     f.style.height = Math.max(360, Math.min(h, 20000)) + 'px';
   });
 
+  function onlineLabel(value){ return value === true ? '在线' : (value === false ? '离线' : '未知'); }
+  function batterySourceLabel(value){ return value === 'api' ? '接口' : (value === 'push' ? 'IM 推送' : '-'); }
+  function batteryTimeLabel(info){
+    if (!info || !info.batteryAt) return '-';
+    return (info.batteryTimeKind === 'received' ? '接收于 ' : '') + fmtTime(info.batteryAt);
+  }
+
   function renderMe(d, ov){
     var a = (ov && ov.account) || {};
     var st = (ov && ov.status) || {};
@@ -3777,7 +3789,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       : (hasWatch
         ? esc(a.model || w.model || '') + (w.number ? ' · ' + esc(w.number) : '')
         : '没有已绑定的手表，点下面的「绑定手表」添加');
-    var battery = ok ? (a.battery != null ? a.battery : st.battery) : null;
+    var info = (ov && ov.batteryInfo) || {};
+    var battery = ok ? info.battery : null;
     var html = '<div class="hero card"><div style="display:flex;align-items:center;gap:14px">' +
       '<span class="avatar hero-avatar">' +
       (ov && ov.avatarUrl ? '<img src="' + esc(ov.avatarUrl) + '" alt="">' : esc(name.slice(0, 1))) + '</span>' +
@@ -3802,8 +3815,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     if (hasWatch && (a.imei || st.lastLat != null || st.batteryAt)) {
       html += '<div class="card" style="margin-top:12px"><div class="card-title">设备状态</div>' +
         '<div class="row"><span>IMEI</span><span class="value">' + esc(a.imei || '-') + '</span></div>' +
-        '<div class="row"><span>在线状态</span><span class="value">' + ((a.online || a.watchOnline) ? '在线' : '离线') + '</span></div>' +
-        '<div class="row"><span>电量更新</span><span class="value js-battery-at">' + fmtTime(st.batteryAt) + '</span></div>' +
+        '<div class="row"><span>在线状态</span><span class="value js-watch-online">' + onlineLabel(ov && ov.onlineStatus) + '</span></div>' +
+        '<div class="row"><span>电量时间</span><span class="value js-battery-at">' + batteryTimeLabel(info) + '</span></div>' +
         (st.lastLat != null ? '<div class="row"><span>最近上报</span><span class="value">' + esc(st.lastAddress || (st.lastLat + ', ' + st.lastLng)) + ' · ' + fmtTime(st.lastLocAt) + '</span></div>' : '') +
         '</div>';
     }
@@ -3970,7 +3983,8 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     var disabled = Number(cm.classSwitch) === 1;
     var guard = d.guard || {};
     var members = d.members || [];
-    var battery = a.battery != null ? a.battery : st.battery;
+    var info = d.batteryInfo || {};
+    var battery = info.battery;
     var html = '<div class="hero card">' +
       '<div class="avatar hero-avatar">' +
       (d.avatarUrl ? '<img src="' + esc(d.avatarUrl) + '" alt="">' : esc(String(a.name || '未').slice(0, 1))) + '</div>' +
@@ -3982,9 +3996,9 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     html += '<div class="card"><div class="card-title">手表详情</div>' +
       '<div class="row"><span>watchId</span><span class="value">' + esc(state.id || '-') + '</span></div>' +
       '<div class="row"><span>IMEI</span><span class="value">' + esc(a.imei || '-') + '</span></div>' +
-      '<div class="row"><span>在线状态</span><span class="value">' + ((a.online || a.watchOnline) ? '在线' : '离线') + '</span></div>' +
-      '<div class="row"><span>电量来源</span><span class="value">' + (a.battery != null ? '接口' : (st.battery != null ? 'IM 推送' : '-')) + '</span></div>' +
-      '<div class="row"><span>电量更新</span><span class="value js-battery-at">' + fmtTime(st.batteryAt) + '</span></div>' +
+      '<div class="row"><span>在线状态</span><span class="value js-watch-online">' + onlineLabel(d.onlineStatus) + '</span></div>' +
+      '<div class="row"><span>电量来源</span><span class="value js-battery-source">' + batterySourceLabel(info.batterySource) + '</span></div>' +
+      '<div class="row"><span>电量时间</span><span class="value js-battery-at">' + batteryTimeLabel(info) + '</span></div>' +
       (st.lastLat != null
         ? '<div class="row"><span>推送位置</span><span class="value">' + esc(st.lastAddress || (st.lastLat + ', ' + st.lastLng)) + ' · ' + fmtTime(st.lastLocAt) + '</span></div>'
         : '') +
@@ -4202,12 +4216,12 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     }
     html += '</div></div>';
     var lossOn = Number(d.lossSwitch) === 1;
-    var online = d.watchOnline !== false;
+    var online = d.onlineStatus;
     html += '<div class="card" style="margin-top:12px"><div class="row">' +
       '<div><div>丢表模式</div><div class="muted">开启后手表锁定，可拍照、响铃、留言</div></div>' +
       '<label class="switch"><input type="checkbox" id="lossSwitch"' + (lossOn ? ' checked' : '') + '><span></span></label></div>';
     if (lossOn) {
-      html += '<div class="muted" style="margin:8px 0 10px">' + (online ? '手表在线，指令会立即下发' : '手表当前离线，指令会在手表下次联网时下发') + '</div>' +
+      html += '<div class="muted" style="margin:8px 0 10px">' + (online === true ? '手表在线，指令会立即下发' : (online === false ? '手表当前离线，指令会在手表下次联网时下发' : '手表在线状态未知，指令送达时间无法确认')) + '</div>' +
         '<div class="lost-actions">' +
         '<button class="btn small tonal" id="lostPhotosBtn">附近照片</button>' +
         '<button class="btn small tonal" id="lostWifiBtn">附近 WiFi</button>' +
@@ -6490,13 +6504,21 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
     if (!state.id) return;
     if (!document.querySelector('.js-battery')) return;
     try {
-      var s = await api('/api/watch/' + encodeURIComponent(state.id) + '/status');
+      var watchId = state.id;
+      var s = await api('/api/watch/' + encodeURIComponent(watchId) + '/status');
+      if (state.id !== watchId) return;
       var v = s.battery != null ? s.battery : '-';
       document.querySelectorAll('.js-battery').forEach(function(el){
         el.innerHTML = v + '<span>%</span>';
       });
       document.querySelectorAll('.js-battery-at').forEach(function(el){
-        el.textContent = fmtTime(s.batteryAt);
+        el.textContent = batteryTimeLabel(s);
+      });
+      document.querySelectorAll('.js-battery-source').forEach(function(el){
+        el.textContent = batterySourceLabel(s.batterySource);
+      });
+      document.querySelectorAll('.js-watch-online').forEach(function(el){
+        el.textContent = onlineLabel(s.onlineStatus);
       });
     } catch(e){ /* ignore */ }
   }, 30000);

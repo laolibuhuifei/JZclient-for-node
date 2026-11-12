@@ -289,7 +289,10 @@ class ImClient extends EventEmitter {
     // 否则孩子连发两条「在吗」会被当成重复吞掉一条
     const ttl = msgId ? 300000 : 10000;
     const prev = this._seen.get(key);
-    if (prev && now - prev < ttl) return;
+    if (prev && now - prev < ttl) {
+      log.debug('im', '收到重复下行消息，已按去重窗口跳过（不记录正文或会话标识）');
+      return;
+    }
     this._seen.set(key, now);
     if (this._seen.size > 500) {
       for (const [k, t] of this._seen) { if (now - t > 300000) this._seen.delete(k); }

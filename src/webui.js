@@ -10,6 +10,9 @@ const { ApiClient, MODULES } = require('./api');
 const device = require('./device');
 const sso = require('./sso');
 const { ImClient } = require('./im');
+const { bufferEarlyMessages } = require('./im-early-messages');
+const { allowMessageSideEffects } = require('./im-message-freshness');
+const { selectBattery, selectOnline } = require('./watch-status-selection');
 const { chat: aiChat } = require('./ai');
 const aiTrigger = require('./ai-trigger');
 const vision = require('./vision');
@@ -317,6 +320,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
   const api = new ApiClient(cfg);
   let cache = { at: 0, list: [] };
+  let watchStatusRevision = 0;
 
   // ===== 云端托管的 AI =====
   //
@@ -1260,9 +1264,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     // 主页是登录后第一屏, 缓存为空时补拉一次(内部有 60s 缓存, 不会被 3s 轮询打穿)
     // 拉取失败要节流, 否则未登录/断网时每 3 秒都会打一次服务器
     let watches = cache.list;
-    if (!watches.length && cfg.token && Date.now() - sysWatchTryAt > 30000) {
+    if ((!watches.length || Date.now() - cache.at >= 60000) && cfg.token && Date.now() - sysWatchTryAt > 30000) {
       sysWatchTryAt = Date.now();
-      try { watches = await watchList(); } catch (e) { watches = []; }
+      try { watches = await watchList(); } catch (e) { /* 保留上次快照 */ }
     }
     return {
       now: Date.now(),
@@ -1303,7 +1307,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           name: w.name || w.watchId,
           model: w.model || '',
           battery: w.battery != null ? w.battery : null,
-          online: !!(w.online || w.watchOnline),
+          online: w.onlineStatus,
         })),
       },
     };
@@ -1794,13 +1798,15 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   function setWatchStatus(wid, patch) {
     cfg.watchStatus = cfg.watchStatus || {};
     cfg.watchStatus[wid] = Object.assign({}, cfg.watchStatus[wid] || {}, patch);
+    watchStatusRevision++;
+    cache.at = 0; // 推送变更后不能继续使用旧的手表列表快照
     device.save(cfg);
   }
 
   // 会话列表还没拉到时进来的消息会被丢掉, 用这个计数做限流告警
   const lastDropWarn = { at: 0, n: 0 };
 
-  function onImMessage(m) {
+  function onImMessage(m, suppressAuto) {
     const b = m.body || {};
     const type = Number(b.type);
     const biz = isBusinessMessage(m);
@@ -1818,7 +1824,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     }
 
     // 自动同意好友(好友申请也属于业务消息, 不进聊天列表)
-    if (type === 88 && b.content) {
+    if (!suppressAuto && type === 88 && b.content) {
       const wid = b.watchId || '';
       if ((cfg.autoAgreeWatchIds || []).includes(wid)) {
         try {
@@ -1832,7 +1838,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
     // 业务推送: 更新电量/位置等状态后直接丢弃, 不写入聊天
     if (biz) {
-      handleBusinessPush(m);
+      // 历史业务帧不得把旧电量或位置写成刚收到的新状态。
+      if (!suppressAuto) handleBusinessPush(m);
       return;
     }
 
@@ -1890,7 +1897,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     //   - 会话没勾选 → info，并把当前启用的会话 key 一起打出来，方便对照
     //   - 关键词没命中 → info，打出归一化后的关键词和文本前缀
     //   - 命中 → info，打出单聊/群、命中方式（exact/prefix/contains）
-    if (aiRunning && !biliCmd) {
+    if (!suppressAuto && aiRunning && !biliCmd) {
       const aiText = bodyText;
       const aiKey = key || resolveChatKey(m);
       // 这张图能不能交给模型看：类型对、拿到 URL、用户没关识图
@@ -1970,6 +1977,10 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     }
     lastDropWarn.n = 0;
     pushChat(key, { self: false, text, kind: parsed.kind, url: messageUrl(parsed), time: m.createTime || Date.now() });
+    if (suppressAuto) {
+      log.debug('im', '握手期间的历史或时间未知消息已归档，不执行自动回复或命令');
+      return;
+    }
 
     // 插件也收一份。放在 B 站命令和 OneBot 转发之前：插件可能就是个关键词机器人，
     // 让它先看到原文。dispatchMessage 内部逐个 catch，一个插件炸不影响别的
@@ -2035,26 +2046,37 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     }
     if (imConnecting) return imConnecting;
     imConnecting = (async () => {
+      // 会话列表是归档和匹配的前提；拿不到时先不建立会确认消息的连接。
+      // 后台巡检会重试，避免连接后将无法归档的消息确认并丢弃。
+      if (!chatTargets) {
+        try { await loadChatTargets(); }
+        catch (e) {
+          log.warn('im', '会话列表未就绪，暂不连接 IM，稍后重试: ' + (e && e.message ? e.message : e));
+          throw e;
+        }
+      }
       const prevImId = cfg.imAccountId;
       const c = new ImClient(cfg);
-      await c.connect();
-      cfg.imAccountId = c.imAccountId;
-      device.save(cfg);
-      // 反向 WS 握手头里的 X-Self-ID 是"连接那一刻"的快照, 而 AstrBot 回消息时会拿
-      // 事件里的 self_id 去匹配这条连接。换账号后 self_id 变了, 不重连就会出现
-      // "能收到消息但回复发不出去" —— 这里主动重建一次
-      if (onebots.size && String(prevImId || '') !== String(c.imAccountId || '')) {
-        log.info('onebot', `账号标识变化(${prevImId || 0} → ${c.imAccountId})，重连反向 WS`);
-        restartOneBot();
-      }
-      c.on('message', (m) => { try { onImMessage(m); } catch (e) { /* ignore */ } });
+      // 握手期间服务端也可能推送消息；先监听、在身份就绪后再按序处理。
+      const early = bufferEarlyMessages(c, (m, wasBuffered) => {
+        // 同步帧可能在激活缓冲后才到达；未知时间的同步消息不能冒充实时指令。
+        const suppressAuto = (wasBuffered || m.source === 'sync') && !allowMessageSideEffects(m, Date.now());
+        onImMessage(m, suppressAuto);
+      }, {
+        onError: (e) => log.warn('im', '处理接收消息失败: ' + (e && e.message ? e.message : e)),
+        onOverflow: () => log.warn('im', '握手期间消息缓冲已满，消息可能丢失'),
+      });
+      // EventEmitter 的 error 必须在连接前监听，否则握手期间可能直接导致进程异常退出。
+      c.on('error', (e) => {
+        imLastError = (e && e.message) ? e.message : String(e);
+        log.debug('im', '连接错误: ' + imLastError);
+      });
       c.on('close', () => {
-        if (im === c) im = null;
+        if (im !== c) return;
+        im = null;
         imReconnects++;
         imLastError = '连接已断开';
         log.warn('im', '连接已断开，5 秒后重连');
-        // 以前这里只是打一行日志, 实际要等后台 60 秒巡检才重连;
-        // 断线后这段时间里手表发的消息全都收不到, 所以自己排一次
         if (!imRetry) {
           imRetry = setTimeout(() => {
             imRetry = null;
@@ -2063,13 +2085,29 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           if (imRetry.unref) imRetry.unref();
         }
       });
-      c.on('error', (e) => {
-        imLastError = (e && e.message) ? e.message : String(e);
-        log.debug('im', '连接错误: ' + imLastError);
-      });
-      im = c;
-      await c.sync().catch(() => {});
-      return c;
+      try {
+        await c.connect();
+        if (!c.connected || (c.alive && !c.alive())) throw new Error('握手完成后连接已断开');
+        cfg.imAccountId = c.imAccountId;
+        device.save(cfg);
+      // 反向 WS 握手头里的 X-Self-ID 是"连接那一刻"的快照, 而 AstrBot 回消息时会拿
+      // 事件里的 self_id 去匹配这条连接。换账号后 self_id 变了, 不重连就会出现
+      // "能收到消息但回复发不出去" —— 这里主动重建一次
+      if (onebots.size && String(prevImId || '') !== String(c.imAccountId || '')) {
+        log.info('onebot', `账号标识变化(${prevImId || 0} → ${c.imAccountId})，重连反向 WS`);
+        restartOneBot();
+      }
+        im = c;
+        early.activate();
+        await c.sync().catch(() => {});
+        return c;
+      } catch (e) {
+        if (im === c) im = null;
+        const dropped = early.dispose();
+        if (dropped) log.warn('im', `连接初始化失败，握手缓冲中有 ${dropped} 条消息未处理`);
+        try { c.close(); } catch (_) { /* ignore */ }
+        throw e;
+      }
     })();
     try { return await imConnecting; } finally { imConnecting = null; }
   }
@@ -2411,6 +2449,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
   async function watchList(force) {
     if (!force && Date.now() - cache.at < 60000) return cache.list;
+    const revision = watchStatusRevision;
     const data = ensure(await api.getMobileInit());
     const raw = data.mobileWatchs || [];
     const list = [];
@@ -2424,8 +2463,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         name: d.name || '',
         model: d.model || '',
         number: d.number || '',
-        battery: d.battery != null ? d.battery : st.battery,
-        batteryAt: st.batteryAt || null,
+        ...selectBattery({ apiValue: d.battery, pushValue: st.battery, pushAt: st.batteryAt, pushTimeKind: 'received' }),
+        onlineStatus: selectOnline(d.online, d.watchOnline),
         firmware: d.firmware || '',
         imei: d.imei || '',
         online: d.online,
@@ -2434,7 +2473,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         lastLocation: st.lastLat != null ? { latitude: st.lastLat, longitude: st.lastLng, address: st.lastAddress || '', time: st.lastLocAt || null } : null,
       });
     }
-    cache = { at: Date.now(), list };
+    // 拉取期间若有新推送，这份快照不能被标记为新鲜缓存。
+    cache = { at: revision === watchStatusRevision ? Date.now() : 0, list };
     return list;
   }
 
@@ -3879,17 +3919,24 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       ]);
       const status = (cfg.watchStatus && cfg.watchStatus[id]) || {};
       const avatarUrl = await getAvatarUrl(id, account);
-      return ok(res, { account, members, classModes, guard, status, avatarUrl });
+      const batteryInfo = selectBattery({ apiValue: account.battery, pushValue: status.battery, pushAt: status.batteryAt, pushTimeKind: 'received' });
+      const onlineStatus = selectOnline(account.online, account.watchOnline);
+      return ok(res, { account, members, classModes, guard, status, avatarUrl, batteryInfo, onlineStatus });
     }
 
     // ===== 轻量状态(电量等), 供前端轮询 =====
     if (action === 'status') {
-      const list = await watchList(false);
+      let list;
+      try { list = await watchList(false); }
+      catch (e) { list = cache.list; } // 平台不可用时仍可返回已有快照或本地推送
       const w = list.find((x) => x.watchId === id) || {};
       const st = (cfg.watchStatus && cfg.watchStatus[id]) || {};
+      const batteryInfo = w.battery != null && w.batterySource === 'api'
+        ? { battery: w.battery, batteryAt: w.batteryAt || null, batterySource: w.batterySource, batteryTimeKind: w.batteryTimeKind || null }
+        : selectBattery({ pushValue: st.battery, pushAt: st.batteryAt, pushTimeKind: 'received' });
       return ok(res, {
-        battery: w.battery != null ? w.battery : st.battery,
-        batteryAt: st.batteryAt || null,
+        ...batteryInfo,
+        onlineStatus: w.onlineStatus == null ? null : w.onlineStatus,
         lastLat: st.lastLat != null ? st.lastLat : null,
         lastLng: st.lastLng != null ? st.lastLng : null,
         lastAddress: st.lastAddress || '',
@@ -3911,8 +3958,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       return ok(res, {
         location,
         lossSwitch: Number(account.lossSwitch) || 0,
-        watchOnline: account.watchOnline !== false,
-        online: account.online !== false,
+        watchOnline: account.watchOnline,
+        online: account.online,
+        onlineStatus: selectOnline(account.online, account.watchOnline),
       });
     }
 

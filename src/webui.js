@@ -2047,6 +2047,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           throw e;
         }
       }
+      // 接口回成功但内容是空的（刚绑表、平台抽风）也不能连：
+      // 连上就会把消息确认掉，可是一条都归档不了。
+      if (!chatTargets || !chatTargets.length) {
+        throw new Error('会话列表为空，暂不连接 IM');
+      }
       const prevImId = cfg.imAccountId;
       const c = new ImClient(cfg);
       // 握手期间服务端也可能推送消息；先监听、在身份就绪后再按序处理。
@@ -2147,8 +2152,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   async function loadChatTargets() {
     if (chatTargets) return chatTargets;
     const data = ensure(await api.getDialogAccounts());
-    chatTargets = buildChatTargets(data.familyDialogs || []);
-    return chatTargets;
+    const built = buildChatTargets(data.familyDialogs || []);
+    // 只缓存非空结果：接口这次回了空（刚绑表、平台抽风）时如果把 [] 缓存下来，
+    // 之后每次都命中空数组，ensureIM 会以为「已就绪」照样连，消息全部归档失败。
+    if (built.length) chatTargets = built;
+    return built;
   }
 
   // 微聊单条语音上限 60 秒, 超过就切开逐条发(阈值和 OneBot 那边保持一致)

@@ -31,7 +31,16 @@ test('状态接口使用内存数据并在推送后刷新缓存', async (t) => {
   let im;
   const result = (data) => ({ json: { code: '000001', data } });
   class ApiClient {
-    async getDialogAccounts() { return result({ familyDialogs: [] }); }
+    // 会话列表不能是空的：空列表时 ensureIM 会拒绝连 IM（避免连上却归档不了），
+    // 这条用例要测的是状态接口，所以给一份最小可用的家庭数据。
+    async getDialogAccounts() {
+      return result({
+        familyDialogs: [{
+          imDialogId: 1,
+          familyList: [{ accounts: [{ accountType: 1, imAccountId: 42, name: '模拟手表' }] }],
+        }],
+      });
+    }
     async getMobileInit() { reads++; if (failInit) throw new Error('模拟平台不可用'); return result({ mobileWatchs: [{ watchId: 'id' }] }); }
     async getWatchAccount() { return result({ ...account }); }
     async getWatchMembers() { return result([]); }

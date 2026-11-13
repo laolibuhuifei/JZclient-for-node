@@ -23,6 +23,7 @@ const { fetchFavicon } = require('./favicon');
 const linkLib = require('./link-presets');
 const { startOneBot } = require('./onebot');
 const { createOnebotScope } = require('./onebot-scope');
+const { mergeWatchIds } = require('./watch-ids');
 const bili = require('./bilibili');
 const biliBot = require('./bili-bot');
 const biliComment = require('./bili-comment');
@@ -611,6 +612,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   let imReconnects = 0;               // 重连次数(诊断)
   let imLastError = '';               // 最近一次连接错误(诊断)
   let chatTargets = null;
+  // 会话列表的缓存时间。以前是「拿到一次就一直用」—— 用户新绑一块表、或服务端
+  // 多出一个群之后，AI / OneBot / B 站的会话勾选列表里永远看不到它，
+  // 只能重启实例。60 秒过期一次，和 watchList 的缓存节奏对齐。
+  let chatTargetsAt = 0;
+  const CHAT_TARGETS_TTL = 60000;
   const chatLog = new Map();
   let onebots = new Map();            // watchId -> 实例(每块表一套端口/令牌/会话范围)
   let onebotKeys = new Map();         // watchId -> [会话 key], 该实例只推这些会话
@@ -646,12 +652,18 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
   // 手表名缓存: 平台没给 watchId 与 imAccountId 的对应关系, 只能靠名字把两边对上
   async function ensureWatchNames(force) {
-    if (watchNames && !force) return watchNames;
+    // 每次都对一次 watchList：它自己有 60 秒缓存，新鲜时是纯内存返回，
+    // 不新鲜时顺手刷新。以前这里是 `if (watchNames) return`，于是「新绑的表」
+    // 永远进不了 watchNames —— B 站 / OneBot 的卡片里那块表就退化成默认值（未启用），
+    // 用户看到的现象是「点了启用、保存完又变回关闭」（其实配置早就存进去了）。
     // 注意: 这里不能用 safe(), safe 是给 {code,data} 形态的接口响应用的,
     // watchList 返回的是普通数组, 过 ensure() 会直接抛错然后被吞成 null。
     let list = [];
     try { list = (await watchList(force)) || []; } catch (e) { list = []; }
-    watchNames = list.map((w) => ({ watchId: String(w.watchId), name: w.name || '' }));
+    // 拉失败（没登录 / 平台抖）时保留手上这份，别把界面清空
+    if (list.length || !watchNames) {
+      watchNames = list.map((w) => ({ watchId: String(w.watchId), name: w.name || '' }));
+    }
     return watchNames;
   }
 
@@ -818,8 +830,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   async function onebotWatchesState() {
     await ensureWatchNames(false);
     const configured = cfg.onebotWatches || {};
-    let wids = (watchNames || []).map((w) => String(w.watchId));
-    if (!wids.length) wids = Object.keys(configured);
+    // 同上：配置里配过的表必须列出来，不能因为名字列表旧了就消失
+    const wids = mergeWatchIds(watchNames, configured);
     if (!wids.length) return [];
     const nameOf = (wid) => ((watchNames || []).find((x) => x.watchId === String(wid)) || {}).name || '';
     const sub = (live, saved, defPort) => {
@@ -1177,8 +1189,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     let targets = [];
     try { targets = (await loadChatTargets()) || []; } catch (e) { targets = []; }
     const conf = cfg.biliBots || {};
-    let wids = (watchNames || []).map((w) => String(w.watchId));
-    if (!wids.length) wids = Object.keys(conf);
+    // 并集：配置里有的表即使这次没从平台拉到名字，也要列出来（否则它会「消失」）
+    const wids = mergeWatchIds(watchNames, conf);
     const nameOf = (wid) => ((watchNames || []).find((x) => x.watchId === String(wid)) || {}).name || '';
     return {
       watches: wids.map((wid) => {
@@ -2153,13 +2165,20 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
   // 会话列表的构建在 chat-targets.js：同一个家庭出现两条记录、一个家庭绑多块表，
   // 这两种情况在那里统一处理（原来会重复显示、漏掉第二块表）。
-  async function loadChatTargets() {
-    if (chatTargets) return chatTargets;
+  //
+  // force=true 绕过期时间。默认 60 秒过期：用户新绑一块表、服务端多出一个群之后，
+  // 界面上（AI 的会话勾选、OneBot/B 站的范围选择）最迟一分钟后就能看到，
+  // 不用重启实例。以前是「拿到一次就一直用」，新会话永远不出现。
+  async function loadChatTargets(force) {
+    if (chatTargets && !force && Date.now() - chatTargetsAt < CHAT_TARGETS_TTL) return chatTargets;
     const data = ensure(await api.getDialogAccounts());
     const built = buildChatTargets(data.familyDialogs || []);
     // 只缓存非空结果：接口这次回了空（刚绑表、平台抽风）时如果把 [] 缓存下来，
     // 之后每次都命中空数组，ensureIM 会以为「已就绪」照样连，消息全部归档失败。
-    if (built.length) chatTargets = built;
+    if (built.length) {
+      chatTargets = built;
+      chatTargetsAt = Date.now();
+    }
     return built;
   }
 

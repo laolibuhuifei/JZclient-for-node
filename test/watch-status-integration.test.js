@@ -105,7 +105,7 @@ test('状态接口使用内存数据并在推送后刷新缓存', async (t) => {
   assert.equal(status.onlineStatus, null);
   const before = reads;
   account = { name: '模拟手表', battery: null };
-  im.emit('message', { body: { type: 27, watchId: 'id', content: JSON.stringify({ battery: 75 }) } });
+  im.emit('message', { source: 'push', body: { type: 27, watchId: 'id', content: JSON.stringify({ battery: 75 }) } });
   const after = await get('/api/watch/id/status');
   assert.ok(reads > before, '推送应使列表缓存失效');
   assert.equal(after.battery, 75);
@@ -122,7 +122,8 @@ test('状态接口使用内存数据并在推送后刷新缓存', async (t) => {
   assert.equal(systemAfter.account.watches[0].online, null);
   const savedTime = cfg.watchStatus.id.batteryAt;
   im.emit('message', { source: 'sync', createTime: Date.now() - 3_600_000, body: { type: 27, watchId: 'id', content: JSON.stringify({ battery: 10 }) } });
-  assert.equal(cfg.watchStatus.id.battery, 75, '旧同步状态不得覆盖新电量');
+  im.emit('message', { source: 'push', createTime: Date.now() - 3_600_000, body: { type: 27, watchId: 'id', content: JSON.stringify({ battery: 11 }) } });
+  assert.equal(cfg.watchStatus.id.battery, 75, '旧同步或旧推送状态不得覆盖新电量');
   assert.equal(cfg.watchStatus.id.batteryAt, savedTime);
   failInit = true;
   im.emit('message', { source: 'push', body: { type: 27, watchId: 'id', content: JSON.stringify({ battery: 60 }) } });

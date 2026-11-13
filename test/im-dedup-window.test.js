@@ -2,8 +2,7 @@
 // 回归：去重表不能无限增长
 //
 // 线上可能出现的场景：一次补发几百条带图/语音的历史消息，或短时间内大量下行。
-// 原来的清理只按「5 分钟前的条目」删，短时间内全都是新的，于是一条也删不掉，
-// Map 会一直涨（长期运行的慢泄漏）。
+// 既要避免无界增长，也要避免 500 条时把 TTL 内的消息过早淘汰。
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -43,13 +42,33 @@ test('短时间内大量不同消息不会让去重表无限增长', () => {
   let received = 0;
   client.on('message', () => { received++; });
 
-  for (let i = 0; i < 1200; i++) client._dispatch(35, message('msg-' + i, '第' + i + '条'));
+  for (let i = 0; i < 10100; i++) client._dispatch(35, message('msg-' + i, '第' + i + '条'));
 
-  assert.equal(received, 1200, '每条都应正常投递，不能被误判成重复');
-  assert.ok(client._seen.size <= 500, '去重表应被压在 500 以内，实际 ' + client._seen.size);
+  assert.equal(received, 10100, '每条都应正常投递，不能被误判成重复');
+  assert.ok(client._seen.size <= 10000, '去重表应被压在 10000 以内，实际 ' + client._seen.size);
 });
 
-test('超出上限后仍能识别刚刚出现过的重复消息', () => {
+test('超过旧的 500 条上限后仍识别窗口内最早的 push/sync 重复', () => {
+  const client = offlineClient();
+  let received = 0;
+  client.on('message', () => { received++; });
+  for (let i = 0; i < 1200; i++) client._dispatch(35, message('m-' + i, '内容' + i));
+  client._dispatch(13, message('m-0', '内容0'));
+  assert.equal(received, 1200);
+});
+
+test('超过新上限后仍识别最新重复，最旧项可能提前淘汰', () => {
+  const client = offlineClient();
+  let received = 0;
+  client.on('message', () => { received++; });
+  for (let i = 0; i < 10001; i++) client._dispatch(35, message('limit-' + i, '内容'));
+  client._dispatch(13, message('limit-10000', '内容'));
+  assert.equal(received, 10001);
+  client._dispatch(13, message('limit-0', '内容'));
+  assert.equal(received, 10002);
+});
+
+test('最近出现过的重复消息仍被识别', () => {
   const client = offlineClient();
   let received = 0;
   client.on('message', () => { received++; });

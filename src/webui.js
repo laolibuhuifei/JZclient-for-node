@@ -22,6 +22,7 @@ const { loadImageSource, uploadImage, uploadVoice, uploadVideo, directVideo, pro
 const { fetchFavicon } = require('./favicon');
 const linkLib = require('./link-presets');
 const { startOneBot } = require('./onebot');
+const { createOnebotScope } = require('./onebot-scope');
 const bili = require('./bilibili');
 const biliBot = require('./bili-bot');
 const biliComment = require('./bili-comment');
@@ -272,10 +273,12 @@ function matchChatKey(targets, m) {
   const did = String(m.dialogId == null ? '' : m.dialogId);
 
   if (did && did !== '0') {
-    const g = targets.find((t) => t.type === 'group'
+    const groups = targets.filter((t) => t.type === 'group'
       && (t.aliasIds && t.aliasIds.length ? t.aliasIds : [String(t.dialogId)])
         .some((x) => String(x) === did));
-    if (g) return g.key;
+    // 重叠别名无法可靠归属；绝不猜测，以免回复错群。
+    if (groups.length > 1) return null;
+    if (groups.length === 1) return groups[0].key;
   }
 
   // 单聊：按对方 imAccountId 匹配。
@@ -613,11 +616,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   let onebotKeys = new Map();         // watchId -> [会话 key], 该实例只推这些会话
   let watchNames = null;              // [{watchId, name}], 手表名 <-> 会话名 靠它对
 
-  // 单个实例的运行时上下文。scopeKeys 为空 = 没匹配到会话, 退化成不过滤(收全部),
-  // 免得机器人看起来是死的更难排查; 有值就只暴露这些会话
+  // 绑定手表的实例必须限制会话范围，未匹配时拒绝访问而不是暴露全部会话。
   function onebotCtx(watchId, scopeKeys) {
-    const keys = scopeKeys || null;
-    const scoped = !!(watchId && keys && keys.length);
+    const keys = scopeKeys || [];
+    const scoped = !!watchId;
+    const scope = createOnebotScope(watchId, keys);
     return {
       // 按手表的实例: self_id 用那块表自己的 IM 账号, 插件才分得清"哪块表在说话"
       selfId: () => {
@@ -632,9 +635,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       online: () => !!(im && im.connected),
       targets: async () => {
         const all = (await loadChatTargets()) || [];
-        return scoped ? all.filter((t) => keys.indexOf(t.key) >= 0) : all;
+        return scope.filter(all);
       },
-      send: (key, body) => sendChat(Object.assign({ key }, body)),
+      send: (key, body) => {
+        if (!scope.allows(key)) throw new Error('会话不在该手表的 OneBot 范围内');
+        return sendChat(Object.assign({}, body, { key }));
+      },
     };
   }
 
@@ -748,7 +754,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       if (!wc || !wc.enabled) continue;
       const keys = onebotKeys.get(String(wid)) || [];
       if (!keys.length) {
-        log.warn('onebot', `手表 ${wid} 没匹配到会话，暂时接收全部会话；请在「我的 → OneBot v11 接入」里手动指定`);
+        log.warn('onebot', `手表 ${wid} 没匹配到会话，已禁止访问会话；请在「我的 → OneBot v11 接入」里手动指定`);
       }
       const conf = {
         enabled: true,
@@ -1756,10 +1762,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     const wid = b.watchId || m.watchId || '';
     if (!wid) return;
     const o = parsePushContent(b);
-    // 不管哪类业务推送，都说明这块表刚刚还活着。
-    // 平台的 online 字段经常滞后（人已经戴着了还回 false），这里留一个真实的活动时间，
-    // 界面才能区分「平台说离线」和「确实很久没上报」。
-    // 走同一个 patch，别为了这个时间再单独存一次盘（原来一条推送要写两次配置）。
+    // 仅记录平台通知的本地接收时间；通知可能延迟或由平台生成，不能证明设备在线。
+    // 同一条通知合并写盘，避免重复保存配置。
     const now = Date.now();
 
     // 27 = 电量提醒 { battery }
@@ -1783,7 +1787,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       setWatchStatus(wid, { lastSeenAt: now, needRefresh: true });
       return;
     }
-    // 其它业务推送也证明表还活着
+    // 其它平台通知只记录接收时间，不推断手表在线。
     setWatchStatus(wid, { lastSeenAt: now });
   }
 
@@ -2011,8 +2015,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         };
         onebots.forEach((inst, wid) => {
           const keys = onebotKeys.get(String(wid)) || [];
-          // 没匹配到会话(keys 为空)时退化成"收全部", 否则机器人看起来是死的, 更难排查
-          if (keys.length && keys.indexOf(key) < 0) return;
+          // 范围为空或不包含该会话时均不投递，避免跨手表泄露。
+          if (!createOnebotScope(wid, keys).allows(key)) return;
           try { inst.pushMessage(payload); } catch (e) {
             log.warn('onebot', `手表 ${wid} 事件推送失败: ` + (e && e.message ? e.message : e));
           }
@@ -2055,9 +2059,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       const prevImId = cfg.imAccountId;
       const c = new ImClient(cfg);
       // 握手期间服务端也可能推送消息；先监听、在身份就绪后再按序处理。
-      const early = bufferEarlyMessages(c, (m, wasBuffered) => {
-        // 同步帧可能在激活缓冲后才到达；未知时间的同步消息不能冒充实时指令。
-        const suppressAuto = (wasBuffered || m.source === 'sync') && !allowMessageSideEffects(m, Date.now());
+      const early = bufferEarlyMessages(c, (m) => {
+        // 对所有来源检查新鲜度；未知时间的同步消息不能冒充实时指令。
+        const suppressAuto = !allowMessageSideEffects(m, Date.now());
         onImMessage(m, suppressAuto);
       }, {
         onError: (e) => log.warn('im', '处理接收消息失败: ' + (e && e.message ? e.message : e)),
@@ -2442,7 +2446,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         online: d.online,
         watchOnline: d.watchOnline,
         lossSwitch: d.lossSwitch != null ? Number(d.lossSwitch) : 0,
-        // 最近一次真的从这块表收到数据的时间（业务推送），和平台 online 字段互相独立
+        // 最近一次收到该表平台通知的本地时间，不代表设备采样或在线时间
         lastSeenAt: st.lastSeenAt || null,
         lastLocation: st.lastLat != null ? { latitude: st.lastLat, longitude: st.lastLng, address: st.lastAddress || '', time: st.lastLocAt || null } : null,
       });
@@ -4655,7 +4659,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   }
 
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    let url;
+    try {
+      url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, error: '请求地址不合法' });
+    }
     const parts = url.pathname.split('/').filter(Boolean);
 
     // 请求日志: 静态资源(字体/表情图)只在 debug 级别打印, 避免刷屏
@@ -4668,7 +4677,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         if (log.isEnabled('debug')) log.request(req.method, url.pathname, res.statusCode, ms, res._bytes);
         return;
       }
-      log.request(req.method, url.pathname + (url.search || ''), res.statusCode, ms, res._bytes, res._failed);
+      log.request(req.method, url.pathname, res.statusCode, ms, res._bytes, res._failed);
     });
 
     try {
@@ -4796,7 +4805,6 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   });
 
   log.info('webui', `服务已启动 http://${host}:${port}`);
-  log.info('webui', `访问令牌 ${AUTH_TOKEN}`);
   log.info('webui', `日志级别 ${log.levelName()}（WP_LOG=debug 看请求体细节，WP_LOG=warn 只看告警）`);
 
   // 会话列表必须先拉到: 收消息时要靠它把 dialogId/imAccountId 映射成会话 key,

@@ -3,11 +3,8 @@
 // 会话列表的归一化：把 /dialogaccount/merge/accounts 的 familyDialogs 转成
 // 聊天面板/发送/AI/OneBot 共用的 targets。
 //
-// 两件线上真踩过的事：
-//   1. 同一个家庭在 familyDialogs 里可能出现两条（服务端合并账期数据时会这样），
-//      原来逐条 push，聊天列表里就出现两遍「家庭群」和同名单聊。
-//   2. 一个家庭可以绑多块表，原来用 accounts.find(accountType === 1) 只取第一块，
-//      第二块表在列表里直接不存在 —— 用户看到「绑了四块，只显示三块」。
+// 按明确的会话 key 去重，并为每个手表账号建立单聊。
+// 家庭成员相同并不能证明两个群是同一个群，不能仅凭成员合并群 ID。
 
 // 家庭群的 IM 会话 ID 服务端有两个字段：imDialogId（旧）和 upgradeImDialogId（新）。
 // 迁移期间三种状态都有：两个相同 / 只有 upgrade / 旧值还在但已过期。
@@ -42,20 +39,6 @@ function chatIdsOf(fd, family) {
   return out;
 }
 
-function mergeInto(list, add) {
-  for (const v of add) if (list.indexOf(v) < 0) list.push(v);
-  return list;
-}
-
-// 同一个家庭的指纹：成员 IM 账号集合。为空时退回群 ID，避免把不同家庭误并。
-function familyFingerprint(accounts, ids) {
-  const keys = (accounts || [])
-    .map((a) => (a && a.imAccountId != null ? String(a.imAccountId) : ''))
-    .filter(Boolean)
-    .sort();
-  return keys.length ? 'f:' + keys.join('|') : 'g:' + ids[0];
-}
-
 function watchAccounts(accounts) {
   return (accounts || []).filter((a) => a && Number(a.accountType) === 1 && a.imAccountId != null);
 }
@@ -63,7 +46,6 @@ function watchAccounts(accounts) {
 function buildChatTargets(familyDialogs) {
   const targets = [];
   const byKey = new Map();
-  const byFamily = new Map();
 
   function add(target) {
     const hit = byKey.get(target.key);
@@ -93,32 +75,11 @@ function buildChatTargets(familyDialogs) {
       });
     });
 
-    const { up, old } = idsOf(fd, family);
     const ids = chatIdsOf(fd, family);
     if (!ids.length) return;
-
-    const fp = familyFingerprint(accounts, ids);
-    const hit = byFamily.get(fp);
-    if (hit) {
-      // 同一家庭的两条记录：合并 ID（upgrade 始终排在前面，发送要用它）
-      mergeInto(hit.up, up);
-      mergeInto(hit.old, old);
-      hit.aliasIds = hit.up.concat(hit.old.filter((id) => hit.up.indexOf(id) < 0));
-      const primary = hit.aliasIds[0];
-      if (primary && primary !== hit.dialogId) {
-        const nextKey = 'g:' + primary;
-        if (!byKey.has(nextKey)) {
-          byKey.delete(hit.key);
-          byKey.set(nextKey, hit);
-          hit.key = nextKey;
-        }
-        hit.dialogId = primary;
-      }
-      if (accounts.length && (!hit.peers || !hit.peers.length)) hit.peers = accounts;
-      return;
-    }
-
-    const group = {
+    // 仅在主 ID 一致时去重。不同主 ID 即使成员相同也可能是不同群；
+    // 不能推断它们是新旧关系，否则消息可能归档或回复到错误的群。
+    add({
       key: 'g:' + ids[0],
       type: 'group',
       name: '家庭群',
@@ -126,11 +87,7 @@ function buildChatTargets(familyDialogs) {
       dialogId: ids[0],
       aliasIds: ids,
       peers: accounts,
-      up: up.slice(),
-      old: old.slice(),
-    };
-    byFamily.set(fp, group);
-    add(group);
+    });
   });
 
   // up/old 只是合并时用的中间状态，不往外带

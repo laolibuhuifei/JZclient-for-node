@@ -12,6 +12,7 @@ const sso = require('./sso');
 const { ImClient } = require('./im');
 const { bufferEarlyMessages } = require('./im-early-messages');
 const { allowMessageSideEffects } = require('./im-message-freshness');
+const { buildChatTargets, chatIdsOf } = require('./chat-targets');
 const { selectBattery, selectOnline } = require('./watch-status-selection');
 const { chat: aiChat } = require('./ai');
 const aiTrigger = require('./ai-trigger');
@@ -260,33 +261,10 @@ async function loadLinkImage(src, limit) {
 
 // ===== 会话 ID 的归一化与匹配（纯函数，不碰网络，可以直接单测） =====
 //
-// 家庭群的 IM 会话 ID 服务端有两个字段：imDialogId（旧）和 upgradeImDialogId（新）。
-// 迁移期间线上三种状态都有：
-//   · 两个值相同              → 取哪个都行
-//   · 旧值为空、只剩 upgrade  → 只认旧值的话家庭群根本登记不进来
-//   · 旧值还在但已经过期      → 只认旧值的话群消息全部匹配失败
-//
-// 2026-11-09 那批用户「收不到手表消息」就是第三种：旧 ID 1128491383，
-// 手表发来的消息带新 ID 1128491384，差 1，严格相等直接匹配不上，消息被丢弃。
-//
-// 所以：所有候选都收进数组，发送用第一个（优先 upgrade），匹配时任一命中就算。
-
-function chatIdsOf(fd, family) {
-  const raw = [
-    fd && fd.upgradeImDialogId,
-    fd && fd.imDialogId,
-    family && family.upgradeImDialogId,
-    family && family.imDialogId,
-  ];
-  const out = [];
-  for (const v of raw) {
-    if (v === undefined || v === null) continue;
-    const s = String(v).trim();
-    if (!s || s === '0' || s === 'null' || s === 'undefined') continue;
-    if (out.indexOf(s) < 0) out.push(s);
-  }
-  return out;
-}
+// 家庭群的 ID 归一化和会话列表构建在 chat-targets.js（纯函数，可单测）：
+// 那里同时解决了「同一个家庭出现两条记录」和「一个家庭绑多块表只显示一块」。
+// 2026-11-09 那批用户「收不到手表消息」就是旧 ID 过期后严格相等匹配不上，
+// 所以匹配时任一 aliasIds 命中就算，发送用第一个（优先 upgrade）。
 
 // 把一条 IM 消息映射到会话 key（'s:xxx' / 'g:xxx'），认不出来返回 null
 function matchChatKey(targets, m) {
@@ -2150,41 +2128,13 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (imTimer.unref) imTimer.unref();
   }
 
-  // 家庭群的 IM 会话 ID 有两个字段：imDialogId（旧）和 upgradeImDialogId（新）。
-  // 迁移期间三种状态都有，所以全收成别名数组 —— 细节和线上踩坑记录见 chatIdsOf() 的注释。
+  // 会话列表的构建在 chat-targets.js：同一个家庭出现两条记录、一个家庭绑多块表，
+  // 这两种情况在那里统一处理（原来会重复显示、漏掉第二块表）。
   async function loadChatTargets() {
     if (chatTargets) return chatTargets;
     const data = ensure(await api.getDialogAccounts());
-    const targets = [];
-    (data.familyDialogs || []).forEach((fd) => {
-      const family = (fd.familyList && fd.familyList[0]) || {};
-      const accounts = family.accounts || [];
-      const watch = accounts.find((a) => a.accountType === 1);
-      if (watch && watch.imAccountId != null) {
-        targets.push({
-          key: 's:' + watch.imAccountId,
-          type: 'single',
-          name: watch.name || '手表',
-          sub: [watch.model, '单聊'].filter(Boolean).join(' '),
-          receiverId: watch.imAccountId,
-          peers: accounts,
-        });
-      }
-      const ids = chatIdsOf(fd, family);
-      if (ids.length) {
-        targets.push({
-          key: 'g:' + ids[0],        // 展示用主 ID（优先 upgrade）
-          type: 'group',
-          name: '家庭群',
-          sub: accounts.map((a) => a.name).filter(Boolean).join('、'),
-          dialogId: ids[0],          // 发送用，和匹配保持一致
-          aliasIds: ids,             // 匹配用：新旧 ID 全认
-          peers: accounts,
-        });
-      }
-    });
-    chatTargets = targets;
-    return targets;
+    chatTargets = buildChatTargets(data.familyDialogs || []);
+    return chatTargets;
   }
 
   // 微聊单条语音上限 60 秒, 超过就切开逐条发(阈值和 OneBot 那边保持一致)

@@ -344,7 +344,10 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           model: w.model || '',
           number: w.number || '',
           battery: w.battery == null ? null : Number(w.battery),
-          online: w.online !== false && w.watchOnline !== false,
+          // 和界面同一套三态：字段缺失不能当在线（原来这里是 !== false，缺失就算在线，
+          // 与首页的「缺失当离线」正好相反，同一个插件会看到两种答案）
+          online: w.onlineStatus,
+          lastSeenAt: w.lastSeenAt || null,
           lastLocation: w.lastLocation || null,
         }));
       },
@@ -1754,6 +1757,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (!wid) return;
     const o = parsePushContent(b);
 
+    // 不管哪类业务推送，都说明这块表刚刚还活着。
+    // 平台的 online 字段经常滞后（人已经戴着了还回 false），这里留一个真实的活动时间，
+    // 界面才能区分「平台说离线」和「确实很久没上报」。
+    setWatchStatus(wid, { lastSeenAt: Date.now() });
+
     // 27 = 电量提醒 { battery }
     if (type === 27 && o && o.battery != null) {
       setWatchStatus(wid, { battery: Number(o.battery), batteryAt: Date.now() });
@@ -2420,6 +2428,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         online: d.online,
         watchOnline: d.watchOnline,
         lossSwitch: d.lossSwitch != null ? Number(d.lossSwitch) : 0,
+        // 最近一次真的从这块表收到数据的时间（业务推送），和平台 online 字段互相独立
+        lastSeenAt: st.lastSeenAt || null,
         lastLocation: st.lastLat != null ? { latitude: st.lastLat, longitude: st.lastLng, address: st.lastAddress || '', time: st.lastLocAt || null } : null,
       });
     }
@@ -3891,6 +3901,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         lastLng: st.lastLng != null ? st.lastLng : null,
         lastAddress: st.lastAddress || '',
         lastLocAt: st.lastLocAt || null,
+        lastSeenAt: st.lastSeenAt || null,
+        lastSeenAgo: st.lastSeenAt ? Math.max(0, Math.round((Date.now() - st.lastSeenAt) / 1000)) : null,
         online: w.online,
         watchOnline: w.watchOnline,
       });

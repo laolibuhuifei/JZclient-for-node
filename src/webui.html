@@ -3816,6 +3816,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       html += '<div class="card" style="margin-top:12px"><div class="card-title">设备状态</div>' +
         '<div class="row"><span>IMEI</span><span class="value">' + esc(a.imei || '-') + '</span></div>' +
         '<div class="row"><span>在线状态</span><span class="value js-watch-online">' + onlineLabel(ov && ov.onlineStatus) + '</span></div>' +
+        (st.lastSeenAt ? '<div class="row"><span>最近上报</span><span class="value js-watch-seen">' + fmtTime(st.lastSeenAt) + '（平台推送）</span></div>' : '') +
         '<div class="row"><span>电量时间</span><span class="value js-battery-at">' + batteryTimeLabel(info) + '</span></div>' +
         (st.lastLat != null ? '<div class="row"><span>最近上报</span><span class="value">' + esc(st.lastAddress || (st.lastLat + ', ' + st.lastLng)) + ' · ' + fmtTime(st.lastLocAt) + '</span></div>' : '') +
         '</div>';
@@ -3997,6 +3998,7 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       '<div class="row"><span>watchId</span><span class="value">' + esc(state.id || '-') + '</span></div>' +
       '<div class="row"><span>IMEI</span><span class="value">' + esc(a.imei || '-') + '</span></div>' +
       '<div class="row"><span>在线状态</span><span class="value js-watch-online">' + onlineLabel(d.onlineStatus) + '</span></div>' +
+      (st.lastSeenAt ? '<div class="row"><span>最近上报</span><span class="value js-watch-seen">' + fmtTime(st.lastSeenAt) + '（平台推送）</span></div>' : '') +
       '<div class="row"><span>电量来源</span><span class="value js-battery-source">' + batterySourceLabel(info.batterySource) + '</span></div>' +
       '<div class="row"><span>电量时间</span><span class="value js-battery-at">' + batteryTimeLabel(info) + '</span></div>' +
       (st.lastLat != null
@@ -6519,6 +6521,9 @@ input::placeholder,textarea::placeholder{color:rgba(0,0,0,.25)}
       });
       document.querySelectorAll('.js-watch-online').forEach(function(el){
         el.textContent = onlineLabel(s.onlineStatus);
+      });
+      document.querySelectorAll('.js-watch-seen').forEach(function(el){
+        el.textContent = s.lastSeenAt ? (fmtTime(s.lastSeenAt) + '（平台推送）') : '';
       });
     } catch(e){ /* ignore */ }
   }, 30000);

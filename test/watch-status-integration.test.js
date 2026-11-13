@@ -103,6 +103,9 @@ test('状态接口使用内存数据并在推送后刷新缓存', async (t) => {
   assert.equal(after.batterySource, 'push');
   assert.equal(after.batteryTimeKind, 'received');
   assert.ok(after.batteryAt > 0);
+  // 业务推送同时留下活动时间：平台 online 字段滞后时，界面据此区分「离线」和「刚有数据」
+  assert.ok(after.lastSeenAt > 0, '收到推送后应有最近上报时间');
+  assert.ok(after.lastSeenAgo >= 0);
   const overviewAfter = await get('/api/watch/id/overview');
   const systemAfter = await get('/api/system');
   for (const key of ['battery', 'batterySource', 'batteryAt', 'batteryTimeKind']) assert.equal(after[key], overviewAfter.batteryInfo[key]);

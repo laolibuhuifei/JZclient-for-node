@@ -295,7 +295,14 @@ class ImClient extends EventEmitter {
     }
     this._seen.set(key, now);
     if (this._seen.size > 500) {
-      for (const [k, t] of this._seen) { if (now - t > 300000) this._seen.delete(k); }
+      const cutoff = now - 300000;
+      for (const [k, t] of this._seen) { if (t < cutoff) this._seen.delete(k); }
+      // 短时间内来了一大批不同消息时，上面的按时间清理一条也删不掉，
+      // Map 会一直涨（长期运行的慢泄漏）。再按插入顺序淘汰最旧的，硬压在 500。
+      for (const k of this._seen.keys()) {
+        if (this._seen.size <= 500) break;
+        this._seen.delete(k);
+      }
     }
     let body = null;
     try { body = JSON.parse(msgRaw.toString('utf8')); } catch (e) { /* 非 JSON */ }

@@ -1756,29 +1756,35 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     const wid = b.watchId || m.watchId || '';
     if (!wid) return;
     const o = parsePushContent(b);
-
     // 不管哪类业务推送，都说明这块表刚刚还活着。
     // 平台的 online 字段经常滞后（人已经戴着了还回 false），这里留一个真实的活动时间，
     // 界面才能区分「平台说离线」和「确实很久没上报」。
-    setWatchStatus(wid, { lastSeenAt: Date.now() });
+    // 走同一个 patch，别为了这个时间再单独存一次盘（原来一条推送要写两次配置）。
+    const now = Date.now();
 
     // 27 = 电量提醒 { battery }
     if (type === 27 && o && o.battery != null) {
-      setWatchStatus(wid, { battery: Number(o.battery), batteryAt: Date.now() });
+      setWatchStatus(wid, { lastSeenAt: now, battery: Number(o.battery), batteryAt: now });
       return;
     }
     // 11031 位置通知 / 39000010 实时位置动态
     if ((type === 11031 || type === 39000010) && o && (o.latitude != null || o.longitude != null)) {
       setWatchStatus(wid, {
+        lastSeenAt: now,
         lastLat: o.latitude,
         lastLng: o.longitude,
         lastAddress: o.poiNew || o.descNew || '',
-        lastLocAt: o.createTime || o.locationPushTime || Date.now(),
+        lastLocAt: o.createTime || o.locationPushTime || now,
       });
       return;
     }
     // 30 宝贝资料 / 35 绑定关系 / 47 宝贝基础信息: 标记需要刷新
-    if (type === 30 || type === 35 || type === 47) setWatchStatus(wid, { needRefresh: true });
+    if (type === 30 || type === 35 || type === 47) {
+      setWatchStatus(wid, { lastSeenAt: now, needRefresh: true });
+      return;
+    }
+    // 其它业务推送也证明表还活着
+    setWatchStatus(wid, { lastSeenAt: now });
   }
 
   function setWatchStatus(wid, patch) {

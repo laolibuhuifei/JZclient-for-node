@@ -31,7 +31,16 @@ test('状态接口使用内存数据并在推送后刷新缓存', async (t) => {
   let im;
   const result = (data) => ({ json: { code: '000001', data } });
   class ApiClient {
-    async getDialogAccounts() { return result({ familyDialogs: [] }); }
+    // 会话列表不能是空的：空列表时 ensureIM 会拒绝连 IM（避免连上却归档不了），
+    // 这条用例要测的是状态接口，所以给一份最小可用的家庭数据。
+    async getDialogAccounts() {
+      return result({
+        familyDialogs: [{
+          imDialogId: 1,
+          familyList: [{ accounts: [{ accountType: 1, imAccountId: 42, name: '模拟手表' }] }],
+        }],
+      });
+    }
     async getMobileInit() { reads++; if (failInit) throw new Error('模拟平台不可用'); return result({ mobileWatchs: [{ watchId: 'id' }] }); }
     async getWatchAccount() { return result({ ...account }); }
     async getWatchMembers() { return result([]); }
@@ -96,13 +105,16 @@ test('状态接口使用内存数据并在推送后刷新缓存', async (t) => {
   assert.equal(status.onlineStatus, null);
   const before = reads;
   account = { name: '模拟手表', battery: null };
-  im.emit('message', { body: { type: 27, watchId: 'id', content: JSON.stringify({ battery: 75 }) } });
+  im.emit('message', { source: 'push', body: { type: 27, watchId: 'id', content: JSON.stringify({ battery: 75 }) } });
   const after = await get('/api/watch/id/status');
   assert.ok(reads > before, '推送应使列表缓存失效');
   assert.equal(after.battery, 75);
   assert.equal(after.batterySource, 'push');
   assert.equal(after.batteryTimeKind, 'received');
   assert.ok(after.batteryAt > 0);
+  // 业务推送同时留下活动时间：平台 online 字段滞后时，界面据此区分「离线」和「刚有数据」
+  assert.ok(after.lastSeenAt > 0, '收到推送后应有最近上报时间');
+  assert.ok(after.lastSeenAgo >= 0);
   const overviewAfter = await get('/api/watch/id/overview');
   const systemAfter = await get('/api/system');
   for (const key of ['battery', 'batterySource', 'batteryAt', 'batteryTimeKind']) assert.equal(after[key], overviewAfter.batteryInfo[key]);
@@ -110,7 +122,8 @@ test('状态接口使用内存数据并在推送后刷新缓存', async (t) => {
   assert.equal(systemAfter.account.watches[0].online, null);
   const savedTime = cfg.watchStatus.id.batteryAt;
   im.emit('message', { source: 'sync', createTime: Date.now() - 3_600_000, body: { type: 27, watchId: 'id', content: JSON.stringify({ battery: 10 }) } });
-  assert.equal(cfg.watchStatus.id.battery, 75, '旧同步状态不得覆盖新电量');
+  im.emit('message', { source: 'push', createTime: Date.now() - 3_600_000, body: { type: 27, watchId: 'id', content: JSON.stringify({ battery: 11 }) } });
+  assert.equal(cfg.watchStatus.id.battery, 75, '旧同步或旧推送状态不得覆盖新电量');
   assert.equal(cfg.watchStatus.id.batteryAt, savedTime);
   failInit = true;
   im.emit('message', { source: 'push', body: { type: 27, watchId: 'id', content: JSON.stringify({ battery: 60 }) } });

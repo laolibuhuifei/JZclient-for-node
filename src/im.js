@@ -47,10 +47,17 @@ function varint(n) {
   do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b); } while (n);
   return Buffer.from(o);
 }
+class ImVarintError extends Error {}
 function readVarint(b, o) {
-  let v = 0, s = 0, x;
-  do { x = b[o++]; v |= (x & 0x7f) << s; s += 7; } while (x & 0x80 && o < b.length);
-  return { val: v, next: o };
+  let v = 0;
+  for (let i = 0; i < 5; i++) {
+    if (o >= b.length) return null; // 帧头可能跨 TCP 包，等待更多字节
+    const x = b[o++];
+    v += (x & 0x7f) * (2 ** (7 * i));
+    if (v > 0x7fffffff) throw new ImVarintError('IM varint 超出范围');
+    if (!(x & 0x80)) return { val: v, next: o };
+  }
+  throw new ImVarintError('IM varint 过长');
 }
 function numBytes(n) {
   const a = [];
@@ -65,8 +72,9 @@ function parseTLV(b) {
   const out = [];
   let o = 0;
   while (o < b.length) {
-    const t = readVarint(b, o); if (t.next > b.length) break; o = t.next;
-    const l = readVarint(b, o); if (l.next > b.length) break; o = l.next;
+    const t = readVarint(b, o); if (!t) break; o = t.next;
+    const l = readVarint(b, o); if (!l) break; o = l.next;
+    if (l.val > b.length - o) break;
     out.push({ tag: t.val, value: b.slice(o, o + l.val) });
     o += l.val;
   }
@@ -150,7 +158,8 @@ class ImClient extends EventEmitter {
     this.imDeviceId = cfg.imDeviceId || crypto.randomUUID().replace(/-/g, '').toUpperCase();
     this.connected = false;
     this._heartbeat = null;
-    this._seen = new Map();   // msgId -> 时间戳, 去重
+    this._seen = new Map();   // 去重键 -> 首次投递时间
+    this._seenLastSweep = 0;
     // ===== 存活检测 =====
     // 云端实例一挂好几天, NAT/中间设备会把空闲连接悄悄掐掉, 而 TCP 层可能很久都不报错。
     // 以前只看 connected 标志, 结果就是「界面显示已连接, 但一条新消息都收不到」。
@@ -214,12 +223,22 @@ class ImClient extends EventEmitter {
       if (this.rbuf.length < 2) return;
       let cmd, lo;
       if (this.rbuf[0] === 0xa0) { cmd = this.rbuf[1]; lo = 2; } else { cmd = this.rbuf[0] & 0x1f; lo = 1; }
-      const L = readVarint(this.rbuf, lo);
-      const total = L.next + L.val;
-      if (this.rbuf.length < total) return;
-      const payload = this.rbuf.slice(L.next, total);
-      this.rbuf = this.rbuf.slice(total);
-      this._onFrame(cmd, payload);
+      try {
+        const L = readVarint(this.rbuf, lo);
+        if (!L) return;
+        const total = L.next + L.val;
+        if (this.rbuf.length < total) return;
+        const payload = this.rbuf.slice(L.next, total);
+        this.rbuf = this.rbuf.slice(total);
+        this._onFrame(cmd, payload);
+      } catch (e) {
+        if (!(e instanceof ImVarintError)) throw e;
+        // 畸形 varint 无法安全定位下一帧；丢弃缓冲并重连，避免负长度死循环。
+        this.rbuf = Buffer.alloc(0);
+        log.warn('im', '收到畸形 IM 帧，断开连接并重连');
+        this._die();
+        return;
+      }
     }
   }
 
@@ -235,6 +254,7 @@ class ImClient extends EventEmitter {
       let c2, lo2;
       if (inner[0] === 0xa0) { c2 = inner[1]; lo2 = 2; } else { c2 = inner[0] & 0x1f; lo2 = 1; }
       const L2 = readVarint(inner, lo2);
+      if (!L2 || L2.val > inner.length - L2.next) return;
       this._dispatch(c2, inner.slice(L2.next, L2.next + L2.val));
       return;
     }
@@ -289,13 +309,24 @@ class ImClient extends EventEmitter {
     // 否则孩子连发两条「在吗」会被当成重复吞掉一条
     const ttl = msgId ? 300000 : 10000;
     const prev = this._seen.get(key);
-    if (prev && now - prev < ttl) {
+    if (prev !== undefined && now - prev < ttl) {
       log.debug('im', '收到重复下行消息，已按去重窗口跳过（不记录正文或会话标识）');
       return;
     }
+    // 过期后重新插入，使顺序反映最近一次投递，而非第一次出现的时间。
+    this._seen.delete(key);
     this._seen.set(key, now);
-    if (this._seen.size > 500) {
-      for (const [k, t] of this._seen) { if (now - t > 300000) this._seen.delete(k); }
+    // 500 条容易在一次历史同步中耗尽，使仍在 TTL 内的 push/sync 重复漏网。
+    // 保留有界内存：最多 10000 条；极端流量超过容量时仍可能提前淘汰。
+    if (this._seen.size > 10000) {
+      // 扫描有成本，持续超载时最多每秒扫描一次；按各自 TTL 清掉过期项。
+      if (!this._seenLastSweep || now - this._seenLastSweep >= 1000 || now < this._seenLastSweep) {
+        for (const [k, t] of this._seen) {
+          if (now - t >= (k.startsWith('m:') ? 300000 : 10000)) this._seen.delete(k);
+        }
+        this._seenLastSweep = now;
+      }
+      while (this._seen.size > 10000) this._seen.delete(this._seen.keys().next().value);
     }
     let body = null;
     try { body = JSON.parse(msgRaw.toString('utf8')); } catch (e) { /* 非 JSON */ }

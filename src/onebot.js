@@ -1184,12 +1184,18 @@ async function startOneBot({ cfg, ctx, conf: rawConf, onSave }) {
   async function startHttp() {
     if (!conf.http.enabled) return false;
     const srv = http.createServer((req, res) => {
-      const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
       const sendJson = (status, obj) => {
         const body = JSON.stringify(obj);
         res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
         res.end(body);
       };
+
+      let url;
+      try {
+        url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+      } catch (e) {
+        return sendJson(400, { status: 'failed', retcode: RC.BAD, data: null, message: '请求地址不合法' });
+      }
 
       if (!tokenOk(req, url, conf.http.token)) {
         log.warn('onebot', `HTTP 令牌无效 ip=${(req.socket && req.socket.remoteAddress) || '-'}`);
@@ -1246,7 +1252,7 @@ async function startOneBot({ cfg, ctx, conf: rawConf, onSave }) {
 
     httpServer = srv;
     const ok = await listenOn(srv, conf.http.port, conf.http.host, 'HTTP API');
-    if (ok) log.info('onebot', `HTTP API  http://${conf.http.host}:${conf.http.port}  令牌 ${conf.http.token}`);
+    if (ok) log.info('onebot', `HTTP API  http://${conf.http.host}:${conf.http.port}`);
     return ok;
   }
 
@@ -1259,7 +1265,13 @@ async function startOneBot({ cfg, ctx, conf: rawConf, onSave }) {
     });
 
     srv.on('upgrade', (req, socket) => {
-      const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+      let url;
+      try {
+        url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+      } catch (e) {
+        socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+        return;
+      }
       if (!tokenOk(req, url, conf.ws.token)) {
         log.warn('onebot', `WS 令牌无效 ip=${(socket.remoteAddress) || '-'}`);
         socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
@@ -1307,7 +1319,7 @@ async function startOneBot({ cfg, ctx, conf: rawConf, onSave }) {
 
     wsServer = srv;
     const ok = await listenOn(srv, conf.ws.port, conf.ws.host, 'WS 服务');
-    if (ok) log.info('onebot', `WS 服务  ws://${conf.ws.host}:${conf.ws.port}  令牌 ${conf.ws.token}`);
+    if (ok) log.info('onebot', `WS 服务  ws://${conf.ws.host}:${conf.ws.port}`);
     return ok;
   }
 

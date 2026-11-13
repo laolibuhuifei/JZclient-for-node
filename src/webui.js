@@ -12,6 +12,7 @@ const sso = require('./sso');
 const { ImClient } = require('./im');
 const { bufferEarlyMessages } = require('./im-early-messages');
 const { allowMessageSideEffects } = require('./im-message-freshness');
+const { buildChatTargets, chatIdsOf } = require('./chat-targets');
 const { selectBattery, selectOnline } = require('./watch-status-selection');
 const { chat: aiChat } = require('./ai');
 const aiTrigger = require('./ai-trigger');
@@ -21,6 +22,7 @@ const { loadImageSource, uploadImage, uploadVoice, uploadVideo, directVideo, pro
 const { fetchFavicon } = require('./favicon');
 const linkLib = require('./link-presets');
 const { startOneBot } = require('./onebot');
+const { createOnebotScope } = require('./onebot-scope');
 const bili = require('./bilibili');
 const biliBot = require('./bili-bot');
 const biliComment = require('./bili-comment');
@@ -260,33 +262,10 @@ async function loadLinkImage(src, limit) {
 
 // ===== 会话 ID 的归一化与匹配（纯函数，不碰网络，可以直接单测） =====
 //
-// 家庭群的 IM 会话 ID 服务端有两个字段：imDialogId（旧）和 upgradeImDialogId（新）。
-// 迁移期间线上三种状态都有：
-//   · 两个值相同              → 取哪个都行
-//   · 旧值为空、只剩 upgrade  → 只认旧值的话家庭群根本登记不进来
-//   · 旧值还在但已经过期      → 只认旧值的话群消息全部匹配失败
-//
-// 2026-11-09 那批用户「收不到手表消息」就是第三种：旧 ID 1128491383，
-// 手表发来的消息带新 ID 1128491384，差 1，严格相等直接匹配不上，消息被丢弃。
-//
-// 所以：所有候选都收进数组，发送用第一个（优先 upgrade），匹配时任一命中就算。
-
-function chatIdsOf(fd, family) {
-  const raw = [
-    fd && fd.upgradeImDialogId,
-    fd && fd.imDialogId,
-    family && family.upgradeImDialogId,
-    family && family.imDialogId,
-  ];
-  const out = [];
-  for (const v of raw) {
-    if (v === undefined || v === null) continue;
-    const s = String(v).trim();
-    if (!s || s === '0' || s === 'null' || s === 'undefined') continue;
-    if (out.indexOf(s) < 0) out.push(s);
-  }
-  return out;
-}
+// 家庭群的 ID 归一化和会话列表构建在 chat-targets.js（纯函数，可单测）：
+// 那里同时解决了「同一个家庭出现两条记录」和「一个家庭绑多块表只显示一块」。
+// 2026-11-09 那批用户「收不到手表消息」就是旧 ID 过期后严格相等匹配不上，
+// 所以匹配时任一 aliasIds 命中就算，发送用第一个（优先 upgrade）。
 
 // 把一条 IM 消息映射到会话 key（'s:xxx' / 'g:xxx'），认不出来返回 null
 function matchChatKey(targets, m) {
@@ -294,10 +273,12 @@ function matchChatKey(targets, m) {
   const did = String(m.dialogId == null ? '' : m.dialogId);
 
   if (did && did !== '0') {
-    const g = targets.find((t) => t.type === 'group'
+    const groups = targets.filter((t) => t.type === 'group'
       && (t.aliasIds && t.aliasIds.length ? t.aliasIds : [String(t.dialogId)])
         .some((x) => String(x) === did));
-    if (g) return g.key;
+    // 重叠别名无法可靠归属；绝不猜测，以免回复错群。
+    if (groups.length > 1) return null;
+    if (groups.length === 1) return groups[0].key;
   }
 
   // 单聊：按对方 imAccountId 匹配。
@@ -366,7 +347,10 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           model: w.model || '',
           number: w.number || '',
           battery: w.battery == null ? null : Number(w.battery),
-          online: w.online !== false && w.watchOnline !== false,
+          // 和界面同一套三态：字段缺失不能当在线（原来这里是 !== false，缺失就算在线，
+          // 与首页的「缺失当离线」正好相反，同一个插件会看到两种答案）
+          online: w.onlineStatus,
+          lastSeenAt: w.lastSeenAt || null,
           lastLocation: w.lastLocation || null,
         }));
       },
@@ -632,11 +616,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   let onebotKeys = new Map();         // watchId -> [会话 key], 该实例只推这些会话
   let watchNames = null;              // [{watchId, name}], 手表名 <-> 会话名 靠它对
 
-  // 单个实例的运行时上下文。scopeKeys 为空 = 没匹配到会话, 退化成不过滤(收全部),
-  // 免得机器人看起来是死的更难排查; 有值就只暴露这些会话
+  // 绑定手表的实例必须限制会话范围，未匹配时拒绝访问而不是暴露全部会话。
   function onebotCtx(watchId, scopeKeys) {
-    const keys = scopeKeys || null;
-    const scoped = !!(watchId && keys && keys.length);
+    const keys = scopeKeys || [];
+    const scoped = !!watchId;
+    const scope = createOnebotScope(watchId, keys);
     return {
       // 按手表的实例: self_id 用那块表自己的 IM 账号, 插件才分得清"哪块表在说话"
       selfId: () => {
@@ -651,9 +635,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       online: () => !!(im && im.connected),
       targets: async () => {
         const all = (await loadChatTargets()) || [];
-        return scoped ? all.filter((t) => keys.indexOf(t.key) >= 0) : all;
+        return scope.filter(all);
       },
-      send: (key, body) => sendChat(Object.assign({ key }, body)),
+      send: (key, body) => {
+        if (!scope.allows(key)) throw new Error('会话不在该手表的 OneBot 范围内');
+        return sendChat(Object.assign({}, body, { key }));
+      },
     };
   }
 
@@ -767,7 +754,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       if (!wc || !wc.enabled) continue;
       const keys = onebotKeys.get(String(wid)) || [];
       if (!keys.length) {
-        log.warn('onebot', `手表 ${wid} 没匹配到会话，暂时接收全部会话；请在「我的 → OneBot v11 接入」里手动指定`);
+        log.warn('onebot', `手表 ${wid} 没匹配到会话，已禁止访问会话；请在「我的 → OneBot v11 接入」里手动指定`);
       }
       const conf = {
         enabled: true,
@@ -1775,24 +1762,33 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     const wid = b.watchId || m.watchId || '';
     if (!wid) return;
     const o = parsePushContent(b);
+    // 仅记录平台通知的本地接收时间；通知可能延迟或由平台生成，不能证明设备在线。
+    // 同一条通知合并写盘，避免重复保存配置。
+    const now = Date.now();
 
     // 27 = 电量提醒 { battery }
     if (type === 27 && o && o.battery != null) {
-      setWatchStatus(wid, { battery: Number(o.battery), batteryAt: Date.now() });
+      setWatchStatus(wid, { lastSeenAt: now, battery: Number(o.battery), batteryAt: now });
       return;
     }
     // 11031 位置通知 / 39000010 实时位置动态
     if ((type === 11031 || type === 39000010) && o && (o.latitude != null || o.longitude != null)) {
       setWatchStatus(wid, {
+        lastSeenAt: now,
         lastLat: o.latitude,
         lastLng: o.longitude,
         lastAddress: o.poiNew || o.descNew || '',
-        lastLocAt: o.createTime || o.locationPushTime || Date.now(),
+        lastLocAt: o.createTime || o.locationPushTime || now,
       });
       return;
     }
     // 30 宝贝资料 / 35 绑定关系 / 47 宝贝基础信息: 标记需要刷新
-    if (type === 30 || type === 35 || type === 47) setWatchStatus(wid, { needRefresh: true });
+    if (type === 30 || type === 35 || type === 47) {
+      setWatchStatus(wid, { lastSeenAt: now, needRefresh: true });
+      return;
+    }
+    // 其它平台通知只记录接收时间，不推断手表在线。
+    setWatchStatus(wid, { lastSeenAt: now });
   }
 
   function setWatchStatus(wid, patch) {
@@ -2019,8 +2015,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         };
         onebots.forEach((inst, wid) => {
           const keys = onebotKeys.get(String(wid)) || [];
-          // 没匹配到会话(keys 为空)时退化成"收全部", 否则机器人看起来是死的, 更难排查
-          if (keys.length && keys.indexOf(key) < 0) return;
+          // 范围为空或不包含该会话时均不投递，避免跨手表泄露。
+          if (!createOnebotScope(wid, keys).allows(key)) return;
           try { inst.pushMessage(payload); } catch (e) {
             log.warn('onebot', `手表 ${wid} 事件推送失败: ` + (e && e.message ? e.message : e));
           }
@@ -2055,12 +2051,17 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           throw e;
         }
       }
+      // 接口回成功但内容是空的（刚绑表、平台抽风）也不能连：
+      // 连上就会把消息确认掉，可是一条都归档不了。
+      if (!chatTargets || !chatTargets.length) {
+        throw new Error('会话列表为空，暂不连接 IM');
+      }
       const prevImId = cfg.imAccountId;
       const c = new ImClient(cfg);
       // 握手期间服务端也可能推送消息；先监听、在身份就绪后再按序处理。
-      const early = bufferEarlyMessages(c, (m, wasBuffered) => {
-        // 同步帧可能在激活缓冲后才到达；未知时间的同步消息不能冒充实时指令。
-        const suppressAuto = (wasBuffered || m.source === 'sync') && !allowMessageSideEffects(m, Date.now());
+      const early = bufferEarlyMessages(c, (m) => {
+        // 对所有来源检查新鲜度；未知时间的同步消息不能冒充实时指令。
+        const suppressAuto = !allowMessageSideEffects(m, Date.now());
         onImMessage(m, suppressAuto);
       }, {
         onError: (e) => log.warn('im', '处理接收消息失败: ' + (e && e.message ? e.message : e)),
@@ -2150,41 +2151,16 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (imTimer.unref) imTimer.unref();
   }
 
-  // 家庭群的 IM 会话 ID 有两个字段：imDialogId（旧）和 upgradeImDialogId（新）。
-  // 迁移期间三种状态都有，所以全收成别名数组 —— 细节和线上踩坑记录见 chatIdsOf() 的注释。
+  // 会话列表的构建在 chat-targets.js：同一个家庭出现两条记录、一个家庭绑多块表，
+  // 这两种情况在那里统一处理（原来会重复显示、漏掉第二块表）。
   async function loadChatTargets() {
     if (chatTargets) return chatTargets;
     const data = ensure(await api.getDialogAccounts());
-    const targets = [];
-    (data.familyDialogs || []).forEach((fd) => {
-      const family = (fd.familyList && fd.familyList[0]) || {};
-      const accounts = family.accounts || [];
-      const watch = accounts.find((a) => a.accountType === 1);
-      if (watch && watch.imAccountId != null) {
-        targets.push({
-          key: 's:' + watch.imAccountId,
-          type: 'single',
-          name: watch.name || '手表',
-          sub: [watch.model, '单聊'].filter(Boolean).join(' '),
-          receiverId: watch.imAccountId,
-          peers: accounts,
-        });
-      }
-      const ids = chatIdsOf(fd, family);
-      if (ids.length) {
-        targets.push({
-          key: 'g:' + ids[0],        // 展示用主 ID（优先 upgrade）
-          type: 'group',
-          name: '家庭群',
-          sub: accounts.map((a) => a.name).filter(Boolean).join('、'),
-          dialogId: ids[0],          // 发送用，和匹配保持一致
-          aliasIds: ids,             // 匹配用：新旧 ID 全认
-          peers: accounts,
-        });
-      }
-    });
-    chatTargets = targets;
-    return targets;
+    const built = buildChatTargets(data.familyDialogs || []);
+    // 只缓存非空结果：接口这次回了空（刚绑表、平台抽风）时如果把 [] 缓存下来，
+    // 之后每次都命中空数组，ensureIM 会以为「已就绪」照样连，消息全部归档失败。
+    if (built.length) chatTargets = built;
+    return built;
   }
 
   // 微聊单条语音上限 60 秒, 超过就切开逐条发(阈值和 OneBot 那边保持一致)
@@ -2470,6 +2446,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         online: d.online,
         watchOnline: d.watchOnline,
         lossSwitch: d.lossSwitch != null ? Number(d.lossSwitch) : 0,
+        // 最近一次收到该表平台通知的本地时间，不代表设备采样或在线时间
+        lastSeenAt: st.lastSeenAt || null,
         lastLocation: st.lastLat != null ? { latitude: st.lastLat, longitude: st.lastLng, address: st.lastAddress || '', time: st.lastLocAt || null } : null,
       });
     }
@@ -3941,6 +3919,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         lastLng: st.lastLng != null ? st.lastLng : null,
         lastAddress: st.lastAddress || '',
         lastLocAt: st.lastLocAt || null,
+        lastSeenAt: st.lastSeenAt || null,
+        lastSeenAgo: st.lastSeenAt ? Math.max(0, Math.round((Date.now() - st.lastSeenAt) / 1000)) : null,
         online: w.online,
         watchOnline: w.watchOnline,
       });
@@ -4679,7 +4659,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   }
 
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    let url;
+    try {
+      url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, error: '请求地址不合法' });
+    }
     const parts = url.pathname.split('/').filter(Boolean);
 
     // 请求日志: 静态资源(字体/表情图)只在 debug 级别打印, 避免刷屏
@@ -4692,7 +4677,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         if (log.isEnabled('debug')) log.request(req.method, url.pathname, res.statusCode, ms, res._bytes);
         return;
       }
-      log.request(req.method, url.pathname + (url.search || ''), res.statusCode, ms, res._bytes, res._failed);
+      log.request(req.method, url.pathname, res.statusCode, ms, res._bytes, res._failed);
     });
 
     try {
@@ -4820,7 +4805,6 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   });
 
   log.info('webui', `服务已启动 http://${host}:${port}`);
-  log.info('webui', `访问令牌 ${AUTH_TOKEN}`);
   log.info('webui', `日志级别 ${log.levelName()}（WP_LOG=debug 看请求体细节，WP_LOG=warn 只看告警）`);
 
   // 会话列表必须先拉到: 收消息时要靠它把 dialogId/imAccountId 映射成会话 key,

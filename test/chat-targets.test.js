@@ -100,3 +100,55 @@ test('多余字段不外泄：targets 里不带合并用的中间状态', () => 
     assert.equal('old' in t, false);
   }
 });
+
+// 2026-11-14 用户反馈「绑了手表但聊天里没有它的会话」。
+// 排查到两个点：绑表后服务端缓存没失效（webui 侧已修），以及这里只读 familyList[0]。
+// familyList 是数组，只取第一组的话，服务端一旦把成员拆成多组推送，后面几组的表就整块消失。
+test('familyList 有多组时，每一组的表都要出现在会话列表里', () => {
+  const targets = buildChatTargets([{
+    imDialogId: 555,
+    upgradeImDialogId: 666,
+    familyList: [
+      { accounts: [watch(1001, '冉冉'), parent(9001)] },
+      { accounts: [watch(1002, '罗比特'), parent(9002)] },
+    ],
+  }]);
+  const singles = targets.filter((t) => t.type === 'single').map((t) => t.key).sort();
+  assert.deepEqual(singles, ['s:1001', 's:1002']);
+  // 群只建一个（群 ID 来自顶层，不按 familyList 拆）
+  assert.equal(targets.filter((t) => t.type === 'group').length, 1);
+  // 群成员名要把两组的家长都带上，否则用户看不到另一组是谁
+  assert.ok(targets.find((t) => t.type === 'group').sub.includes('家长9002'));
+});
+
+test('同一块表在多个 familyList 分组里重复出现时不会变成两个单聊', () => {
+  const w = watch(1001, '冉冉');
+  const targets = buildChatTargets([{
+    imDialogId: 555,
+    familyList: [
+      { accounts: [w, parent(9001)] },
+      { accounts: [w, parent(9002)] },
+    ],
+  }]);
+  assert.equal(targets.filter((t) => t.type === 'single').length, 1);
+});
+
+test('familyList 缺失 / 是空数组 / 元素没有 accounts 都不崩', () => {
+  const cases = [
+    { imDialogId: 555 },
+    { imDialogId: 555, familyList: [] },
+    { imDialogId: 555, familyList: [{}] },
+    { imDialogId: 555, familyList: [null] },
+  ];
+  for (const c of cases) {
+    const targets = buildChatTargets([c]);
+    assert.equal(targets.filter((t) => t.type === 'group').length, 1, JSON.stringify(c));
+    assert.equal(targets.filter((t) => t.type === 'single').length, 0, JSON.stringify(c));
+  }
+});
+
+test('familyList 不是数组时当作没有成员，但群照样建', () => {
+  const targets = buildChatTargets([{ imDialogId: 555, familyList: 'oops' }]);
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].type, 'group');
+});

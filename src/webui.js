@@ -616,6 +616,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   // 多出一个群之后，AI / OneBot / B 站的会话勾选列表里永远看不到它，
   // 只能重启实例。60 秒过期一次，和 watchList 的缓存节奏对齐。
   let chatTargetsAt = 0;
+  // 刚绑完表的一小段时间里，服务端可能还没把新的家庭群/单聊算出来。
+  // 这期间每进来一次都重新拉，别拿 60 秒内的旧结果糊弄用户。
+  let chatTargetsForceUntil = 0;
   const CHAT_TARGETS_TTL = 60000;
   const chatLog = new Map();
   let onebots = new Map();            // watchId -> 实例(每块表一套端口/令牌/会话范围)
@@ -1813,6 +1816,10 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
   // 会话列表还没拉到时进来的消息会被丢掉, 用这个计数做限流告警
   const lastDropWarn = { at: 0, n: 0 };
+  // 「消息对不上会话 → 顺手刷一次列表」的限流。
+  // 不能每次都刷：如果某个会话的 ID 永远对不上（服务端换了 ID 形态），
+  // 那每来一条消息就打一次接口，等于拿平台当轮询目标。
+  const lastRefreshTry = { at: 0 };
 
   function onImMessage(m, suppressAuto) {
     const b = m.body || {};
@@ -1957,7 +1964,14 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
     if (!text) return;
     if (!key) {
-      // 会话列表没就绪(或这条消息来自没登记过的会话)时消息会被丢掉。
+      // 收到的消息对不上任何已知会话 —— 最常见的原因是「刚绑了表，
+      // 会话列表还是旧的」（原版靠 IM 推送更新，我们只能 HTTP 拉，会有延迟）。
+      // 这里顺手异步刷一次列表，下一条消息就能归档；限流 30 秒，
+      // 免得会话 ID 永远对不上时每来一条消息就打一次接口。
+      if (Date.now() - lastRefreshTry.at > 30e3) {
+        lastRefreshTry.at = Date.now();
+        loadChatTargets(true).catch(() => {});
+      }
       // 静默丢弃最难排查, 这里限流告警一句。
       // 2026-11-09 补：把「我们手里到底有哪些会话 ID」一起打出来 ——
       // 上次就是群 ID 差 1，日志里只有消息的 dialogId，看不出是 ID 对不上。
@@ -2169,8 +2183,18 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   // force=true 绕过期时间。默认 60 秒过期：用户新绑一块表、服务端多出一个群之后，
   // 界面上（AI 的会话勾选、OneBot/B 站的范围选择）最迟一分钟后就能看到，
   // 不用重启实例。以前是「拿到一次就一直用」，新会话永远不出现。
+  // 绑表/解绑/切账号后立刻让会话列表过期。
+  // 光靠 60 秒 TTL 不够：用户绑完表就在聊天页等着，不会自己切走再切回来。
+  function invalidateChatTargets() {
+    chatTargets = null;
+    chatTargetsAt = 0;
+    // 服务端建 IM 会话有一两秒延迟，30 秒内不信缓存（每次进来重拉一次）
+    chatTargetsForceUntil = Date.now() + 30e3;
+  }
+
   async function loadChatTargets(force) {
-    if (chatTargets && !force && Date.now() - chatTargetsAt < CHAT_TARGETS_TTL) return chatTargets;
+    const bypass = force || Date.now() < chatTargetsForceUntil;
+    if (chatTargets && !bypass && Date.now() - chatTargetsAt < CHAT_TARGETS_TTL) return chatTargets;
     const data = ensure(await api.getDialogAccounts());
     const built = buildChatTargets(data.familyDialogs || []);
     // 只缓存非空结果：接口这次回了空（刚绑表、平台抽风）时如果把 [] 缓存下来，
@@ -3726,7 +3750,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         pushChat(key, { self: true, text: '[图片]', kind: 'photo', url, time: Date.now() });
         return ok(res, { result: true, url });
       }
-      const targets = await loadChatTargets();
+      const targets = await loadChatTargets(query.get('refresh') === '1');
       const st = imStatus();
       return ok(res, {
         targets: targets.map((t) => ({
@@ -3860,11 +3884,16 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           // 迁移接口本身可能已经建立了绑定关系
           if (transferred && /已绑定|已经绑定|重复/.test(cj.desc || '')) {
             cache.at = 0;
+            invalidateChatTargets();
             return ok(res, { result: true, transferred });
           }
           throw new Error(`[${cj.code}] ${cj.desc || '绑定失败'}`);
         }
         cache.at = 0;
+        // 新绑的表在服务端会立刻多出一个家庭群 + 一个单聊。
+        // 以前这里只清 watchList 的缓存，chatTargets 还留着旧的一份（最多 60 秒，
+        // 1.3.7 之前是永久），用户绑完表切到聊天页还是看不到它 —— 只能重启实例。
+        invalidateChatTargets();
         return ok(res, { result: true, transferred });
       }
       // 非旧表管理员做迁移: 给旧表管理员发验证码
@@ -4671,6 +4700,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       if (!relationId) throw new Error('缺少关系 ID');
       ensure(await api.unbind(relationId));
       cache.at = 0;
+      invalidateChatTargets();
       return ok(res, { result: true });
     }
 

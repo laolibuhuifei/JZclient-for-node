@@ -60,8 +60,18 @@ function buildChatTargets(familyDialogs) {
   }
 
   (familyDialogs || []).forEach((fd) => {
-    const family = (fd && fd.familyList && fd.familyList[0]) || {};
-    const accounts = family.accounts || [];
+    // familyList 是数组，语义上和「这个家庭下的成员分组」一致。
+    // 以前只读 [0]：服务端哪天多给一组（比如家长组/孩子组分开下发），
+    // 后面那组的表就会整块消失 —— 用户看到的正是「绑了表但没有会话」。
+    // 这里全量摊平，重复的成员靠下面的 byKey 去重，不会多出会话。
+    const families = (fd && Array.isArray(fd.familyList)) ? fd.familyList : [];
+    const accounts = [];
+    families.forEach((f) => {
+      (f && Array.isArray(f.accounts) ? f.accounts : []).forEach((a) => {
+        if (a && accounts.indexOf(a) < 0) accounts.push(a);
+      });
+    });
+    const family = families[0] || {};
 
     // 一个家庭里的每块表都要有自己的单聊，不能只取第一块
     watchAccounts(accounts).forEach((watch) => {

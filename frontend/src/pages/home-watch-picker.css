@@ -79,6 +79,10 @@
   .home-watch-primary .home-watch-battery-outline { display: block; }
   .home-watch-primary .home-watch-battery-number { top: 6px; }
 }
+@container home-watch-choice (min-width: 360px) {
+  :is(.page-home, .device-watch-picker) .home-watch-primary .home-battery-dial { width: 72px; height: 72px; }
+  :is(.page-home, .device-watch-picker) .home-watch-primary .home-battery-dial > strong { font-size: 22px; }
+}
 @media (min-width: 1000px) and (orientation: landscape) {
   .page-home .home-watch-picker:has(.home-watch-primary > li:only-child) { width: min(100%, 420px); margin-left: 0; margin-right: auto; }
 }

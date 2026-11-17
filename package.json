@@ -9,6 +9,11 @@
   },
   "scripts": {
     "start": "node bin/jzclient.js",
+    "webui": "node bin/webui.js",
+    "dev:webui": "npm --prefix frontend run dev",
+    "build:webui": "npm --prefix frontend run build",
+    "typecheck:webui": "npm --prefix frontend run typecheck",
+    "test:webui": "npm --prefix frontend run test",
     "test": "node --test"
   },
   "keywords": [

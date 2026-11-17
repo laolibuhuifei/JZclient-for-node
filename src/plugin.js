@@ -650,6 +650,7 @@ class Plugin {
         //   { key, kind:'text', text }
         //   { key, kind:'image', src:'/本地/路径.png' }
         //   { key, kind:'voice', src }
+        //   { key, kind:'video', buf:Buffer, filename:'clip.mp4' }
         //   { key, kind:'location', latitude, longitude, poi }
         //   { key, kind:'link', url, desc }
         async send(body) {

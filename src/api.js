@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const { md5, aesEcbEncrypt, rsaPkcs1Encrypt, derToPem, genAesKey } = require('./crypto');
 const site = require('./site');
 const log = require('./logger');
+const { buildDangerAreaDetail } = require('./guard-area');
 
 const API_HOST = site.api.mainHost;
 // 部分业务走独立网关
@@ -62,7 +63,10 @@ class ApiClient {
   constructor(cfg) {
     this.cfg = cfg;
     this.host = cfg.apiHost || API_HOST;
+    this._expiredToken = null;
   }
+
+  get sessionExpired() { return !!this.cfg.token && this._expiredToken === this.cfg.token; }
 
   get authId() {
     if (this.cfg.authId) return String(this.cfg.authId);
@@ -105,6 +109,7 @@ class ApiClient {
   }
 
   async request(method, urlPath, bodyObj, opts = {}) {
+    const sessionToken = this.cfg.token;
     const bodyPlain = bodyObj ? JSON.stringify(bodyObj) : '';
     let resp = await this.send(method, urlPath, bodyPlain, opts.accountId, false, opts.host);
     // RSA 公钥轮换时自动刷新并重试一次
@@ -112,6 +117,16 @@ class ApiClient {
       this.cfg.bizRsaKey = null;
       await this.ensureRsaKey();
       resp = await this.send(method, urlPath, bodyPlain, opts.accountId, false, opts.host);
+    }
+    const desc = String(resp.json?.desc || '');
+    const sessionProbe = method === 'GET' && ['/dialogaccount/merge/accounts', '/mobileinit/authid'].includes(String(urlPath).split('?')[0]);
+    // The platform also uses 000003 for invalid form parameters and RSA rotation.
+    // A parameter error only establishes expiry on a session read with no form input.
+    const expired = /token\s+(?:is\s+)?(?:invalid|expired)|(?:登录|票据|会话).*(?:失效|过期)|未登录/i.test(desc)
+      || (sessionProbe && resp.json?.code === '000003' && /request parameter is invalid|token/i.test(desc) && !/rsaKey/i.test(desc));
+    if (sessionToken && this.cfg.token === sessionToken && expired) {
+      this._expiredToken = sessionToken;
+      resp.parentSessionExpired = true;
     }
     return resp;
   }
@@ -404,13 +419,15 @@ class ApiClient {
     return this.request('POST', '/allDayGuard/queryDangerArea', { watchId }, { host: LOCATION_HOST });
   }
 
-  // 添加危险区域(圆形: 一个中心点 + 半径)
-  addDangerArea({ watchId, latitude, longitude, radius }) {
+  // 界面选择圆形范围，平台要求至少三个点组成的多边形边界。
+  addDangerArea({ watchId, latitude, longitude, radius, areaPic }) {
+    if (typeof areaPic !== 'string' || !areaPic.trim()) throw new Error('区域截图不能为空，请重新生成地图截图。');
+    const areaDetail = buildDangerAreaDetail({ latitude, longitude, radius });
     return this.request('POST', '/allDayGuard/addDangerArea', {
       watchId,
       mapType: 0,
-      areaPic: '',
-      areaDetail: [{ x: latitude, y: longitude, r: radius }],
+      areaPic,
+      areaDetail,
     }, { host: LOCATION_HOST });
   }
 

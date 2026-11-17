@@ -1,0 +1,84 @@
+.guard-place-dialog { max-width: 940px; }
+.guard-place-dialog .modal-head { padding-bottom: 18px; }
+.guard-place-dialog .modal-head p { max-width: 56ch; }
+.guard-place-dialog .modal-body { padding-bottom: 20px; }
+.guard-area-form { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.guard-place-picker { display: grid; grid-template-columns: minmax(230px, .8fr) minmax(0, 1.5fr); grid-template-areas: "search heading" "search map" "search selection"; gap: 16px 22px; min-width: 0; align-items: start; }
+.guard-area-fieldset { display: contents; margin: 0; padding: 0; border: 0; min-width: 0; }
+.guard-place-search { grid-area: search; min-width: 0; }
+.guard-place-search-row { display: flex; align-items: flex-end; gap: 10px; min-width: 0; flex-wrap: wrap; }
+.guard-place-search-row > .field { flex: 1 1 100%; min-width: 0; }
+.guard-place-search-row > .button { min-height: 46px; flex: 1; padding-inline: 18px; }
+.guard-place-search-row > .button-icon { flex: none; width: 44px; min-width: 44px; padding-inline: 0; }
+.guard-place-search-hint, .guard-place-search-status, .guard-place-search-empty, .guard-place-result-count { margin: 10px 0 0; font-size: 14px; line-height: 1.65; color: var(--md-on-surface-variant); }
+.guard-place-search-error { display: flex; align-items: center; gap: 12px; margin-top: 12px; color: var(--md-error, var(--danger)); }
+.guard-place-search-error p { flex: 1; margin: 0; font-size: 15px; line-height: 1.6; }
+.guard-place-search-error .button { flex: none; color: inherit; }
+.guard-place-results { display: flex; flex-direction: column; max-height: 284px; margin: 12px 0 0; padding: 0; list-style: none; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--md-outline) transparent; overscroll-behavior: contain; }
+.guard-place-results > li { min-width: 0; }
+.guard-place-results button { display: flex; align-items: center; gap: 12px; min-height: 64px; width: 100%; padding: 12px 14px; border: 0; border-radius: 12px; background: transparent; color: var(--md-on-surface); text-align: left; }
+.guard-place-results button > svg { flex: none; color: var(--md-primary); }
+.guard-place-results button > span { flex: 1; min-width: 0; }
+.guard-place-results strong { display: block; font-size: 17px; line-height: 1.5; font-weight: 400; overflow-wrap: anywhere; }
+.guard-place-results small { display: block; margin-top: 3px; font-size: 14px; line-height: 1.6; color: var(--md-on-surface-variant); overflow-wrap: anywhere; }
+.guard-place-results button:hover:not(:disabled) { background: var(--md-container); }
+.guard-place-results button[aria-pressed=true] { background: var(--md-primary-container); color: var(--md-on-primary-container); }
+.guard-place-results button[aria-pressed=true] small { color: var(--md-on-primary-container); }
+.guard-place-results button:disabled { opacity: .55; }
+.guard-place-results button:focus-visible { outline: 3px solid var(--md-primary); outline-offset: -3px; }
+.guard-place-map-heading { grid-area: heading; display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 6px 16px; }
+.guard-place-map-heading h3 { margin: 0; font-size: 18px; font-weight: 400; line-height: 1.5; }
+.guard-place-map-heading p { margin: 0; font-size: 14px; line-height: 1.6; color: var(--md-on-surface-variant); }
+.guard-place-picker .location-map { grid-area: map; height: 360px; border-radius: 16px; }
+.guard-place-selection { grid-area: selection; display: flex; align-items: flex-start; gap: 12px; min-width: 0; color: var(--md-on-surface-variant); }
+.guard-place-selection > svg { margin-top: 3px; color: var(--md-primary); }
+.guard-place-selection > div { min-width: 0; }
+.guard-place-selection strong { display: block; font-size: 17px; font-weight: 400; line-height: 1.5; color: var(--md-on-surface); }
+.guard-place-selection p { margin: 5px 0 0; font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
+.guard-place-coordinates { font-variant-numeric: tabular-nums; }
+.guard-area-radius { display: flex; align-items: center; gap: 20px; min-width: 0; padding-top: 18px; border-top: 1px solid var(--md-outline-variant); }
+.guard-area-radius > .field { flex: 0 1 220px; min-width: 100px; }
+.guard-area-radius-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; }
+.guard-area-radius-label > label { color: var(--md-on-surface); font-size: 16px; line-height: 1.5; }
+.guard-radius-info-button { display: inline-grid; place-items: center; flex: none; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--md-primary); cursor: pointer; }
+.guard-radius-info-button:hover:not(:disabled), .guard-radius-info-button[aria-expanded="true"] { background: var(--md-primary-container); color: var(--md-on-primary-container); }
+.guard-radius-info-button:focus-visible { outline: 3px solid var(--md-primary); outline-offset: 2px; }
+.guard-radius-info-button:disabled { opacity: .38; cursor: not-allowed; }
+.guard-radius-info-popover { display: none; position: fixed; inset: auto; left: var(--radius-hint-left, 16px); top: var(--radius-hint-top, 16px); width: var(--radius-hint-width, 280px); max-height: min(160px, calc(var(--ui-viewport-height, 100dvh) - 32px)); margin: 0; padding: 16px 18px; border: 0; border-radius: 16px; background: var(--md-container-high, var(--md-container-low)); color: var(--md-on-surface); box-shadow: 0 8px 28px #0003; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--md-outline) transparent; font-family: inherit; outline: none; }
+.guard-radius-info-popover:popover-open { display: block; }
+.guard-radius-info-popover[data-fallback-open="true"] { display: block; z-index: 1100; }
+.guard-radius-info-popover p { margin: 0; font-size: 15px; line-height: 1.7; }
+.guard-place-dialog .modal-footer .button-primary { min-width: 118px; }
+.location-map-center-target { position: absolute; z-index: 1; top: 50%; left: 50%; width: 20px; height: 20px; transform: translate(-50%, -50%); border: 2px solid var(--md-on-surface); border-radius: 50%; pointer-events: none; background: color-mix(in srgb, var(--md-container-low) 75%, transparent); }
+.location-map-center-target::before, .location-map-center-target::after { content: ''; position: absolute; background: var(--md-on-surface); }
+.location-map-center-target::before { height: 2px; width: 28px; left: -6px; top: 7px; }
+.location-map-center-target::after { height: 28px; width: 2px; left: 7px; top: -6px; }
+.location-map-pick-center { position: absolute; z-index: 3; bottom: 16px; left: 16px; display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 10px 16px; border: 0; border-radius: 999px; background: var(--md-primary); color: var(--md-on-primary); font-size: 15px; line-height: 1.5; box-shadow: 0 4px 16px #0002; }
+.location-map-pick-center:hover:not(:disabled) { background: color-mix(in srgb, var(--md-primary) 90%, var(--md-on-primary)); }
+.location-map-pick-center:disabled { opacity: .55; }
+.location-map[data-selectable=true] .location-map-unavailable { bottom: 76px; }
+
+@media (max-width: 767px) {
+  .guard-place-picker { display: flex; flex-direction: column; gap: 18px; align-items: stretch; }
+  .guard-place-dialog .modal-body { padding-bottom: 18px; }
+  .guard-place-search-row { gap: 8px; flex-wrap: wrap; }
+  .guard-place-search-row > .field { flex-basis: 100%; }
+  .guard-place-search-row > .button:not(.button-icon) { flex: 1; min-height: 46px; }
+  .guard-place-search-row > .button-icon { min-height: 46px; }
+  .guard-place-search-hint { margin-top: 8px; }
+  .guard-place-results { max-height: 204px; }
+  .guard-place-results button { padding: 12px 10px; gap: 10px; }
+  .guard-place-map-heading { align-items: flex-start; flex-direction: column; }
+  .guard-place-picker .location-map { height: 320px; }
+  .guard-area-radius { gap: 14px; align-items: flex-start; }
+  .guard-area-radius > .field { flex-basis: 145px; }
+  .location-map-pick-center { left: 10px; bottom: 14px; font-size: 14px; padding-inline: 12px; }
+}
+
+@media (max-width: 359px) {
+  .guard-place-search-error { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .guard-area-radius { align-items: stretch; flex-direction: column; gap: 8px; }
+  .guard-area-radius > .field { flex: auto; }
+  .guard-place-dialog .modal-footer { gap: 8px; }
+  .guard-place-dialog .modal-footer > .button { padding-inline: 16px; }
+}

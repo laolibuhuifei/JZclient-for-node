@@ -1,0 +1,84 @@
+.device-data-card-title { display: flex; align-items: center; gap: 10px; }
+.device-data-card-title > svg { color: var(--md-primary); }
+.device-data-symbol { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 14px; flex-shrink: 0; color: var(--md-primary); background: var(--md-primary-container); }
+
+.profile-identity-card { background: var(--md-primary-container); color: var(--md-on-primary-container); }
+.profile-identity { display: flex; align-items: center; flex-wrap: wrap; gap: 18px; }
+.profile-avatar { width: 64px; height: 64px; border-radius: 20px; background: var(--md-container-low); }
+.watch-avatar { display: grid; place-items: center; overflow: hidden; }
+.watch-avatar > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.profile-identity-copy { flex: 1; min-width: 120px; }
+.profile-identity-copy h2 { margin: 0; font-size: 26px; font-weight: 400; overflow-wrap: anywhere; }
+.profile-identity-copy p { margin: 6px 0 0; font-size: 16px; color: var(--md-on-primary-container); }
+.profile-identity .badge { background: var(--md-container-low); }
+.profile-form-layout { display: flex; flex-direction: column; gap: 20px; }
+.profile-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; border: 0; margin: 0; padding: 0; min-width: 0; }
+.profile-fields .profile-basic-card { grid-column: 1 / -1; }
+.profile-fields .form-grid { align-items: start; }
+.profile-save-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 8px 4px; }
+.profile-save-row p { margin: 0; color: var(--md-on-surface-variant); font-size: 15px; }
+
+.health-layout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: stretch; }
+.health-summary-card { grid-column: 1 / -1; background: var(--md-primary-container); color: var(--md-on-primary-container); }
+.health-summary-card .card-head .badge { background: var(--md-container-low); }
+.device-health-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 28px; }
+.health-page .device-health-summary p { margin: 0; padding: 0; font-size: 18px; line-height: 1.8; }
+.health-sport-readings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.health-sport-reading { min-width: 0; padding: 6px 0; }
+.health-sport-reading > span { display: block; color: var(--md-on-surface-variant); font-size: 15px; }
+.health-sport-reading > strong { display: block; font-size: 32px; font-weight: 400; line-height: 1.5; margin-top: 6px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.health-sport-reading small { font-size: 15px; margin-left: 8px; color: var(--md-on-surface-variant); }
+.health-sport-reading p { margin: 4px 0 0; color: var(--md-on-surface-variant); font-size: 15px; }
+.health-sleep-summary { margin: 0; font-size: 19px; line-height: 1.9; }
+.health-records { max-height: 360px; padding-right: 4px; }
+.health-records .device-data-rows > div { align-items: center; }
+.health-records .device-data-rows dt { font-size: 14px; }
+.health-measurement { display: inline-flex; align-items: baseline; gap: 7px; color: var(--md-on-surface); font-size: 24px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.health-measurement small { font-size: 14px; color: var(--md-on-surface-variant); white-space: nowrap; }
+.health-record-note { font-size: 14px; line-height: 1.7; color: var(--md-on-surface-variant); margin: 16px 0 0; }
+.health-page .empty-state { min-height: 156px; padding-block: 16px; }
+
+.hidden-information-group { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.hidden-section-heading { display: flex; align-items: center; gap: 14px; padding: 0 2px; }
+.hidden-section-heading > div { min-width: 0; }
+.hidden-section-heading h2 { font-size: 23px; font-weight: 400; margin: 0; }
+.hidden-section-heading p { color: var(--md-on-surface-variant); margin: 4px 0 0; font-size: 15px; }
+.hidden-information-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: start; }
+.hidden-empty-copy { margin: 0; color: var(--md-on-surface-variant); font-size: 16px; }
+.hidden-detail-list, .hidden-authorize-list { list-style: none; margin: 0; padding: 0; }
+.hidden-detail-list > li { padding: 12px 0; border-bottom: 1px solid var(--md-outline); overflow-wrap: anywhere; font-size: 16px; }
+.hidden-detail-list > li:first-child { padding-top: 0; }
+.hidden-detail-list > li:last-child { border-bottom: 0; padding-bottom: 0; }
+.hidden-authorize-list > li { display: flex; align-items: center; gap: 14px; justify-content: space-between; padding: 14px 0; border-bottom: 1px solid var(--md-outline); }
+.hidden-authorize-list > li:first-child { padding-top: 0; }
+.hidden-authorize-list > li:last-child { border-bottom: 0; padding-bottom: 0; }
+.hidden-authorize-list > li > div { min-width: 0; overflow-wrap: anywhere; }
+.hidden-authorize-list strong { font-size: 17px; font-weight: 400; }
+.hidden-authorize-list p { margin: 4px 0 0; font-size: 14px; color: var(--md-on-surface-variant); }
+.hidden-notice-content { margin: 0; font-size: 16px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; }
+.hidden-record-disclosure { margin-top: 18px; border-top: 1px solid var(--md-outline); }
+.hidden-record-disclosure summary { display: flex; align-items: center; gap: 12px; justify-content: space-between; min-height: 48px; color: var(--md-primary); font-size: 15px; cursor: pointer; list-style: none; }
+.hidden-record-disclosure summary::-webkit-details-marker { display: none; }
+.hidden-record-disclosure[open] summary > svg { transform: rotate(180deg); }
+.hidden-shutdown-records { display: flex; flex-direction: column; gap: 16px; padding-top: 6px; }
+.hidden-shutdown-records > div { background: var(--md-surface); border-radius: 16px; padding: 12px 16px; }
+
+@media (max-width: 767px) {
+  .profile-fields, .health-layout, .hidden-information-grid { grid-template-columns: minmax(0, 1fr); }
+  .profile-identity { gap: 14px; }
+  .profile-avatar { width: 52px; height: 52px; border-radius: 16px; }
+  .profile-identity-copy h2 { font-size: 24px; }
+  .profile-identity-copy p { font-size: 15px; }
+  .profile-save-row { flex-wrap: wrap; gap: 14px; padding-inline: 0; }
+  .profile-save-row > .button { width: 100%; }
+  .device-health-summary { grid-template-columns: minmax(0, 1fr); }
+  .health-page .device-health-summary p { font-size: 17px; }
+  .health-sport-reading > strong { font-size: 29px; }
+  .health-records .device-data-rows > div { flex-direction: row; }
+  .health-records .device-data-rows dd { text-align: right; }
+  .health-records .device-data-rows dt { max-width: none; }
+  .health-measurement { font-size: 22px; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+  .health-sleep-summary { font-size: 18px; }
+  .hidden-section-heading { align-items: flex-start; }
+  .hidden-section-heading h2 { font-size: 22px; }
+}

@@ -8,7 +8,7 @@
 .page-home .home-location-actions > .button { min-height: 44px; padding: 8px 10px; font-size: 15px; gap: 6px; }
 .page-home .home-location-actions > .button-icon { width: 44px; height: 44px; min-width: 44px; padding: 0; }
 .home-location-preview .location-map { height: var(--home-location-map-height); min-height: var(--home-location-map-height); border-radius: 16px; }
-.home-location-preview .location-map-viewport { touch-action: pan-y; background-image: none; }
+.home-location-preview .location-map-viewport { touch-action: none; background-image: none; }
 .home-location-preview .location-map-tools { right: 10px; top: 10px; padding: 3px; border-radius: 14px; }
 .home-location-preview .location-map-tools button { width: 44px; height: 44px; }
 .home-location-preview .location-map-pin { background: var(--md-primary, var(--primary)); color: var(--md-on-primary, var(--primary-foreground)); }

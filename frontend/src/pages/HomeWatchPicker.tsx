@@ -38,6 +38,7 @@ export default function HomeWatchPicker({ watches, selectedId, onSelect, onInfo,
   if (variant !== 'compact' && selected && !primary.some(watch => String(watch.watchId) === selectedId)) primary[1] = selected;
   const remaining = watches.filter(watch => !primary.some(item => String(item.watchId) === String(watch.watchId)));
   const showFullName = watches.length === 1;
+  const singleNameLength = showFullName ? Array.from(primary[0]?.name || '未命名手表').length : 0;
 
   function releaseRoom() {
     pageRoom.current?.remove();
@@ -107,7 +108,8 @@ export default function HomeWatchPicker({ watches, selectedId, onSelect, onInfo,
     onInfo(id);
   }
 
-  return <div className={`home-watch-picker${variant !== 'home' ? ` home-watch-picker-${variant}` : ''}`} ref={picker}>
+  return <div className={`home-watch-picker${variant !== 'home' ? ` home-watch-picker-${variant}` : ''}`} ref={picker}
+    style={singleNameLength ? { '--home-watch-single-ch': singleNameLength } as React.CSSProperties : undefined}>
     <div className="home-watch-row" data-has-more={remaining.length > 0}>
       <ul className="home-watch-primary" aria-label="选择当前手表">{primary.map(watch => <li key={watch.watchId}>
         <WatchChoice watch={watch} selected={String(watch.watchId) === selectedId} onSelect={() => onSelect(String(watch.watchId))} onInfo={() => onInfo(String(watch.watchId))} showFullName={showFullName} />

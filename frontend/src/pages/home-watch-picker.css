@@ -4,7 +4,7 @@
 .home-watch-primary, .home-watch-overflow { list-style: none; margin: 0; padding: 0; }
 .home-watch-primary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; min-width: 0; }
 .home-watch-primary:has(> li:only-child) { grid-template-columns: minmax(0, 1fr); }
-.page-home .home-watch-picker:has(.home-watch-primary > li:only-child) { width: min(100%, 320px); margin-left: 0; }
+.page-home .home-watch-picker:has(.home-watch-primary > li:only-child) { width: min(100%, clamp(276px, calc((var(--home-watch-single-ch, 7) * 1.36em) + 11.625rem), 380px)); margin-left: 0; }
 .home-watch-primary > li, .home-watch-overflow > li { min-width: 0; }
 .home-watch-primary > li { container-type: inline-size; container-name: home-watch-choice; }
 :is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-card { position: relative; isolation: isolate; display: flex; width: 100%; height: 100%; min-width: 0; min-height: 104px; align-items: center; justify-content: space-between; gap: 12px; padding: 16px; border: 1px solid var(--md-outline); border-radius: 16px; text-align: left; color: var(--md-on-surface); background: var(--md-surface); white-space: normal; transition: background-color 160ms ease-out, transform 160ms ease-out; }
@@ -84,7 +84,7 @@
   :is(.page-home, .device-watch-picker) .home-watch-primary .home-battery-dial > strong { font-size: 22px; }
 }
 @media (min-width: 1000px) and (orientation: landscape) {
-  .page-home .home-watch-picker:has(.home-watch-primary > li:only-child) { width: min(100%, 420px); margin-left: 0; margin-right: auto; }
+  .page-home .home-watch-picker:has(.home-watch-primary > li:only-child) { margin-right: auto; }
 }
 @media (prefers-reduced-motion: reduce) {
   :is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-card, .home-watch-more > svg { transition: none; }

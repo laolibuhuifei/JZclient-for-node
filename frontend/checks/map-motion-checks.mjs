@@ -80,6 +80,15 @@ async function pointer(element, type, clientX, clientY) {
   await act(async () => element.dispatchEvent(event));
 }
 
+async function touch(element, type, clientX, clientY) {
+  const event = new element.ownerDocument.defaultView.Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'touches', {
+    value: type === 'touchend' ? [] : [{ clientX, clientY, identifier: 1, target: element }],
+  });
+  await act(async () => element.dispatchEvent(event));
+  return event;
+}
+
 async function wheel(element, deltaY, clientX = 610, clientY = 340) {
   const event = new element.ownerDocument.defaultView.WheelEvent('wheel', { deltaY, clientX, clientY, bubbles: true, cancelable: true });
   await act(async () => element.dispatchEvent(event));
@@ -393,6 +402,24 @@ test('90%显示比例下，地图选点、拖动和滚轮仍匹配可见坐标�
   assert.equal(controls.picked.length, 1, '拖动不会新增选点');
   assertGeometry(ui, controls);
   assert.equal(ui.requests.length, 0);
+});
+
+test('手机地图内滑动由地图接管，不带动父页面滚动或触发浏览器下拉刷新', async t => {
+  const controls = {};
+  const ui = await mount(t, mapHarness(controls), undefined, .9);
+  const start = await touch(viewport(ui), 'touchstart', 360, 300);
+  assert.equal(start.defaultPrevented, true, '触摸地图开始拖动时不应把手势交给页面滚动');
+  await pointer(viewport(ui), 'pointerdown', 360, 300);
+  const move = await touch(viewport(ui), 'touchmove', 360, 220);
+  assert.equal(move.defaultPrevented, true, '纵向拖动地图时不应带动父页面');
+  await pointer(viewport(ui), 'pointermove', 360, 220);
+  await pointer(viewport(ui), 'pointerup', 360, 220);
+  const end = await touch(viewport(ui), 'touchend', 360, 220);
+  assert.equal(end.defaultPrevented, false, '手势结束后不应拦截正常点击');
+  assert.equal(controls.picked.length, 0, '拖动不应误选地图中心');
+  await act(async () => controls.setDisabled(true));
+  await pointer(viewport(ui), 'pointerdown', 360, 300);
+  await act(async () => ui.close());
 });
 
 test('新层级尚未加载时保留已加载底图，快速缩放不会提前移除旧影像', async t => {

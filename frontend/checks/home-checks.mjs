@@ -296,6 +296,21 @@ test('主页切换手表后，数据刷新及位置、详情、守护入口保�
   } finally { await home.close(); }
 });
 
+test('单设备名称为卡片留出完整显示宽度，不占满首页主栏', async t => {
+  const system = fixtureSystem();
+  system.account.watches = [{ watchId: 'watch-a', name: '桉桉也是喵cat', model: 'Z8', battery: 72, online: true }];
+  system.account.watchCount = 1;
+  const home = await mountHome(t, { system });
+  try {
+    const picker = home.container.querySelector('.home-watch-picker');
+    assert.ok(picker, '主页应有手表选择器');
+    assert.equal(picker.style.getPropertyValue('--home-watch-single-ch'), String(Array.from('桉桉也是喵cat').length));
+    const card = watchCard(home.container, '桉桉也是喵cat');
+    assert.equal(card.querySelector('.home-watch-name > strong').textContent, '桉桉也是喵cat');
+    assert.equal(card.querySelector('.home-watch-more'), null);
+  } finally { await home.close(); }
+});
+
 test('更多设备选择回显到主卡片，刷新后保持所选设备并将定位交给该设备', async t => {
   const system = fixtureSystem();
   system.account.watches.push({ watchId: 'watch-c', name: '星星手表', model: 'Z10', battery: 50, online: null });

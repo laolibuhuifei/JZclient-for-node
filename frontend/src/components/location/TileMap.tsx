@@ -159,6 +159,22 @@ export default function TileMap({ latitude, longitude, name = '手表位置', ra
     return () => element.removeEventListener('wheel', wheel);
   }, [motion, pageFullscreen]);
 
+  useEffect(() => {
+    const element = viewport.current;
+    if (!element) return;
+    const blockPageGesture = (event: TouchEvent) => {
+      if (!disabledRef.current) event.preventDefault();
+    };
+    // Native non-passive listeners keep the whole drag inside the map. React's
+    // delegated touch listener can remain passive in some mobile browsers.
+    element.addEventListener('touchstart', blockPageGesture, { passive: false });
+    element.addEventListener('touchmove', blockPageGesture, { passive: false });
+    return () => {
+      element.removeEventListener('touchstart', blockPageGesture);
+      element.removeEventListener('touchmove', blockPageGesture);
+    };
+  }, [pageFullscreen]);
+
   // Never enumerate a distant future raster at the current scale: a fast 19→3
   // zoom would otherwise attempt millions of high-resolution offscreen tiles.
   const minimumRaster = Math.max(MIN_MAP_ZOOM, Math.floor(view.zoom) - 1);

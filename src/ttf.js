@@ -10,6 +10,7 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
 
 // ---------- 基础读取 ----------
 
@@ -333,7 +334,12 @@ class Font {
 // 这台机器上装了什么中文字体没法预设，只能按常见路径一个个试。
 // 关键点：**必须真的能解析出 glyf 表**才算数 —— Noto Sans CJK 的 .ttc 是 CFF 轮廓，
 // 文件名看着像 TrueType，读进去却画不出字。
+const windowsFontDir = path.join(process.env.WINDIR || process.env.SystemRoot || 'C:/Windows', 'Fonts');
 const CJK_CANDIDATES = [
+  // Windows 系统字体也使用 TrueType glyf 轮廓，TTC 按子字体解析。
+  path.join(windowsFontDir, 'msyh.ttc'),
+  path.join(windowsFontDir, 'simhei.ttf'),
+  path.join(windowsFontDir, 'simsun.ttc'),
   // Linux（云端实例）
   '/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf',
   '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
@@ -351,6 +357,8 @@ const CJK_CANDIDATES = [
 // ⚠️ 必须有这一层：DroidSansFallbackFull 是「后备字体」，只有中日韩，
 // cmap 里根本没有 A-Z 和 0-9。只用一个中文字体的话，标题里的英文和所有数字会画成空白。
 const LATIN_CANDIDATES = [
+  path.join(windowsFontDir, 'arial.ttf'),
+  path.join(windowsFontDir, 'segoeui.ttf'),
   '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
   '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
   '/System/Library/Fonts/Supplemental/Arial.ttf',

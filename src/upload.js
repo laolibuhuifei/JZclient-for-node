@@ -658,7 +658,7 @@ async function uploadVideo(cfg, opts = {}) {
   if (buf.length > 100 * 1024 * 1024) throw new Error('视频超过 100MB');
 
   const ext = extOfMedia(name) || '.mp4';
-  const duration = probeDurationBuf(buf, ext);
+  const duration = probeDurationBuf(buf, ext) || Math.max(0, Number(opts.duration) || 0);
   const thumb = extractThumbJpeg(buf, ext);
   const token = await getVideoToken(cfg, {
     format: ext,

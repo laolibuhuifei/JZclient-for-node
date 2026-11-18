@@ -1,0 +1,43 @@
+.home-location-preview { --home-location-map-height: 480px; min-width: 0; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--md-outline, var(--border)); }
+.home-location-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 14px; }
+.home-location-heading > div { min-width: 0; }
+.home-location-heading h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 18px; line-height: 1.5; font-weight: 400; }
+.home-location-heading h3 > svg { color: var(--md-primary, var(--primary)); }
+.home-location-heading > div > span { display: block; margin-top: 3px; font-size: 14px; color: var(--md-on-surface-variant, var(--muted-foreground)); }
+.home-location-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.page-home .home-location-actions > .button { min-height: 44px; padding: 8px 10px; font-size: 15px; gap: 6px; }
+.page-home .home-location-actions > .button-icon { width: 44px; height: 44px; min-width: 44px; padding: 0; }
+.home-location-preview .location-map { height: var(--home-location-map-height); min-height: var(--home-location-map-height); border-radius: 16px; }
+.home-location-preview .location-map-viewport { touch-action: none; background-image: none; }
+.home-location-preview .location-map-tools { right: 10px; top: 10px; padding: 3px; border-radius: 14px; }
+.home-location-preview .location-map-tools button { width: 44px; height: 44px; }
+.home-location-preview .location-map-pin { background: var(--md-primary, var(--primary)); color: var(--md-on-primary, var(--primary-foreground)); }
+.home-location-preview .location-map-provider { font-size: 12px; }
+.home-location-preview .location-map-unavailable { padding: 10px 12px; font-size: 14px; line-height: 1.6; }
+.home-location-preview .location-map-unavailable button { min-height: 44px; padding: 8px; font-size: 14px; }
+.home-location-summary { padding-top: 12px; min-width: 0; }
+.home-location-summary strong { display: block; font-size: 16px; font-weight: 400; line-height: 1.65; overflow-wrap: anywhere; }
+.home-location-summary p { margin: 4px 0 0; font-size: 14px; line-height: 1.65; color: var(--md-on-surface-variant, var(--muted-foreground)); font-variant-numeric: tabular-nums; }
+.home-location-coordinates { display: block; margin-top: 2px; font-size: 13px; color: var(--md-on-surface-variant, var(--muted-foreground)); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.home-location-loading > .skeleton { height: var(--home-location-map-height); min-height: var(--home-location-map-height); border-radius: 16px; }
+.page-home .home-location-preview .empty-state { min-height: var(--home-location-map-height); padding: 22px 16px; }
+.home-location-preview .empty-state h3 { font-size: 20px; }
+.home-location-preview .empty-state > p { font-size: 15px; }
+.home-location-preview .error-state { min-height: 140px; align-items: center; padding: 18px; margin: 0; }
+.home-location-preview .error-state p { font-size: 15px; }
+.home-location-stale { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; color: var(--md-on-warning-container, var(--warning)); font-size: 14px; }
+.page-home .home-location-stale .button { color: inherit; padding-inline: 10px; }
+@media (min-width: 768px) and (max-width: 1199px) {
+  .home-location-preview { --home-location-map-height: 400px; }
+}
+@media (max-width: 767px) {
+  .home-location-preview { --home-location-map-height: 320px; margin-top: 18px; padding-top: 16px; }
+  .home-location-heading { gap: 8px; }
+  .home-location-heading h3 { font-size: 17px; }
+  .page-home .home-location-actions > .button { font-size: 14px; padding-inline: 4px; }
+  .page-home .home-location-actions > .button-icon { padding: 0; }
+  .home-location-preview .location-map-unavailable { align-items: flex-start; gap: 6px; padding: 8px 10px; font-size: 13px; }
+  .home-location-preview .location-map-unavailable button { font-size: 13px; }
+  .home-location-summary strong { font-size: 16px; }
+  .home-location-preview .error-state { flex-wrap: wrap; gap: 10px; }
+}

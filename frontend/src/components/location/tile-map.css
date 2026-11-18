@@ -1,0 +1,37 @@
+.location-map-raster { position: absolute; inset: 0; pointer-events: none; }
+.location-map-raster .location-map-tile { left: 0; top: 0; transform-origin: top left; }
+/* The shared map view already supplies every frame; CSS must not trail it. */
+.location-map-raster, .location-map-raster .location-map-tile,
+.location-map .location-map-marker, .location-map .location-map-center-target,
+.location-map-radius-overlay, .location-map-radius-overlay .location-accuracy-circle { transition: none; }
+.location-map[data-animating="true"] .location-map-raster .location-map-tile { will-change: transform; }
+.location-map-radius-overlay { position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden; }
+.location-map-radius-overlay .location-accuracy-circle { transform: none; fill: color-mix(in srgb, var(--md-primary, var(--primary)) 13%, transparent); stroke: color-mix(in srgb, var(--md-primary, var(--primary)) 65%, transparent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.location-map .location-map-marker { z-index: 3; }
+.location-map .location-map-center-target { z-index: 3; }
+.location-map .location-map-tools, .location-map .location-map-pick-center { z-index: 4; }
+.location-map-layer-control { position: absolute; left: 12px; top: 12px; z-index: 4; display: flex; gap: 2px; padding: 3px; border-radius: 14px; background: var(--md-container-low, var(--background)); box-shadow: 0 4px 16px #0002; }
+.location-map-layer-control > button { display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--md-on-surface-variant, var(--muted-foreground)); cursor: pointer; }
+.location-map-layer-control > button[aria-pressed="true"] { background: var(--md-primary-container); color: var(--md-on-primary-container); }
+.location-map-layer-control > button:hover:not(:disabled):not([aria-pressed="true"]) { background: var(--md-container, var(--muted)); color: var(--md-on-surface, var(--foreground)); }
+.location-map-layer-control > button:disabled { opacity: .38; cursor: not-allowed; }
+.location-map .location-map-tools { top: 12px; right: 12px; padding: 3px; border-radius: 14px; gap: 2px; }
+.location-map .location-map-tools > button { width: 36px; height: 36px; border-radius: 10px; }
+.location-map .location-map-tools > button > svg { width: 18px; height: 18px; }
+.location-map-fullscreen { position: absolute; right: 12px; bottom: 38px; z-index: 4; display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 12px; background: var(--md-container-low); color: var(--md-on-surface); box-shadow: 0 4px 16px #0002; cursor: pointer; }
+.location-map-fullscreen:hover:not(:disabled) { background: var(--md-container); }
+.location-map-fullscreen:disabled { opacity: .38; cursor: not-allowed; }
+.location-map:fullscreen { width: var(--ui-viewport-width, 100vw) !important; height: var(--ui-viewport-height, 100dvh) !important; max-width: none !important; max-height: none !important; margin: 0 !important; border-radius: 0 !important; }
+.modal-card.map-fullscreen-modal { width: var(--ui-viewport-width, 100vw); max-width: none; height: var(--ui-viewport-height, 100dvh); max-height: none; margin: 0; border-radius: 0; animation: none; }
+.modal-backdrop:has(> .map-fullscreen-modal) { padding: 0; }
+.map-fullscreen-modal .modal-head { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); }
+.map-fullscreen-modal .modal-head .button { display: none; }
+.map-fullscreen-modal .modal-body { flex: 1; min-height: 0; padding: 0; overflow: hidden; }
+.map-fullscreen-modal .location-map { width: 100%; height: 100%; margin: 0; border-radius: 0; }
+.location-map[data-fullscreen="true"] .location-map-layer-control { top: max(12px, env(safe-area-inset-top)); left: max(12px, env(safe-area-inset-left)); }
+.location-map[data-fullscreen="true"] .location-map-tools { top: max(12px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right)); }
+.location-map[data-fullscreen="true"] .location-map-fullscreen { right: max(12px, env(safe-area-inset-right)); bottom: calc(38px + env(safe-area-inset-bottom)); }
+.location-map-layer-control > button:focus-visible, .location-map-tools > button:focus-visible, .location-map-fullscreen:focus-visible, .location-map-pick-center:focus-visible { outline: 3px solid var(--md-primary, var(--primary)); outline-offset: 2px; }
+@media (max-width: 767px) { .location-map-layer-control { top: 10px; left: 10px; } }
+@media (any-pointer: coarse) { .location-map-layer-control > button, .location-map .location-map-tools > button, .location-map-fullscreen { width: 44px; height: 44px; } }
+@media (prefers-reduced-motion: reduce) { .location-map[data-animating="true"] .location-map-raster .location-map-tile { will-change: auto; } }

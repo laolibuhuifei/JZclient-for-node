@@ -27,6 +27,7 @@ const DEFAULTS = {
   apiHost: null,         // 业务网关(默认取 site.config.js)
   imDeviceId: null,      // IM 设备标识
   imSyncKey: 0,          // IM 已同步到的 syncKey
+  imSyncKeys: {},        // 按 IM 账号保存的 syncKey，避免切换账号后沿用旧游标
   imAccountId: null,     // 自己的 IM 账号 ID
   watchStatus: {},       // IM 推送缓存的手表状态 { watchId: { battery, lastLat, lastLng, ... } }
   autoAgreeWatchIds: [], // 自动同意好友申请的手表
@@ -289,6 +290,27 @@ function normalizeLinks(raw) {
   };
 }
 
+function normalizeImSyncKeys(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object') return out;
+  Object.keys(raw).forEach((key) => {
+    const n = Number(raw[key]);
+    if (/^\d+$/.test(key) && Number.isSafeInteger(n) && n > 0) out[key] = n;
+  });
+  return out;
+}
+
+function rememberImSyncKey(cfg, accountId, syncKey) {
+  if (!cfg) return;
+  cfg.imSyncKeys = normalizeImSyncKeys(cfg.imSyncKeys);
+  const id = String(accountId == null ? '' : accountId);
+  const key = Number(syncKey);
+  if (/^\d+$/.test(id) && id !== '0' && Number.isSafeInteger(key) && key >= 0) {
+    cfg.imSyncKeys[id] = key;
+    cfg.imSyncKey = key;
+  }
+}
+
 function load() {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
@@ -317,6 +339,11 @@ function load() {
       cfg.biliComment = normalizeBiliComment(cfg.biliComment);
       cfg.plugins = normalizePlugins(cfg.plugins);
       cfg.links = normalizeLinks(cfg.links);
+      cfg.imSyncKeys = normalizeImSyncKeys(cfg.imSyncKeys);
+      const currentImId = cfg.imAccountId == null ? '' : String(cfg.imAccountId);
+      if (currentImId && cfg.imSyncKeys[currentImId] == null && Number(cfg.imSyncKey) > 0) {
+        cfg.imSyncKeys[currentImId] = Number(cfg.imSyncKey);
+      }
       return cfg;
     }
   } catch (e) { /* 损坏则用默认 */ }
@@ -330,6 +357,7 @@ function load() {
     onebotWatches: {},
     extApi: {},
     biliBots: {},
+    imSyncKeys: {},
   });
 }
 
@@ -376,5 +404,5 @@ module.exports = {
   // 按手表配置的归一化工具(webui 保存单个手表的 OneBot / 点播配置时要用)
   onebotWatchDefaults, normalizeOnebotWatch, normalizeExtApi,
   biliWatchDefaults, normalizeBiliWatch, normalizeBiliBots, normalizeBiliComment,
-  normalizePlugins, normalizeLinks, normalizeAi,
+  normalizePlugins, normalizeLinks, normalizeAi, normalizeImSyncKeys, rememberImSyncKey,
 };

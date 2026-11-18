@@ -287,6 +287,11 @@ function matchChatKey(targets, m) {
   const s = targets.find((t) => t.type === 'single'
     && (String(t.receiverId) === String(m.imAccountId) || String(t.receiverId) === did));
   if (s) return s.key;
+  // 账号重登或服务端轮换 IM 会话 ID 后，tag10/tag11 可能与缓存列表都不相等。
+  // 新版手表账号通常只有一个手表单聊；此时可安全归到唯一单聊。存在多个单聊
+  // 时仍返回 null，避免把消息显示到别人的会话里。
+  const singles = targets.filter((t) => t.type === 'single');
+  if (singles.length === 1) return singles[0].key;
   return null;
 }
 
@@ -2053,6 +2058,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (im && m.syncKey > im.syncKey) {
       im.syncKey = m.syncKey;
       cfg.imSyncKey = m.syncKey;
+      device.rememberImSyncKey(cfg, im.imAccountId, m.syncKey);
       device.save(cfg);
     }
   }
@@ -2115,7 +2121,14 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       try {
         await c.connect();
         if (!c.connected || (c.alive && !c.alive())) throw new Error('握手完成后连接已断开');
+        cfg.imSyncKeys = cfg.imSyncKeys && typeof cfg.imSyncKeys === 'object' ? cfg.imSyncKeys : {};
+        if (prevImId && String(prevImId) !== String(c.imAccountId)
+          && cfg.imSyncKeys[String(prevImId)] == null && Number(cfg.imSyncKey) > 0) {
+          cfg.imSyncKeys[String(prevImId)] = Number(cfg.imSyncKey);
+        }
         cfg.imAccountId = c.imAccountId;
+        cfg.imSyncKey = c.syncKey;
+        device.rememberImSyncKey(cfg, c.imAccountId, c.syncKey);
         device.save(cfg);
       // 反向 WS 握手头里的 X-Self-ID 是"连接那一刻"的快照, 而 AstrBot 回消息时会拿
       // 事件里的 self_id 去匹配这条连接。换账号后 self_id 变了, 不重连就会出现
@@ -2143,6 +2156,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   function imStatus() {
     const last = im && im.lastRecvAt ? im.lastRecvAt : 0;
     const lastMessage = im && im.lastMessageAt ? im.lastMessageAt : 0;
+    if (im && im.connected) device.rememberImSyncKey(cfg, im.imAccountId, im.syncKey);
     return {
       connected: !!(im && im.connected),
       alive: !!(im && im.connected && (!im.alive || im.alive())),
@@ -2153,6 +2167,10 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       lastRecvAgo: last ? Math.round((Date.now() - last) / 1000) : null,
       lastMessageAt: lastMessage,
       lastMessageAgo: lastMessage ? Math.round((Date.now() - lastMessage) / 1000) : null,
+      lastSyncTriggerAt: (im && im.lastSyncTriggerAt) || 0,
+      lastSyncTriggerResult: (im && im.lastSyncTriggerResult) || null,
+      lastSyncAt: (im && im.lastSyncAt) || 0,
+      lastSyncResult: (im && im.lastSyncResult) || null,
       reconnects: imReconnects,
       lastError: imLastError,
     };
@@ -2516,6 +2534,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
   // 登录/验证成功后统一写入会话
   async function finishLogin(account, data, rsaKey) {
+    const previousUser = String(cfg.userName || '');
+    const previousMobileId = String(cfg.mobileId || '');
     cfg.token = typeof data === 'string' ? data : JSON.stringify(data);
     cfg.userName = account;
     cfg.ssoRsaKey = rsaKey;
@@ -2532,6 +2552,15 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
     const init = await safe(() => api.getMobileInit());
     const acc = (init && init.mobileAccount) || {};
+    if ((previousUser || previousMobileId) && ((previousUser && previousUser !== String(account))
+      || (previousMobileId && acc.id && previousMobileId !== String(acc.id)))) {
+      // 换 SSO 账号后，旧 IM 设备身份/账号/游标都属于另一套上下文。
+      // 服务端可能把新连接当成旧设备的重连，表现为首条消息到达后长期不再推送。
+      cfg.imDeviceId = null;
+      cfg.imAccountId = null;
+      cfg.imSyncKey = 0;
+      device.ensureIdentity(cfg);
+    }
     if (acc.id) cfg.mobileId = acc.id;
     if (acc.authId) cfg.authId = acc.authId;
     device.save(cfg);

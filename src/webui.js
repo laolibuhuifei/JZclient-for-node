@@ -2176,10 +2176,10 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         .then(async (c) => {
           logState('后台监听在线 imAccountId=' + c.imAccountId);
           // 有些链路的心跳和业务响应一直正常，但 PUSH 已经不再送达。
-          // 30 秒没有收到任何聊天帧时主动 sync 一次，既补回漏消息，也避免等上
+          // 15 秒没有收到任何聊天帧时主动 sync 一次，既补回漏消息，也避免等上
           // 两分钟才由 alive() 判死。sync() 失败不重连：下一次 tick 还会再试。
           const quietFor = Date.now() - (Number(c.lastMessageAt) || Number(c.lastRecvAt) || Date.now());
-          if (quietFor < 30000 || imSyncPending) return;
+          if (quietFor < 15000 || imSyncPending) return;
           imSyncPending = Promise.resolve(c.sync())
             .catch((error) => log.warn('im', '后台补同步失败: ' + (error && error.message ? error.message : error)))
             .finally(() => { imSyncPending = null; });
@@ -2188,7 +2188,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         .catch((e) => logState('后台监听连接失败: ' + (e && e.message ? e.message : e)));
     };
     tick();
-    imTimer = setInterval(tick, 60000);
+    imTimer = setInterval(tick, 15000);
     if (imTimer.unref) imTimer.unref();
   }
 

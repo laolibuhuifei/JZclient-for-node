@@ -296,7 +296,7 @@ class ImClient extends EventEmitter {
     const msgRaw = map.get(14) || Buffer.alloc(0);
     // 只有真正的聊天帧才刷新这个时间。心跳和同步空响应也会刷新 lastRecvAt，
     // 因此不能用那一个值判断「还能不能收到聊天消息」。
-    this.lastMessageAt = Date.now();
+    if (msgRaw.length) this.lastMessageAt = Date.now();
     const msgId = map.has(16) ? map.get(16).toString('utf8') : '';
     const dialogId = map.has(10) ? toInt(map.get(10)) : 0;
     const imAccountId = map.has(11) ? toInt(map.get(11)) : 0;

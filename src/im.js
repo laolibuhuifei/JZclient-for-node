@@ -4,7 +4,7 @@
 //   帧: [0xA0][cmd][len varint][TLV body]; cmd<=0x1F 时头为单字节 0x20|cmd
 //   握手: cmd22 PublicKeyRequest -> cmd23 返回 RSA 公钥(tag10), cmd33 EncryptSet{tag1 RID, tag10=1, tag11=RSA(key)}
 //   启用加密后: 外层 cmd32, 载荷 tag10 = 内层帧 XOR 会话密钥(会话密钥为 32 字符串,循环复用)
-//   cmd1 Regist -> cmd2 (tag10=registId, tag11=registToken)，登录必须带回 registToken
+//   cmd1 Regist -> cmd2 (tag10=registId，可选 tag11=registToken)，有 token 时登录带回
 //   cmd3 Login  -> cmd4
 //   cmd5 Account(status=2 上线) -> cmd6 (tag10=自己的 imAccountId)
 //   cmd40 单聊发消息 {tag10=receiverId, tag11=自己 imAccountId, tag12=registId, tag13=msgType, tag14=JSON, tag15=msgId, tag16=contentType}
@@ -499,7 +499,7 @@ class ImClient extends EventEmitter {
     }
     this.registId = toInt(resp.tags.get(10) || Buffer.alloc(0));
     this.registToken = resp.tags.has(11) ? resp.tags.get(11).toString('utf8') : '';
-    if (!this.registToken) throw new Error('IM 注册响应未返回 registToken');
+    if (!this.registToken) log.debug('im', '注册响应未返回 registToken，使用兼容登录参数');
     log.debug('im', `注册成功 registId=${this.registId}`);
   }
 
@@ -528,7 +528,7 @@ class ImClient extends EventEmitter {
       tlv(18, APP_VERSION_NAME),
       tlv(20, 1),
       tlv(10, this.registId),
-      tlv(11, this.registToken),
+      tlv(11, this.registToken || 'null'),
       tlv(12, APP_VERSION_CODE),
       tlv(21, Buffer.from(Date.now().toString(16).padStart(16, '0'), 'hex')),
     ]);

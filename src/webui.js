@@ -10,6 +10,8 @@ const { ApiClient, MODULES } = require('./api');
 const device = require('./device');
 const sso = require('./sso');
 const { ImClient } = require('./im');
+const videocall = require('./videocall');
+const headless = require('./headless');
 const { bufferEarlyMessages } = require('./im-early-messages');
 const { allowMessageSideEffects } = require('./im-message-freshness');
 const { buildChatTargets, chatIdsOf } = require('./chat-targets');
@@ -36,15 +38,21 @@ const HTML_FILE = path.join(__dirname, 'webui.html');
 let htmlCache = null;
 let htmlGzip = null;
 let htmlEtag = '';
+let htmlBuild = '';
 
 function pageHtml() {
   if (!htmlCache) {
-    htmlCache = fs.readFileSync(HTML_FILE, 'utf8');
+    let raw = fs.readFileSync(HTML_FILE, 'utf8');
     // ETag 用「大小 + mtime」拼，不重算内容哈希：换文件自然失效，算一次也几乎不花时间
     try {
       const st = fs.statSync(HTML_FILE);
       htmlEtag = '"' + st.size.toString(16) + '-' + Math.floor(st.mtimeMs).toString(16) + '"';
-    } catch (e) { htmlEtag = ''; }
+      htmlBuild = st.size.toString(16) + '-' + Math.floor(st.mtimeMs).toString(16);
+    } catch (e) { htmlEtag = ''; htmlBuild = ''; }
+    // 把构建号注入页面。前端轮询时带上它，服务端发现不一致就让页面自己 reload——
+    // 改完前端忘刷新是这项目最常犯的错（改了半小时发现跑的还是旧 JS）。
+    raw = raw.split('__HTML_BUILD__').join(htmlBuild);
+    htmlCache = raw;
     // 顺手压一份放内存。HTML 是死文件，压一次管到进程重启，实测 20ms 上下，
     // 换来的是一次 345KB → 84KB（4.1 倍）。别改成每次请求现压，那才是真的浪费 CPU。
     try {
@@ -301,6 +309,41 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   log.configure({ level: log.LEVELS[envLevel] != null ? envLevel : (process.env.WP_DEBUG ? 'debug' : 'info') });
 
   const api = new ApiClient(cfg);
+  // 实际监听端口（port=0 时由系统分配，无头页面的 URL 得用真端口）
+  let listenPort = 0;
+  let stopHeadlessTimer = null;
+  // 通话信令要打接口，把 api 和 cfg 注入进去（模块里延迟取，避免循环 require）
+  videocall.configure({
+    api, cfg,
+    hooks: {
+      // 来电且这块表开了 bot：先把无头页面拉起来，由它入房/推流/收字幕。
+      // 起不来（没装 Chromium / 内存不够）就返回失败，videocall 那边会退回正常响铃。
+      onAutoAnswer: async () => {
+        const tok = String((cfg.webui && cfg.webui.token) || '');
+        if (!tok) return { ok: false, reason: '没有访问令牌' };
+        const exe = headless.findChrome();
+        if (!exe) return { ok: false, reason: '没有可用的 Chromium（先在设置里准备）' };
+        const url = 'http://127.0.0.1:' + (listenPort || port || 8787)
+          + '/?token=' + encodeURIComponent(tok) + '&autorun=1';
+        const r = await headless.start(url);
+        if (r && r.ok) {
+          log.info('headless', '无头页面接管本次通话（pid ' + r.pid + '）');
+        } else {
+          log.warn('headless', '没起来：' + ((r && r.reason) || '未知原因'));
+        }
+        return r || { ok: false, reason: 'unknown' };
+      },
+      // 通话结束后不要立刻杀掉：留 60 秒。用户连着打第二通时能直接复用，
+      // 省掉"页面启动 1~2 秒"的黑屏；真不打了再由定时器收回。
+      onCallEnd: (why) => {
+        clearTimeout(stopHeadlessTimer);
+        stopHeadlessTimer = setTimeout(() => headless.stop('通话结束 60 秒无新通话'), 60000);
+        log.info('headless', '通话结束（' + why + '），无头页面保留 60 秒备用');
+      },
+      // 告诉前端"服务端有没有在跑无头页面"
+      statusExtra: () => ({ headless: headless.isRunning() }),
+    },
+  });
   let cache = { at: 0, list: [] };
   let watchStatusRevision = 0;
 
@@ -1212,6 +1255,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           maxPerDay: c.maxPerDay,
           commentImage: c.commentImage,
           searchImage: c.searchImage,
+          // 视频通话 B站 bot：开了之后这块表来电会自动接听并接受语音点播
+          callBot: !!c.callBot,
         };
       }),
       targets: targets.map((t) => ({ key: t.key, name: t.name, type: t.type })),
@@ -1823,6 +1868,10 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
   function onImMessage(m, suppressAuto) {
     const b = m.body || {};
+    // 通话信令必须最先拦：470/473/474（语音 12470~12474）是账号级推送，
+    // 落到下面会被当成聊天消息（没有 dialogId 会被丢）或业务推送处理掉，
+    // 表现就是「手表打过来，客户端一点反应都没有」。
+    if (videocall.handleFrame(m)) return;
     const type = Number(b.type);
     const biz = isBusinessMessage(m);
     if (log.isEnabled('debug')) {
@@ -2202,8 +2251,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (built.length) {
       chatTargets = built;
       chatTargetsAt = Date.now();
+      return built;
     }
-    return built;
+    // 这次没拉到（实例刚启动 token 还没好、平台抖动、服务端返回空）：
+    // 手上有旧的就先给旧的，否则用户会看到「一个会话都没有」，比看到旧列表更吓人。
+    // 真解绑光了的情况不会走这里 —— invalidateChatTargets() 已经把 chatTargets 置空。
+    return chatTargets || built;
   }
 
   // 微聊单条语音上限 60 秒, 超过就切开逐条发(阈值和 OneBot 那边保持一致)
@@ -3006,6 +3059,204 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     throw new Error('接口不存在');
   }
 
+  // ===== 弹幕 =====
+  // 官方弹幕 XML：https://comment.bilibili.com/<cid>.xml
+  // 格式 <d p="出现秒,模式,字号,颜色,时间戳,池,用户hash,行号">文本</d>
+  // 只要「出现秒 + 文本」，模式 7/8 是高级弹幕（位置固定），这里一律当滚动，够看
+  const biliDmCache = new Map();   // cid -> { at, list }
+  async function biliDanmaku(cid) {
+    const hit = biliDmCache.get(cid);
+    if (hit && Date.now() - hit.at < 30 * 60 * 1000) return hit.list;
+    const r = await fetch('https://comment.bilibili.com/' + encodeURIComponent(cid) + '.xml', {
+      headers: { 'User-Agent': bili.UA, Referer: bili.REFERER },
+    });
+    if (!r.ok) throw new Error('取弹幕失败（HTTP ' + r.status + '）');
+    const buf = Buffer.from(await r.arrayBuffer());
+    // 弹幕 XML 一般是 deflate 压缩的，带 zlib 头就解，不带就当纯文本
+    let xml = '';
+    if (buf[0] === 0x78) {
+      try { xml = zlib.inflateSync(buf).toString('utf8'); } catch (e) { xml = buf.toString('utf8'); }
+    } else {
+      xml = buf.toString('utf8');
+    }
+    const list = [];
+    const re = /<d p="([^"]*)"[^>]*>([\s\S]*?)<\/d>/g;
+    let m;
+    while ((m = re.exec(xml))) {
+      const t = Number(String(m[1]).split(',')[0]);
+      const text = m[2]
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"').replace(/&amp;/g, '&')
+        .trim();
+      if (!text || !isFinite(t)) continue;
+      list.push({ t, text: text.slice(0, 40) });
+      if (list.length >= 3000) break;   // 一场通话用不着更多，多了前端也画不动
+    }
+    list.sort((a, b) => a.t - b.t);
+    biliDmCache.set(cid, { at: Date.now(), list });
+    log.info('bili', `弹幕已取 ${cid}：${list.length} 条`);
+    return list;
+  }
+
+  // ===== B站直链代理（通话推流用）=====
+  // 解析 bvid/cid → playurl，然后把 mp4 流原样转给浏览器。
+  // 直链带时效（约 2 小时），这里 10 分钟就重取一次，避免播到一半 403。
+  const biliStreamCache = new Map();   // `${bvid}:${cid}` -> { url, at, quality }
+  // 封面代理（带 Referer + 内存缓存）。
+  // 搜索结果的 pic 是协议相对地址（//i1.hdslb.com/…），只允许 hdslb 域名，
+  // 别让一个任意 URL 代理变成内网探测工具。
+  const biliCoverCache = new Map();     // url → { buf, type, at }
+  const BILI_COVER_MAX = 200;
+
+  async function biliCover(req, res, query) {
+    let u = String(query.get('u') || '').trim();
+    if (u.startsWith('//')) u = 'https:' + u;
+    let host = '';
+    try { host = new URL(u).hostname; } catch (e) { throw new Error('封面地址不合法'); }
+    if (!/(^|\.)hdslb\.com$/i.test(host)) throw new Error('只代理 B站图床');
+
+    const hit = biliCoverCache.get(u);
+    if (hit && Date.now() - hit.at < 24 * 3600 * 1000) {
+      res.writeHead(200, {
+        'Content-Type': hit.type,
+        'Content-Length': hit.buf.length,
+        'Cache-Control': 'public, max-age=86400',
+      });
+      return res.end(hit.buf);
+    }
+
+    const buf = await new Promise((resolve, reject) => {
+      const r = https.request(u, {
+        method: 'GET',
+        headers: { 'User-Agent': bili.UA, Referer: bili.REFERER },
+        timeout: 12000,
+      }, (up) => {
+        if ((up.statusCode || 200) >= 400) { up.resume(); return reject(new Error('上游 ' + up.statusCode)); }
+        const chunks = [];
+        up.on('data', (c) => chunks.push(c));
+        up.on('end', () => resolve(Buffer.concat(chunks)));
+      });
+      r.on('timeout', () => r.destroy(new Error('封面超时')));
+      r.on('error', reject);
+      r.end();
+    });
+
+    const type = /\.png(\?|$)/i.test(u) ? 'image/png' : 'image/jpeg';
+    if (biliCoverCache.size >= BILI_COVER_MAX) {
+      biliCoverCache.delete(biliCoverCache.keys().next().value);
+    }
+    biliCoverCache.set(u, { buf, type, at: Date.now() });
+    res.writeHead(200, {
+      'Content-Type': type,
+      'Content-Length': buf.length,
+      'Cache-Control': 'public, max-age=86400',
+    });
+    return res.end(buf);
+  }
+
+  async function biliStream(req, res, query) {
+    const bvid = String(query.get('bvid') || '').trim();
+    if (!/^BV[0-9A-Za-z]{8,12}$/.test(bvid)) throw new Error('视频编号不对（要 BV 开头的那种）');
+    let cid = String(query.get('cid') || '').trim();
+    if (!cid) {
+      const pages = await bili.getPages(bvid);
+      cid = String((pages[0] || {}).cid || '');
+    }
+    const key = bvid + ':' + cid;
+    let hit = biliStreamCache.get(key);
+    if (!hit || Date.now() - hit.at > 10 * 60 * 1000) {
+      const p = await bili.getPlayUrl(bvid, cid);
+      hit = { url: p.parts[0].url, at: Date.now(), quality: p.quality };
+      biliStreamCache.set(key, hit);
+      log.info('bili', `通话推流取直链 ${bvid}（${p.quality}）`);
+    }
+    const headers = {
+      'User-Agent': bili.UA,
+      // 少了 Referer，B站 CDN 直接 403 —— 这也是为什么必须由服务端代理
+      Referer: bili.REFERER,
+      Origin: 'https://www.bilibili.com',
+    };
+    // <video> 的 seek / 边下边播全靠 Range，必须原样转发
+    if (req.headers.range) headers.Range = req.headers.range;
+
+    const mod = hit.url.startsWith('https:') ? https : http;
+    const up = mod.request(hit.url, { method: 'GET', headers, timeout: 20000 }, (upRes) => {
+      const pass = { 'Content-Type': upRes.headers['content-type'] || 'video/mp4' };
+      ['content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified'].forEach((k) => {
+        if (upRes.headers[k]) pass[k] = upRes.headers[k];
+      });
+      pass['Cache-Control'] = 'no-store';
+      res.writeHead(upRes.statusCode || 200, pass);
+      upRes.pipe(res);
+    });
+    up.on('timeout', () => up.destroy(new Error('上游超时')));
+    up.on('error', (e) => {
+      log.warn('bili', '通话推流失败: ' + (e && e.message ? e.message : e));
+      if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+      try { res.end('上游取流失败'); } catch (x) { /* ignore */ }
+    });
+    // 浏览器关掉 <video> 时要掐掉上游，否则会一直在后台下载
+    req.on('close', () => { try { up.destroy(); } catch (e) { /* ignore */ } });
+    up.end();
+  }
+
+  // ===== 通话信令（视频/语音）=====
+  // 只做信令层：来电识别、接听/拒接、挂断。音视频要前端接 Agora（providers=2）。
+  // 原版时序：来电 → 用户点接听 → POST callresponse → joinChannel。
+  async function handleVideoCall(req, res, parts, query) {
+    const action = parts[2] || 'status';
+    if (action === 'status' && req.method === 'GET') {
+      const st = videocall.status();
+      // 页面带着自己的构建号来问，对不上就让它自己刷新。
+      // 前端页面更新后必须重启进程（htmlCache），这里顺手把"忘了刷新"也一起治了。
+      const b = query.get('b');
+      st.stale = !!(b && htmlBuild && b !== htmlBuild);
+      if (st.stale) st.build = htmlBuild;
+      return ok(res, st);
+    }
+    if (action === 'answer' && req.method === 'POST') {
+      return ok(res, await videocall.answer());
+    }
+    if (action === 'reject' && req.method === 'POST') {
+      const b = await readBody(req).catch(() => ({}));
+      return ok(res, await videocall.reject(b && b.reason));
+    }
+    if (action === 'hangup' && req.method === 'POST') {
+      return ok(res, await videocall.hangup());
+    }
+    // 无头页面（服务端自己跑的那个浏览器）
+    //   GET  → 状态（有没有装、在不在跑、还剩多少内存）
+    //   POST → {action:'prepare'} 下载 Chromium；{action:'stop'} 杀掉；
+    //          {action:'start'} 手动起一个（调试用）
+    if (action === 'headless') {
+      if (req.method === 'GET') return ok(res, headless.status());
+      const b = await readBody(req).catch(() => ({}));
+      const act = String((b && b.action) || '');
+      if (act === 'prepare') return ok(res, await headless.prepare());
+      if (act === 'stop') return ok(res, headless.stop('手动停止'));
+      if (act === 'start') {
+        const tok = String((cfg.webui && cfg.webui.token) || '');
+        const url = 'http://127.0.0.1:' + (listenPort || 8787)
+          + '/?token=' + encodeURIComponent(tok) + '&autorun=1';
+        return ok(res, await headless.start(url));
+      }
+      throw new Error('未知操作：' + act);
+    }
+    // 启动实时字幕（ASR）。要转写哪一路由服务端按 callerId（手表 watchId）自己取，
+    // 前端不用再传 uid —— 传 Agora uid 会被判 "request parameter is invalid."
+    if (action === 'captions' && req.method === 'POST') {
+      return ok(res, await videocall.startCaptions());
+    }
+    // 前端 Agora 的报错回传：浏览器里的异常只能在那边看到，
+    // 不回传的话"入房失败"就只有一个 toast，服务端日志里什么都没有。
+    if (action === 'rtclog' && req.method === 'POST') {
+      const b = await readBody(req).catch(() => ({}));
+      log.warn('call', '[前端RTC] ' + String((b && b.text) || '').slice(0, 400));
+      return ok(res, { logged: true });
+    }
+    throw new Error('接口不存在');
+  }
+
   async function handleApi(req, res, parts, query) {
     // ===== 插件 =====
     // 注意单复数：/api/plugins/* 是管理（列表/上传/启停），/api/plugin/<id>/* 是插件自己的
@@ -3014,6 +3265,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
     if (parts[1] === 'watches') return ok(res, { watches: await watchList(query.get('refresh') === '1') });
     if (parts[1] === 'notices') return ok(res, { notices: ensure(await api.getNoticeNew()) });
+
+    // 通话信令（视频/语音）：状态查询 + 接听/拒接/挂断
+    if (parts[1] === 'videocall') return handleVideoCall(req, res, parts, query);
 
     // 云端更新：查有没有新版 / 用户在弹窗里点了「更新并重启」
     // check 是只读的，apply 会让平台重启本实例（连接会断，前端负责等它回来）
@@ -3170,6 +3424,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         if (b.maxPerDay != null) c.maxPerDay = clampInt(b.maxPerDay, 0, 999, c.maxPerDay);
         if (b.commentImage != null) c.commentImage = !!b.commentImage;
         if (b.searchImage != null) c.searchImage = !!b.searchImage;
+        // 视频通话 bot：开启后来电自动接听。默认关，必须显式打开
+        if (b.callBot != null) c.callBot = !!b.callBot;
         if (b.targets != null) {
           const arr = Array.isArray(b.targets) ? b.targets : [];
           c.targets = arr.map((x) => String(x)).filter((x) => /^[sg]:.+/.test(x));
@@ -3177,6 +3433,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         cfg.biliBots = cfg.biliBots || {};
         cfg.biliBots[wid] = c;
         device.save(cfg);
+        log.info('bili', `手表 ${wid} 的通话B站bot已${c.callBot ? '启用' : '关闭'}`);
         log.info('bili', `手表 ${wid} 的点播已${c.enabled ? '启用' : '关闭'}（`
           + (c.targets.length ? '指定 ' + c.targets.length + ' 个会话' : '按手表自动匹配会话') + '）');
         return ok(res, await biliState());
@@ -3188,6 +3445,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         if (!kw) throw new Error('缺少搜索关键词');
         const list = await bili.search(kw, { limit: BILI_MAX_RESULTS });
         return ok(res, { keyword: kw, list });
+      }
+
+      // 封面代理：通话里那张搜索结果列表要画封面，而 B站 CDN 少了 Referer 直接 403。
+      // 前端 <img> 没法带 Referer，所以必须由服务端转一手。
+      if (parts[2] === 'cover' && req.method === 'GET') {
+        return biliCover(req, res, query);
       }
 
       // 预览搜索结果图: 和手表上收到的是同一张图, 直接回 PNG(前端用 <img src> 打开)
@@ -3241,6 +3504,40 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
           'X-Comment-Complete': cmt.data.complete ? '1' : '0',
         });
         return res.end(cmt.png);
+      }
+
+      // ===== 通话推流用：取视频信息 =====
+      // 前端要 cid 才能拿直链，顺手把标题/时长/UP 主一起给它画 HUD
+      if (parts[2] === 'info' && req.method === 'GET') {
+        const bvid = String(query.get('bvid') || '').trim();
+        if (!/^BV[0-9A-Za-z]{8,12}$/.test(bvid)) throw new Error('视频编号不对（要 BV 开头的那种）');
+        const info = await bili.getVideoInfo(bvid);
+        const pages = await bili.getPages(bvid);
+        const first = pages[0] || {};
+        return ok(res, {
+          bvid,
+          cid: String(first.cid || ''),
+          title: String(info.title || ''),
+          owner: String((info.owner && info.owner.name) || ''),
+          duration: Number(info.duration) || 0,
+          pageCount: pages.length,
+        });
+      }
+
+      // ===== 通话推流用：把 mp4 代理给浏览器 =====
+      // 必须代理的两个理由：
+      //   1. B站 CDN 少 Referer 直接 403，而浏览器改不了 Referer
+      //   2. <video> 会发 Range 请求，要原样转发，否则不能 seek / 边下边播
+      if (parts[2] === 'stream' && req.method === 'GET') {
+        return biliStream(req, res, query);
+      }
+
+      // ===== 通话推流用：弹幕 =====
+      // 原版是把弹幕画进画面里的，这里照做：前端拿时间轴自己滚
+      if (parts[2] === 'danmaku' && req.method === 'GET') {
+        const cid = String(query.get('cid') || '').trim();
+        if (!/^\d{1,20}$/.test(cid)) throw new Error('cid 不对');
+        return ok(res, { cid, list: await biliDanmaku(cid) });
       }
 
       throw new Error('接口不存在');
@@ -4747,7 +5044,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         const qt = url.searchParams.get('token');
         if (qt) {
           if (safeEqual(qt, AUTH_TOKEN)) {
-            res.writeHead(302, { 'Set-Cookie': authCookie(), Location: '/' });
+            // autorun=1 是"服务端起的无头页面"的标记，302 到干净 URL 时**必须带过去**。
+            // 不带的话页面会以为自己是普通页面而让位，结果谁都不入房，手表黑屏
+            // （2026-11-18 踩过：日志里只有页面加载，一条 RTC 记录都没有）。
+            const keep = url.searchParams.get('autorun') === '1' ? '/?autorun=1' : '/';
+            res.writeHead(302, { 'Set-Cookie': authCookie(), Location: keep });
             return res.end();
           }
           log.warn('webui', `URL 令牌错误 ip=${clientIp(req)}`);
@@ -4830,10 +5131,15 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         const file = path.join(__dirname, 'assets', name);
         if (!fs.existsSync(file)) return send(res, 404, 'text/plain; charset=utf-8', 'Not Found');
         const ext = path.extname(name).toLowerCase();
+        // .js 必须给 javascript 类型：给 application/octet-stream 时，
+        // 部分浏览器（带 nosniff 或严格 MIME 检查的）会拒绝执行 Agora SDK
         const type = ext === '.png' ? 'image/png'
           : ext === '.svg' ? 'image/svg+xml'
             : ext === '.ico' ? 'image/x-icon'
-              : 'application/octet-stream';
+              : ext === '.js' ? 'application/javascript; charset=utf-8'
+                : ext === '.css' ? 'text/css; charset=utf-8'
+                  : ext === '.json' ? 'application/json; charset=utf-8'
+                    : 'application/octet-stream';
         const buf = fs.readFileSync(file);
         res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'public, max-age=604800', 'Content-Length': buf.length });
         return res.end(buf);
@@ -4853,7 +5159,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     server.listen(port, host, resolve);
   });
 
-  log.info('webui', `服务已启动 http://${host}:${port}`);
+  listenPort = ((server.address() || {}).port) || port;
+  log.info('webui', `服务已启动 http://${host}:${listenPort}`);
+  // 进程退出时把无头页面一起收掉，别留孤儿占内存
+  process.once('exit', () => { try { headless.stop('进程退出'); } catch (e) { /* ignore */ } });
+
   log.info('webui', `日志级别 ${log.levelName()}（WP_LOG=debug 看请求体细节，WP_LOG=warn 只看告警）`);
 
   // 会话列表必须先拉到: 收消息时要靠它把 dialogId/imAccountId 映射成会话 key,

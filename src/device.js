@@ -220,6 +220,9 @@ function biliWatchDefaults() {
     maxPerDay: 20,
     commentImage: true,
     searchImage: true,
+    // 视频通话 B站 bot：开启后这块表打视频电话过来会**自动接听**，
+    // 并接受语音指令点播 B站视频（画面推到通话里）
+    callBot: false,
   };
 }
 
@@ -245,6 +248,9 @@ function normalizeBiliWatch(raw) {
     // 老配置里没有这两个字段, 默认当开 —— 新功能上线后不用挨个手表去点一遍
     commentImage: r.commentImage !== false,
     searchImage: r.searchImage !== false,
+    // 老配置没这个字段 → 默认关（和 B站点播的 enabled 不同：这个是"自动接电话"，
+    // 默认开会让用户莫名其妙被接听，必须显式开启）
+    callBot: !!r.callBot,
   };
 }
 

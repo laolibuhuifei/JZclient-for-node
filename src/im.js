@@ -164,6 +164,7 @@ class ImClient extends EventEmitter {
     // 云端实例一挂好几天, NAT/中间设备会把空闲连接悄悄掐掉, 而 TCP 层可能很久都不报错。
     // 以前只看 connected 标志, 结果就是「界面显示已连接, 但一条新消息都收不到」。
     this.lastRecvAt = 0;      // 最近一次收到任意帧的时间
+    this.lastMessageAt = 0;   // 最近一次收到真实聊天帧的时间；心跳不能刷新它
     this.frames = 0;          // 收到的帧数(诊断用)
     this._hbFail = 0;         // 连续心跳失败次数
     this._closed = false;     // 保证 close 事件只抛一次
@@ -184,6 +185,7 @@ class ImClient extends EventEmitter {
     this._closed = false;
     this._hbFail = 0;
     this.lastRecvAt = Date.now();
+    this.lastMessageAt = Date.now();
     await this._open();
     log.debug('im', 'TLS 已建立, 开始协议握手');
     await this._handshake();
@@ -292,6 +294,9 @@ class ImClient extends EventEmitter {
 
   _emitMessage(cmd, map) {
     const msgRaw = map.get(14) || Buffer.alloc(0);
+    // 只有真正的聊天帧才刷新这个时间。心跳和同步空响应也会刷新 lastRecvAt，
+    // 因此不能用那一个值判断「还能不能收到聊天消息」。
+    this.lastMessageAt = Date.now();
     const msgId = map.has(16) ? map.get(16).toString('utf8') : '';
     const dialogId = map.has(10) ? toInt(map.get(10)) : 0;
     const imAccountId = map.has(11) ? toInt(map.get(11)) : 0;
@@ -552,8 +557,11 @@ class ImClient extends EventEmitter {
   }
 
   // 同步离线消息(服务端会按 cmd13 逐条推送)
-  async sync() {
+  async sync(options = {}) {
+    if (!this.connected || !this.imAccountId) return null;
+    if (this._syncing) return this._syncing;
     const rid = this.nextRid();
+    const timeout = Number(options.timeout) || 8000;
     const body = Buffer.concat([
       tlv(1, rid),
       tlv(11, this.imAccountId),
@@ -562,7 +570,14 @@ class ImClient extends EventEmitter {
       tlv(14, 15),
       tlv(0, 1),
     ]);
-    try { return await this._request(CMD.SYNC, body, rid, 8000); } catch (e) { return null; }
+    // 同一时刻只允许一个 sync。服务端偶尔不返回请求回执，若每轮巡检都叠加
+    // 一个 pending 请求，最终会把长连接的请求表拖满；超时后复用同一结果即可。
+    const shared = this._request(CMD.SYNC, body, rid, timeout).catch(() => null);
+    const active = shared.finally(() => {
+      if (this._syncing === active) this._syncing = null;
+    });
+    this._syncing = active;
+    return active;
   }
 
   _textBody(text) {

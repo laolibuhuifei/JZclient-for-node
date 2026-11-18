@@ -2142,6 +2142,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   // IM 连接状态快照(聊天页展示 + 排查用)
   function imStatus() {
     const last = im && im.lastRecvAt ? im.lastRecvAt : 0;
+    const lastMessage = im && im.lastMessageAt ? im.lastMessageAt : 0;
     return {
       connected: !!(im && im.connected),
       alive: !!(im && im.connected && (!im.alive || im.alive())),
@@ -2150,6 +2151,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       frames: (im && im.frames) || 0,
       lastRecvAt: last,
       lastRecvAgo: last ? Math.round((Date.now() - last) / 1000) : null,
+      lastMessageAt: lastMessage,
+      lastMessageAgo: lastMessage ? Math.round((Date.now() - lastMessage) / 1000) : null,
       reconnects: imReconnects,
       lastError: imLastError,
     };
@@ -2159,6 +2162,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   // 作用是把手表上报的电量/位置等业务消息实时落到 cfg.watchStatus
   let imTimer = null;
   let imLastState = '';
+  let imSyncPending = null;
   function startImBackground() {
     if (imTimer) return;
     const logState = (s) => {
@@ -2169,7 +2173,18 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     const tick = () => {
       if (!cfg.token) return;
       ensureIM()
-        .then((c) => logState('后台监听在线 imAccountId=' + c.imAccountId))
+        .then(async (c) => {
+          logState('后台监听在线 imAccountId=' + c.imAccountId);
+          // 有些链路的心跳和业务响应一直正常，但 PUSH 已经不再送达。
+          // 30 秒没有收到任何聊天帧时主动 sync 一次，既补回漏消息，也避免等上
+          // 两分钟才由 alive() 判死。sync() 失败不重连：下一次 tick 还会再试。
+          const quietFor = Date.now() - (Number(c.lastMessageAt) || Number(c.lastRecvAt) || Date.now());
+          if (quietFor < 30000 || imSyncPending) return;
+          imSyncPending = Promise.resolve(c.sync())
+            .catch((error) => log.warn('im', '后台补同步失败: ' + (error && error.message ? error.message : error)))
+            .finally(() => { imSyncPending = null; });
+          await imSyncPending;
+        })
         .catch((e) => logState('后台监听连接失败: ' + (e && e.message ? e.message : e)));
     };
     tick();

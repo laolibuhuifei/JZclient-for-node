@@ -2312,6 +2312,17 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     }
   }
 
+  // Used by both the WebUI file upload and plugins with downloaded video bytes.
+  async function sendVideoBuffer(c, t, buf, filename = 'video.mp4') {
+    if (!Buffer.isBuffer(buf) || !buf.length) throw new Error('视频文件为空');
+    if (buf.length > 100 * 1024 * 1024) throw new Error('视频超过 100MB');
+    const extension = /^\.(?:mp4|mov|webm|mkv|avi|m4v)$/i.test(path.extname(filename)) ? path.extname(filename) : '.mp4';
+    const tmp = path.join(os.tmpdir(), 'watch_vid_' + crypto.randomBytes(6).toString('hex') + extension);
+    fs.writeFileSync(tmp, buf);
+    try { return await sendVideoParts(c, t, tmp); }
+    finally { try { fs.unlinkSync(tmp); } catch (e) { /* Temporary upload may already be gone. */ } }
+  }
+
   async function sendChat(body) {
     const key = String(body.key || '');
     const targets = await loadChatTargets();
@@ -2440,11 +2451,15 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         url = v.downloadUrl;
       }
     } else if (kind === 'video') {
+      if (body.buf !== undefined) {
+        const parts = await sendVideoBuffer(c, t, body.buf, String(body.filename || 'video.mp4'));
+        return { url: '', parts };
+      }
       const src = String(body.src || '').trim();
       if (!src) throw new Error('视频地址不能为空');
       const dur = Number(body.duration) || 0;
       // 外链且不超时长(或不知道时长): 保持原来的「不下载、直接引用」, 别平白多传一次
-      if (/^https?:\/\//i.test(src) && (!dur || dur <= VIDEO_MAX_SEC)) {
+      if (/^https?:\/\//i.test(src) && (!dur || dur <= VIDEO_MAX_SEC) && !body.forceUpload) {
         const v = directVideo(src, dur);
         obj = buildVideo(v);
         label = '[视频]';

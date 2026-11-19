@@ -14,7 +14,7 @@ const videocall = require('./videocall');
 const headless = require('./headless');
 const { bufferEarlyMessages } = require('./im-early-messages');
 const { allowMessageSideEffects } = require('./im-message-freshness');
-const { buildChatTargets, chatIdsOf } = require('./chat-targets');
+const { buildChatTargets, chatIdsOf, watchPeerOf, watchIdOf } = require('./chat-targets');
 const { selectBattery, selectOnline } = require('./watch-status-selection');
 const { chat: aiChat } = require('./ai');
 const aiTrigger = require('./ai-trigger');
@@ -30,6 +30,8 @@ const bili = require('./bilibili');
 const biliBot = require('./bili-bot');
 const biliComment = require('./bili-comment');
 const biliSearch = require('./bili-search');
+const { searchPlaces, validateDangerArea } = require('./place-search');
+const { renderDangerAreaSnapshot } = require('./guard-snapshot');
 const { PluginManager, normalizeManifest, PLUGIN_MODE, MANAGED_HINT } = require('./plugin');
 const log = require('./logger');
 const SITE = require('./site.config');
@@ -39,28 +41,31 @@ let htmlCache = null;
 let htmlGzip = null;
 let htmlEtag = '';
 let htmlBuild = '';
+let htmlVersion = '';
 
 function pageHtml() {
-  if (!htmlCache) {
+  // React 是预打包进这一个文件的（PR #9）。用「大小 + mtime」当版本号：
+  // 重建之后不用重启 IM 也能生效，省掉「改了没反应」的那类排查。
+  const st = fs.statSync(HTML_FILE);
+  const version = st.size + ':' + st.mtimeMs;
+  if (!htmlCache || htmlVersion !== version) {
     let raw = fs.readFileSync(HTML_FILE, 'utf8');
-    // ETag 用「大小 + mtime」拼，不重算内容哈希：换文件自然失效，算一次也几乎不花时间
-    try {
-      const st = fs.statSync(HTML_FILE);
-      htmlEtag = '"' + st.size.toString(16) + '-' + Math.floor(st.mtimeMs).toString(16) + '"';
-      htmlBuild = st.size.toString(16) + '-' + Math.floor(st.mtimeMs).toString(16);
-    } catch (e) { htmlEtag = ''; htmlBuild = ''; }
-    // 把构建号注入页面。前端轮询时带上它，服务端发现不一致就让页面自己 reload——
+    // ETag 同理，不重算内容哈希：换文件自然失效，算一次也几乎不花时间
+    htmlEtag = '"' + st.size.toString(16) + '-' + Math.floor(st.mtimeMs).toString(16) + '"';
+    // 把构建号注入页面。前端轮询时带上它，服务端发现不一致就让页面自己 reload ——
     // 改完前端忘刷新是这项目最常犯的错（改了半小时发现跑的还是旧 JS）。
+    htmlBuild = st.size.toString(16) + '-' + Math.floor(st.mtimeMs).toString(16);
     raw = raw.split('__HTML_BUILD__').join(htmlBuild);
     htmlCache = raw;
-    // 顺手压一份放内存。HTML 是死文件，压一次管到进程重启，实测 20ms 上下，
-    // 换来的是一次 345KB → 84KB（4.1 倍）。别改成每次请求现压，那才是真的浪费 CPU。
+    // 顺手压一份放内存。HTML 是死文件，压一次管到下次重建，实测 20ms 上下，
+    // 换来的是一次 900KB → 200KB 左右。别改成每次请求现压，那才是真的浪费 CPU。
     try {
       htmlGzip = zlib.gzipSync(Buffer.from(htmlCache, 'utf8'), { level: 6 });
     } catch (e) {
       htmlGzip = null;
       log.warn('webui', '首页 gzip 失败，退回明文发送：' + (e && e.message ? e.message : e));
     }
+    htmlVersion = version;
   }
   return htmlCache;
 }
@@ -116,7 +121,7 @@ function ok(res, data) {
 
 function fail(res, e) {
   res._failed = true;
-  send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ ok: false, error: e && e.message ? e.message : String(e) }));
+  send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ ok: false, error: e && e.message ? e.message : String(e), ...(e?.parentSessionExpired ? { parentSessionExpired: true } : {}) }));
 }
 
 function readBody(req) {
@@ -162,7 +167,11 @@ function unwrap(r) {
 
 function ensure(r) {
   const u = unwrap(r);
-  if (u.code !== '000001') throw new Error(`[${u.code}] ${u.desc || '请求失败'}`);
+  if (u.code !== '000001') {
+    const error = new Error(r?.parentSessionExpired ? '家长账号登录已失效，请重新登录' : `[${u.code}] ${u.desc || '请求失败'}`);
+    if (r?.parentSessionExpired) error.parentSessionExpired = true;
+    throw error;
+  }
   return u.data;
 }
 
@@ -1345,6 +1354,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       account: {
         userName: cfg.userName || '',
         loggedIn: !!cfg.token,
+        sessionExpired: api.sessionExpired === true,
         mobileId: cfg.mobileId || '',
         imConnected: !!(im && im.connected),
         onebotRunning: onebots.size > 0,
@@ -2323,7 +2333,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     const group = t.type === 'group';
     const dialogId = group ? t.dialogId : t.receiverId;
     const sendOne = async (p, i, total) => {
-      const v = await uploadVideo(cfg, { src: p, group, dialogId, myImAccountId: c.imAccountId });
+      const v = await uploadVideo(cfg, { src: p, group, dialogId, myImAccountId: c.imAccountId, ...(total === 1 ? { duration: Number(duration) || 0 } : {}) });
       const obj = buildVideo(v);
       const r = group
         ? await c.sendGroupPayload(t.dialogId, c.imAccountId, obj, 1)
@@ -2363,6 +2373,17 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       if (split) cleanupSplit(split);
       if (dl) { try { fs.unlinkSync(dl); } catch (e) {} }
     }
+  }
+
+  // Used by both the WebUI file upload and plugins with downloaded video bytes.
+  async function sendVideoBuffer(c, t, buf, filename = 'video.mp4') {
+    if (!Buffer.isBuffer(buf) || !buf.length) throw new Error('视频文件为空');
+    if (buf.length > 100 * 1024 * 1024) throw new Error('视频超过 100MB');
+    const extension = /^\.(?:mp4|mov|webm|mkv|avi|m4v)$/i.test(path.extname(filename)) ? path.extname(filename) : '.mp4';
+    const tmp = path.join(os.tmpdir(), 'watch_vid_' + crypto.randomBytes(6).toString('hex') + extension);
+    fs.writeFileSync(tmp, buf);
+    try { return await sendVideoParts(c, t, tmp); }
+    finally { try { fs.unlinkSync(tmp); } catch (e) { /* Temporary upload may already be gone. */ } }
   }
 
   async function sendChat(body) {
@@ -2493,11 +2514,15 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         url = v.downloadUrl;
       }
     } else if (kind === 'video') {
+      if (body.buf !== undefined) {
+        const parts = await sendVideoBuffer(c, t, body.buf, String(body.filename || 'video.mp4'));
+        return { url: '', parts };
+      }
       const src = String(body.src || '').trim();
       if (!src) throw new Error('视频地址不能为空');
       const dur = Number(body.duration) || 0;
       // 外链且不超时长(或不知道时长): 保持原来的「不下载、直接引用」, 别平白多传一次
-      if (/^https?:\/\//i.test(src) && (!dur || dur <= VIDEO_MAX_SEC)) {
+      if (/^https?:\/\//i.test(src) && (!dur || dur <= VIDEO_MAX_SEC) && !body.forceUpload) {
         const v = directVideo(src, dur);
         obj = buildVideo(v);
         label = '[视频]';
@@ -3258,6 +3283,20 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   }
 
   async function handleApi(req, res, parts, query) {
+    if (parts[1] === 'map' && parts[2] === 'search' && parts.length === 3) {
+      if (req.method !== 'GET') throw new Error('地点搜索仅支持读取。');
+      const controller = new AbortController();
+      const closed = () => { if (!res.writableEnded) controller.abort(new Error('地点搜索已取消。')); };
+      res.once('close', closed);
+      try {
+        const result = await searchPlaces({ q: query.get('q') || '',
+          latitude: query.has('latitude') ? query.get('latitude') : undefined,
+          longitude: query.has('longitude') ? query.get('longitude') : undefined,
+          signal: controller.signal });
+        if (!res.destroyed) return ok(res, result);
+        return;
+      } finally { res.removeListener('close', closed); }
+    }
     // ===== 插件 =====
     // 注意单复数：/api/plugins/* 是管理（列表/上传/启停），/api/plugin/<id>/* 是插件自己的
     if (parts[1] === 'plugins') return handlePlugins(req, res, parts, query);
@@ -3697,9 +3736,14 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         if (im) { try { im.close(); } catch (e) { /* ignore */ } im = null; }
         return ok(res, { result: true });
       }
+      if (query.get('check') === '1' && cfg.token && !api.sessionExpired) {
+        // Read the session contract without touching device settings or sending IM.
+        await safe(() => api.getDialogAccounts());
+      }
       return ok(res, {
         userName: cfg.userName || '',
         loggedIn: !!cfg.token,
+        sessionExpired: api.sessionExpired === true,
         authId: cfg.authId || '',
         mobileId: cfg.mobileId || '',
       });
@@ -3981,6 +4025,20 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       if (parts[2] === 'status') {
         return ok(res, imStatus());
       }
+      if (parts[2] === 'avatar') {
+        if (req.method !== 'GET') throw new Error('头像接口只支持读取');
+        const key = String(query.get('key') || '');
+        const targets = await loadChatTargets();
+        const target = targets.find(target => target.key === key);
+        const peer = watchPeerOf(target);
+        const watchId = watchIdOf(target);
+        if (watchId) {
+          const account = await safe(() => api.getWatchAccount(watchId));
+          const url = account ? await getAvatarUrl(watchId, account) : '';
+          if (url) return ok(res, { url });
+        }
+        return ok(res, { url: peer ? await getAvatarUrl('chat:' + key, peer) : '' });
+      }
       if (parts[2] === 'messages') {
         // 顺带把连接状态捎回去: 前端每 3 秒轮询这一个接口就够了,
         // 「连上了但一直没收到数据」要能在页面上看出来, 否则只能干等
@@ -4027,15 +4085,8 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         const dialogId = group ? t.dialogId : t.receiverId;
         // 视频超过 30 秒要切段, 而 ffmpeg 只吃文件 —— 先落盘再交给 sendVideoParts
         if (kind === 'video') {
-          const ext = path.extname(filename) || '.mp4';
-          const tmp = path.join(os.tmpdir(), 'watch_vid_' + crypto.randomBytes(6).toString('hex') + ext);
-          fs.writeFileSync(tmp, buf);
-          try {
-            const n = await sendVideoParts(c, t, tmp);
-            return ok(res, { result: true, parts: n });
-          } finally {
-            try { fs.unlinkSync(tmp); } catch (e) { /* ignore */ }
-          }
+          const n = await sendVideoBuffer(c, t, buf, filename);
+          return ok(res, { result: true, parts: n });
         }
         const img = await uploadImage(cfg, { buf, filename, group, dialogId, myImAccountId: c.imAccountId });
         const obj = buildPhoto(img);
@@ -4052,6 +4103,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       return ok(res, {
         targets: targets.map((t) => ({
           key: t.key, type: t.type, name: t.name, sub: t.sub, count: (chatLog.get(t.key) || []).length,
+          ...(watchIdOf(t) ? { watchId: watchIdOf(t) } : {}),
         })),
         connected: st.alive,
         im: st,
@@ -4368,11 +4420,9 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       }
       if (req.method === 'POST' && parts[4] === 'danger') {
         const b = await readBody(req);
-        const latitude = Number(b.latitude);
-        const longitude = Number(b.longitude);
-        const radius = Number(b.radius || 300);
-        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) throw new Error('经纬度不正确');
-        ensure(await api.addDangerArea({ watchId: id, latitude, longitude, radius }));
+        const { latitude, longitude, radius } = validateDangerArea(b);
+        const picture = await renderDangerAreaSnapshot({ latitude, longitude, radius });
+        ensure(await api.addDangerArea({ watchId: id, latitude, longitude, radius, areaPic: picture.toString('base64') }));
         return ok(res, { result: true });
       }
       if (req.method === 'DELETE' && parts[4] === 'danger' && parts[5]) {
@@ -5141,7 +5191,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
                   : ext === '.json' ? 'application/json; charset=utf-8'
                     : 'application/octet-stream';
         const buf = fs.readFileSync(file);
-        res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'public, max-age=604800', 'Content-Length': buf.length });
+        res.writeHead(200, { 'Content-Type': type, 'Cache-Control': ext === '.js' ? 'no-cache' : 'public, max-age=604800', 'Content-Length': buf.length });
         return res.end(buf);
       }
       if (parts[0] !== 'api') {
@@ -5165,6 +5215,18 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   process.once('exit', () => { try { headless.stop('进程退出'); } catch (e) { /* ignore */ } });
 
   log.info('webui', `日志级别 ${log.levelName()}（WP_LOG=debug 看请求体细节，WP_LOG=warn 只看告警）`);
+
+  // AI 到底往哪儿发请求，启动时先写一行。
+  // 出问题时日志里只有「连不上 xxx」，那行能立刻告诉你 xxx 是不是配错了
+  // （托管模式下平台下发错地址时，这里一眼就能看出来）。
+  // 只打主机名：有的中转站把 key 写在 URL 的 query 里，整条地址不能进日志。
+  if (cfg.ai && cfg.ai.enabled) {
+    const rt = aiRuntime();
+    let where = String(rt.baseUrl || '(空)');
+    try { where = new URL(where).host || where; } catch (e) { /* 地址本身不合法，原样显示 */ }
+    log.info('ai', `自动回复已启用 地址=${where} 模型=${rt.model || '(默认)'}`
+      + ` 方式=${AI_MANAGED ? '托管(' + AI_SOURCE + ')' : '自填'}`);
+  }
 
   // 会话列表必须先拉到: 收消息时要靠它把 dialogId/imAccountId 映射成会话 key,
   // 没拉到时进来的消息会被直接丢掉, 而且日志里完全看不出来。

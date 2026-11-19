@@ -43,6 +43,21 @@ function watchAccounts(accounts) {
   return (accounts || []).filter((a) => a && Number(a.accountType) === 1 && a.imAccountId != null);
 }
 
+// A conversation's own IM account is the authoritative avatar source when the
+// platform omits the relationship between a watch ID and its IM account ID.
+function watchPeerOf(target) {
+  if (!target || target.type !== 'single') return null;
+  return watchAccounts(target.peers).find(peer => String(peer.imAccountId) === String(target.receiverId)) || null;
+}
+
+// In /dialogaccount/merge/accounts, a watch member's accountId is its watchId.
+// imAccountId identifies the conversation; these IDs are not interchangeable.
+function watchIdOf(target) {
+  const peer = watchPeerOf(target);
+  const id = peer && peer.accountId != null ? String(peer.accountId).trim() : '';
+  return id && !['0', 'null', 'undefined'].includes(id) ? id : '';
+}
+
 function buildChatTargets(familyDialogs) {
   const targets = [];
   const byKey = new Map();
@@ -109,4 +124,4 @@ function buildChatTargets(familyDialogs) {
   });
 }
 
-module.exports = { buildChatTargets, chatIdsOf };
+module.exports = { buildChatTargets, chatIdsOf, watchPeerOf, watchIdOf };

@@ -6,7 +6,7 @@
 
 <p align="center">
   用 Node.js 重构的电话手表家长客户端<br>
-  账号 CLI + WebUI 单页面板 · 主页仪表盘（CPU/内存实时监控 + 每日一言） · OneBot v11 桥接（HTTP / WS / 反向 WS，含 QQ 兼容层） · 型号能力门控 · 后台消息监听 · 自动同意好友申请 · AI 自动回复 · <b>视频通话 B 站点播（语音点播，无头浏览器全自动接听）</b>
+  账号 CLI + WebUI 面板（**React + Material Design 3**，构建产物随仓库分发，不用装 node_modules） · 主页仪表盘（CPU/内存实时监控 + 每日一言） · OneBot v11 桥接（HTTP / WS / 反向 WS，含 QQ 兼容层） · 型号能力门控 · 后台消息监听 · 自动同意好友申请 · AI 自动回复 · <b>视频通话 B 站点播（语音点播，无头浏览器全自动接听）</b>
 </p>
 
 <p align="center">
@@ -82,7 +82,8 @@
 ```text
 JZClientForNode/
 ├── bin/
-│   └── jzclient.js            # CLI 入口
+│   ├── jzclient.js            # CLI 入口（含账号管理）
+│   └── webui.js               # 只起 WebUI 的入口（`npm run webui -- --port 8787`）
 ├── src/
 │   ├── assets/icon.png        # 项目图标（512×512）
 │   ├── assets/jzclient-logo.png  # 评论长图页脚的项目图标（128×128）
@@ -108,6 +109,11 @@ JZClientForNode/
 │   ├── videocall.js           # 视频/语音通话信令：来电识别、接听/拒接/挂断、实时字幕任务
 │   ├── headless.js            # 无头浏览器（自动接听用）：查找/下载 Chromium、起停与内存闸
 │   ├── assets/agora-rtc.js    # Agora RTC Web SDK 4.20.0（随仓库分发，见「第三方资源」）
+│   ├── assets/call-ui.js      # 视频通话浮层：自己注入样式和 DOM，页面里放个挂载点就行
+│   ├── assets/display-scale.js # 手机/平板上的界面缩放（桌面上按 0.9 渲染）
+│   ├── guard-area.js          # 危险区域：界面选的是圆，平台要的是多边形边界
+│   ├── guard-snapshot.js      # 危险区域截图（平台要求随区域一起提交 areaPic）
+│   ├── place-search.js        # 地点搜索（Photon）+ 区域参数校验
 │   ├── image.js               # B 站图床图片下载 + 解码（走 `@WxH_1c.png` 参数）
 │   ├── ttf.js                 # TrueType/TTC 字形轮廓解析（评论长图用）
 │   ├── canvas.js              # 极简画布：字形栅格化 + 文字/矩形/圆形/位图绘制
@@ -117,12 +123,16 @@ JZClientForNode/
 │   ├── mask.js                # 日志脱敏
 │   ├── logger.js              # 分级彩色日志
 │   ├── webui.js               # 本地 HTTP 服务
-│   ├── webui.html             # WebUI 页面
+│   ├── webui.html             # WebUI 页面（**React 构建产物，别手改**；改源码后跑 npm run build:webui）
 │   ├── emoji_preset.json      # 表情清单
 │   ├── link-presets.txt       # 白名单链接库（每行「名称 + Tab + 链接」，25210 条）
 │   ├── link-presets.js        # 链接库：解析/服务端搜索/远端同步（地址写死）
 │   ├── site.js                # 配置加载器
 │   └── site.config.js         # 服务端地址与客户端参数
+├── frontend/                  # WebUI 的 React + TypeScript 源码
+│   ├── src/                   # 页面、组件、主题（MD3）
+│   ├── checks/                # 前端行为检查（npm run test:webui）
+│   └── build.mjs              # 打包成单个 src/webui.html
 ├── plugins/
 │   ├── watch-daily/           # 内置示例插件（手表日报：定时发消息 + 管理界面）
 │   └── watch-stats/           # 内置示例插件（手表数据：只读统计 + 趋势界面）

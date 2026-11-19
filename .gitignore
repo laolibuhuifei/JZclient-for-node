@@ -16,6 +16,13 @@ yarn-error.log*
 # 插件的运行期数据（配置/存储）不进仓库，插件代码本身要进
 plugins/*/data/
 
+# 本地 UI 设计工具、研究样本与独立插件工作区不进主仓库
+.impeccable/
+.research/
+.taste-skill/
+plugins/jz-betterxhs/
+zxi2233/
+
 # 临时文件与产物
 tmp/
 dist/

@@ -1,6 +1,6 @@
 {
   "name": "jzclient-for-node",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "用 Node 重构的电话手表家长客户端，提供 CLI 与 WebUI 两种界面，并带有自动同意好友申请等增强功能",
   "type": "commonjs",
   "main": "bin/jzclient.js",
@@ -9,7 +9,12 @@
   },
   "scripts": {
     "start": "node bin/jzclient.js",
-    "test": "node --test"
+    "test": "node --test",
+    "webui": "node bin/webui.js",
+    "dev:webui": "npm --prefix frontend run dev",
+    "build:webui": "npm --prefix frontend run build",
+    "typecheck:webui": "npm --prefix frontend run typecheck",
+    "test:webui": "npm --prefix frontend run test"
   },
   "keywords": [
     "smartwatch",

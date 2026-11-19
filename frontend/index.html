@@ -1,0 +1,30 @@
+<!doctype html>
+<!-- Generated from frontend/src. Run npm run build:webui to rebuild. -->
+<html lang="zh-CN" data-type="software" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <script src="/assets/display-scale.js"></script>
+  <meta name="theme-color" content="#171820">
+  <meta name="color-scheme" content="light dark">
+  <meta name="page-type" content="software">
+  <meta name="site-kind" content="software">
+  <meta name="description" content="管理电话手表、查看位置、收发消息与配置家长端服务。">
+  <title>JZClientForNode · 手表家长端</title>
+  <link rel="icon" href="/assets/icon.png">
+  <script>try{var t=localStorage.getItem('jz_theme')==='light'?'light':'dark';document.documentElement.dataset.theme=t;document.querySelector('meta[name="theme-color"]').setAttribute('content',t==='dark'?'#171820':'#f5f5fa')}catch(e){}</script>
+  <!-- APP_STYLE -->
+</head>
+<body>
+  <div id="root"><div style="padding:48px;text-align:center">正在打开 JZClientForNode…</div></div>
+  <noscript>请启用 JavaScript 以使用手表家长端。</noscript>
+  <!-- APP_SCRIPT -->
+  <script>window.__JZ_BUILD__='__HTML_BUILD__';</script>
+  <!-- 视频通话浮层：独立脚本，自己注入样式和 DOM（见 src/assets/call-ui.js）。
+       放在 React bundle 之后，让它先渲染自己的页面，再盖浮层上去。 -->
+  <div id="jzCallRoot"></div>
+  <script src="/assets/agora-rtc.js"></script>
+  <script src="/assets/call-ui.js"></script>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+</html>

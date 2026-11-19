@@ -1,0 +1,54 @@
+.md-time-picker { position: relative; min-width: 0; }
+.md-time-picker .input { color-scheme: inherit; font-variant-numeric: tabular-nums; }
+.time-canonical-input { display: none !important; }
+.time-picker-trigger.button { display: flex; width: 100%; justify-content: space-between; min-height: 52px; padding: 10px 14px; background: var(--md-surface); border: 1px solid var(--md-outline); border-radius: 12px; color: var(--md-on-surface); font-size: 18px; font-variant-numeric: tabular-nums; }
+.time-picker-trigger > svg { color: var(--md-primary); }
+.time-picker-trigger.button:hover:not(:disabled) { background: var(--md-surface-variant, var(--md-container)); border-color: var(--md-primary); }
+.time-picker-trigger.button:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 3px; }
+.time-picker-trigger.button:disabled { cursor: not-allowed; }
+.time-picker-description { margin: 0 0 16px; color: var(--md-on-surface-variant); font-size: 15px; }
+.time-picker-dialog .modal-body { padding-top: 4px; }
+.time-picker-dialog .modal-footer { flex-wrap: nowrap; }
+.time-picker-footer-tools { display: flex; align-items: center; gap: 2px; margin-right: auto; }
+.time-picker-error { margin: 16px 0 0; }
+.time-wheel-row { display: flex; justify-content: center; gap: 14px; align-items: center; }
+.time-wheel-column { width: 96px; text-align: center; }
+.time-wheel-label { display: block; font-size: 14px; color: var(--md-on-surface-variant); margin-bottom: 10px; }
+.time-wheel { height: 220px; overflow-y: auto; padding-block: 88px; scroll-snap-type: y mandatory; overscroll-behavior: contain; scrollbar-width: none; border-radius: 16px; background: var(--md-surface); touch-action: pan-y; }
+.time-wheel::-webkit-scrollbar { display: none; }
+.time-wheel:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 3px; }
+.time-wheel-option { display: grid; place-items: center; height: 44px; flex: none; scroll-snap-align: center; font-size: 24px; font-variant-numeric: tabular-nums; color: var(--md-on-surface-variant); cursor: pointer; }
+.time-wheel-option.is-selected { background: var(--md-primary-container); color: var(--md-on-primary-container); border-radius: 12px; }
+.time-wheel-separator { align-self: center; margin-top: 30px; font-size: 28px; color: var(--md-primary); }
+.time-picker-preview { display: block; margin-top: 20px; text-align: center; color: var(--md-primary); font-size: 26px; font-variant-numeric: tabular-nums; }
+.time-dial-segments { display: flex; align-items: flex-start; justify-content: center; gap: 8px; margin: 0 0 24px; }
+.time-dial-segment-column { display: flex; align-items: stretch; flex-direction: column; gap: 6px; width: 100px; }
+.time-dial-segment-column > span { font-size: 14px; color: var(--md-on-surface-variant); text-align: center; }
+.time-dial-segment { min-height: 74px; padding: 8px 12px; border: 0; border-radius: 12px; background: var(--md-surface); color: var(--md-on-surface); font-family: inherit; font-size: 44px; line-height: 1.2; font-variant-numeric: tabular-nums; cursor: pointer; transition: background-color 200ms ease, color 200ms ease; }
+.time-dial-segment:hover { background: var(--md-surface-variant, var(--md-container)); }
+.time-dial-segment.is-active { background: var(--md-primary-container); color: var(--md-on-primary-container); }
+.time-dial-segment:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 3px; }
+.time-dial-colon { display: flex; align-items: center; justify-content: center; height: 74px; font-size: 40px; color: var(--md-on-surface); }
+.time-dial-layout { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.time-clock-dial { position: relative; width: min(280px, 100%); aspect-ratio: 1; border-radius: 50%; background: var(--md-surface); touch-action: none; user-select: none; cursor: crosshair; }
+.time-clock-dial:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 5px; }
+.time-clock-hand { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.time-clock-hand line { stroke: var(--md-primary); stroke-width: 2; }
+.time-clock-hand circle { fill: var(--md-primary); }
+.time-clock-number { position: absolute; display: grid; place-items: center; width: 42px; height: 42px; transform: translate(-50%, -50%); font-size: 21px; line-height: 1; font-variant-numeric: tabular-nums; color: var(--md-on-surface); pointer-events: auto; }
+.time-clock-number.is-inner { width: 34px; height: 34px; font-size: 16px; }
+.time-clock-number.is-selected { color: var(--md-on-primary); }
+.time-dial-hint { max-width: 30ch; margin: 0; text-align: center; font-size: 14px; line-height: 1.7; color: var(--md-on-surface-variant); }
+.time-keyboard-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.time-keyboard-fields label { display: flex; flex-direction: column; gap: 8px; min-width: 0; font-size: 14px; color: var(--md-on-surface-variant); }
+.time-keyboard-fields .input { min-height: 76px; padding: 10px; font-family: inherit; text-align: center; font-size: 34px; font-variant-numeric: tabular-nums; caret-color: var(--md-primary); }
+.time-keyboard-fields .input::placeholder { font-size: 18px; color: var(--md-on-surface-variant); }
+@media (max-width: 360px) {
+  .time-picker-dialog .modal-footer { gap: 6px; }
+  .time-picker-dialog .modal-footer > .button { padding-inline: 12px; }
+  .time-picker-footer-tools > .button { padding-inline: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .time-dial-segment, .time-picker-trigger { transition: none; }
+  .time-wheel { scroll-behavior: auto; }
+}

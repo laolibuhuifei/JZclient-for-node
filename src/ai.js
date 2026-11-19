@@ -137,6 +137,82 @@ function buildBody(ai, messages, opts) {
   return body;
 }
 
+// ---------- 网络错误说人话 ----------
+//
+// Node 内置 fetch（undici）连不上时只抛一句 `TypeError: fetch failed`，
+// 真正的原因藏在 e.cause 里（ECONNREFUSED / ENOTFOUND / 证书 / 超时…）。
+// 直接打 e.message 的后果：日志里 26 个实例全是「fetch failed」，
+// 分不出是地址填错、网络不通还是证书过期（2026-11-19 线上踩到）。
+//
+// 这里把它翻成一句能直接定位的话，并带上主机名 ——
+// 地址打错的时候，看见 `127.0.0.1:8788` 就一眼明白了。
+const NET_CODE_TEXT = {
+  ENOTFOUND: '域名解析失败（DNS 里没有这个域名，检查地址是否写错）',
+  EAI_AGAIN: 'DNS 暂时不可用（本地解析服务没响应）',
+  ECONNREFUSED: '连接被拒绝（目标端口没有服务在监听）',
+  ECONNRESET: '连接被重置（对端提前断开）',
+  ETIMEDOUT: '连接超时（TCP 握手没完成）',
+  EHOSTUNREACH: '主机不可达（路由不通）',
+  ENETUNREACH: '网络不可达（本机没有可用路由）',
+  EPIPE: '连接已断开（写入时对端已关闭）',
+  UND_ERR_CONNECT_TIMEOUT: '连接超时（建连阶段）',
+  UND_ERR_HEADERS_TIMEOUT: '等响应头超时（对端接了但不回）',
+  UND_ERR_BODY_TIMEOUT: '读响应体超时（对端发到一半不动了）',
+  UND_ERR_SOCKET: '连接被对端关闭',
+  UND_ERR_CLOSED: '连接已关闭',
+  DEPTH_ZERO_SELF_SIGNED_CERT: '证书自签名（上游用的是自签证书）',
+  SELF_SIGNED_CERT_IN_CHAIN: '证书链里有自签证书',
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: '证书无法验证（缺中间证书）',
+  CERT_HAS_EXPIRED: '证书已过期',
+  ERR_TLS_CERT_ALTNAME_INVALID: '证书域名和请求的域名不一致',
+};
+
+// undici 的多地址失败会包成 AggregateError（errors 数组），
+// 普通失败是单层 cause，两种都要能挖到底
+function causeList(c, depth) {
+  if (!c || depth > 3) return [];
+  const out = [c];
+  if (Array.isArray(c.errors)) {
+    for (let i = 0; i < c.errors.length; i++) out.push(...causeList(c.errors[i], depth + 1));
+  } else if (c.cause) {
+    out.push(...causeList(c.cause, depth + 1));
+  }
+  return out;
+}
+
+function describeFetchError(e, url) {
+  const raw = e && e.message ? String(e.message) : String(e);
+  // 地址本身就不成 URL（用户漏了 http:// 之类），fetch 在解析阶段就炸了
+  if (/Failed to parse URL/i.test(raw)) {
+    return `请求地址不合法：${String(url || '(空)')}（要以 http:// 或 https:// 开头）`;
+  }
+  // 不是 fetch 的错（比如我们自己 throw 的）就原样返回，别乱翻译
+  if (!/fetch failed/i.test(raw)) return raw;
+
+  let host = '';
+  try { host = new URL(url).host; } catch (x) { /* url 本身不合法，下面单独说 */ }
+  if (!host) return '请求地址不合法：' + String(url || '(空)');
+
+  const list = causeList(e.cause, 0);
+  const codes = [];
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i];
+    const code = String(c.code || c.errno || '');
+    if (code && codes.indexOf(code) < 0) codes.push(code);
+  }
+  // TLS 类错误码各家命名不一，用模式兜一层
+  const tls = codes.find((c) => /CERT|TLS|SSL|SIGNATURE/i.test(c));
+
+  let why = '';
+  for (let i = 0; i < codes.length && !why; i++) why = NET_CODE_TEXT[codes[i]] || '';
+  if (!why && tls) why = '证书校验失败（' + tls + '）';
+  if (!why && list.length) why = String(list[0].message || raw);
+
+  const tail = codes.length ? ` [${codes.join('/')}]` : '';
+  return `连不上 ${host}${tail}：${why || '原因未知'}`
+    + '（检查这个地址是否可达、端口是否开放、证书是否有效）';
+}
+
 // 返回 { content, reasoning, finishReason, model, ms, usage }
 async function chatFull(ai, messages, opts = {}) {
   const url = buildUrl(ai.baseUrl);
@@ -191,7 +267,8 @@ async function chatFull(ai, messages, opts = {}) {
     if (e && e.name === 'AbortError') {
       throw new Error(`请求超时（${Math.round(timeout / 1000)} 秒）。推理模型可以把超时调大，或换用更快的模型`);
     }
-    throw e;
+    // fetch failed 这类只带一句话的错，翻译成能定位的（见 describeFetchError）
+    throw new Error(describeFetchError(e, url));
   } finally {
     clearTimeout(timer);
   }

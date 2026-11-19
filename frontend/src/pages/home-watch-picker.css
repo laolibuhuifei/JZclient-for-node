@@ -1,0 +1,93 @@
+.home-watch-picker { min-width: 0; container-type: inline-size; container-name: home-watch-picker; }
+.home-watch-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; align-items: stretch; }
+.home-watch-row[data-has-more=true] { grid-template-columns: minmax(0, 1fr) 46px; }
+.home-watch-primary, .home-watch-overflow { list-style: none; margin: 0; padding: 0; }
+.home-watch-primary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; min-width: 0; }
+.home-watch-primary:has(> li:only-child) { grid-template-columns: minmax(0, 1fr); }
+.page-home .home-watch-picker:has(.home-watch-primary > li:only-child) { width: min(100%, clamp(276px, calc((var(--home-watch-single-ch, 7) * 1.36em) + 11.625rem), 380px)); margin-left: 0; }
+.home-watch-primary > li, .home-watch-overflow > li { min-width: 0; }
+.home-watch-primary > li { container-type: inline-size; container-name: home-watch-choice; }
+:is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-card { position: relative; isolation: isolate; display: flex; width: 100%; height: 100%; min-width: 0; min-height: 104px; align-items: center; justify-content: space-between; gap: 12px; padding: 16px; border: 1px solid var(--md-outline); border-radius: 16px; text-align: left; color: var(--md-on-surface); background: var(--md-surface); white-space: normal; transition: background-color 160ms ease-out, transform 160ms ease-out; }
+:is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-card[data-selected=true] { border-color: var(--md-primary); color: var(--md-on-primary-container); background: var(--md-primary-container); }
+:is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-card:hover { background: var(--md-container); }
+:is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-card[data-selected=true]:hover { background: var(--md-primary-container); }
+:is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-card:has(.home-watch-select:active) { transform: scale(.98); }
+:is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-select { position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%; min-height: 44px; padding: 0; border: 0; border-radius: inherit; background: transparent; }
+:is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-select:hover, :is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-select:active { background: transparent; }
+.home-watch-copy { position: relative; z-index: 1; display: flex; flex: 1; flex-direction: column; gap: 10px; min-width: 0; pointer-events: none; }
+.home-watch-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.home-watch-name > strong { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 19px; font-weight: 400; line-height: 1.5; }
+.home-watch-name > svg { flex: none; color: var(--md-primary); }
+:is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-info { position: relative; z-index: 2; flex: none; width: 44px; height: 44px; min-width: 44px; min-height: 44px; padding: 0; margin: -8px -5px -8px -3px; border: 0; border-radius: 50%; background: transparent; color: var(--md-primary); pointer-events: auto; }
+.home-watch-info::before { position: absolute; inset: 11px; border-radius: 50%; background: color-mix(in srgb, var(--md-primary) 12%, transparent); content: ''; }
+.home-watch-info > svg { position: relative; }
+:is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-info:hover { background: transparent; }
+.home-watch-info:hover::before { background: color-mix(in srgb, var(--md-primary) 22%, transparent); }
+.home-watch-model { display: flex; align-items: center; min-width: 0; gap: 8px; color: var(--md-on-surface-variant); font-size: 14px; }
+.home-watch-model > span:first-child { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+:is(.page-home, .device-watch-picker) .home-watch-model .badge { flex: none; padding: 2px 6px; border-radius: 6px; line-height: 1.5; font-size: 12px; white-space: nowrap; }
+:is(.page-home, .device-watch-picker) .home-watch-card .home-battery-ring { position: relative; z-index: 1; display: flex; flex: none; margin-left: auto; color: var(--md-primary); pointer-events: none; }
+:is(.page-home, .device-watch-picker) .home-watch-card .home-battery-ring[data-low=true] { color: var(--md-on-warning-container); }
+:is(.page-home, .device-watch-picker) .home-watch-card .home-battery-dial { width: 58px; height: 58px; }
+:is(.page-home, .device-watch-picker) .home-watch-card .home-battery-dial > strong { font-size: 18px; }
+.home-watch-battery-outline { display: none; position: absolute; inset: -1px; z-index: 1; color: var(--md-primary); pointer-events: none; }
+.home-watch-battery-outline[data-low=true] { color: var(--md-on-warning-container); }
+.home-watch-battery-outline > svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; fill: none; stroke-width: 2; }
+.home-watch-battery-outline rect { width: calc(100% - 2px); height: calc(100% - 2px); }
+.home-watch-battery-outline-track { stroke: var(--md-outline); }
+.home-watch-battery-outline-value { stroke: currentColor; stroke-linecap: round; }
+.home-watch-battery-outline[data-known=false] .home-watch-battery-outline-value { visibility: hidden; }
+.home-watch-battery-number { position: absolute; top: 8px; right: 9px; font-size: 13px; font-weight: 400; line-height: 1.3; font-variant-numeric: tabular-nums; }
+:is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-more { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 3px; height: 100%; min-width: 44px; padding: 8px 0; border-radius: 13px; background: var(--md-container); color: var(--md-primary); font-size: 14px; font-variant-numeric: tabular-nums; }
+:is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-more[aria-expanded=true] { background: var(--md-primary-container); }
+.home-watch-more > svg { transition: transform 160ms ease-out; }
+.home-watch-more[aria-expanded=true] > svg { transform: rotate(180deg); }
+.home-watch-popover { position: fixed; inset: auto; top: var(--watch-popover-top); left: var(--watch-popover-left); width: var(--watch-popover-width); max-height: var(--watch-popover-height, 384px); margin: 0; padding: 12px; border: 1px solid var(--md-outline); border-radius: 20px; background: var(--md-container-low); color: var(--md-on-surface); box-shadow: 0 12px 28px #161a2c24, 0 2px 8px #161a2c12; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--md-outline) transparent; }
+.home-watch-popover::backdrop { background: transparent; }
+.home-watch-popover:popover-open { animation: home-watch-popover-enter 160ms ease-out; }
+.home-watch-popover-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 4px 12px; }
+.home-watch-popover-heading h3 { margin: 0; font-size: 17px; font-weight: 400; }
+.home-watch-popover-heading > span { font-size: 14px; color: var(--md-on-surface-variant); }
+.home-watch-overflow { display: flex; flex-direction: column; gap: 8px; }
+:is(.page-home, .device-watch-picker) .home-watch-overflow .home-watch-card { min-height: 82px; padding: 12px; border-color: transparent; background: var(--md-surface); }
+:is(.page-home, .device-watch-picker) .home-watch-overflow .home-watch-card:hover { background: var(--md-container); }
+.home-watch-overflow .home-watch-name > strong { font-size: 17px; }
+
+@keyframes home-watch-popover-enter { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+@container home-watch-picker (max-width: 540px) {
+  .home-watch-primary { gap: 8px; }
+  .home-watch-row { gap: 8px; }
+  .home-watch-row[data-has-more=true] { grid-template-columns: minmax(0, 1fr) 44px; }
+  :is(.page-home, .device-watch-picker) .home-watch-primary .home-watch-card { padding: 12px 10px; gap: 8px; }
+  .home-watch-primary .home-watch-name > strong { font-size: 17px; }
+  .home-watch-primary .home-watch-name > svg { display: none; }
+  .home-watch-primary .home-watch-model { gap: 4px; font-size: 13px; }
+  :is(.page-home, .device-watch-picker) .home-watch-primary .home-battery-dial { width: 44px; height: 44px; }
+  :is(.page-home, .device-watch-picker) .home-watch-primary .home-battery-dial > strong { font-size: 15px; }
+}
+@container home-watch-choice (max-width: 170px) {
+  :is(.page-home, .device-watch-picker) .home-watch-primary .home-watch-card { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 40px 20px; align-content: start; gap: 2px; height: 84px; min-height: 84px; padding: 14px 8px 6px; border-color: transparent; }
+  .home-watch-primary .home-watch-copy { display: contents; }
+  .home-watch-primary .home-watch-name { position: relative; z-index: 1; grid-column: 1; grid-row: 1; pointer-events: none; gap: 4px; }
+  .home-watch-primary .home-watch-name > strong { font-size: 16px; }
+  .home-watch-primary .home-watch-name > svg { display: none; }
+  :is(.page-home, .device-watch-picker) .home-watch-primary .home-watch-info { margin-block: -2px; }
+  .home-watch-primary .home-watch-model { position: relative; z-index: 1; grid-column: 1; grid-row: 2; align-items: center; gap: 4px; line-height: 20px; pointer-events: none; }
+  :is(.page-home, .device-watch-picker) .home-watch-primary .home-watch-model .badge { padding: 1px 5px; }
+  .home-watch-primary .home-watch-model > span:first-child { max-width: 100%; }
+  :is(.page-home, .device-watch-picker) .home-watch-primary .home-battery-ring { display: none; }
+  .home-watch-primary .home-watch-battery-outline { display: block; }
+  .home-watch-primary .home-watch-battery-number { top: 6px; }
+}
+@container home-watch-choice (min-width: 360px) {
+  :is(.page-home, .device-watch-picker) .home-watch-primary .home-battery-dial { width: 72px; height: 72px; }
+  :is(.page-home, .device-watch-picker) .home-watch-primary .home-battery-dial > strong { font-size: 22px; }
+}
+@media (min-width: 1000px) and (orientation: landscape) {
+  .page-home .home-watch-picker:has(.home-watch-primary > li:only-child) { margin-right: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-card, .home-watch-more > svg { transition: none; }
+  :is(.page-home, .device-watch-picker) .home-watch-picker .home-watch-card:has(.home-watch-select:active) { transform: none; }
+  .home-watch-popover:popover-open { animation: none; }
+}

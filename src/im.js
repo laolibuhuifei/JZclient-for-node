@@ -582,12 +582,13 @@ class ImClient extends EventEmitter {
     if (vd) log.debug('im', `语音载荷 ${vd}`);
     const body = Buffer.concat([
       tlv(1, rid),
+      tlv(2, 0), // NEED_RESPONSE: request the server's send receipt explicitly.
       tlv(16, 3),
       tlv(14, Buffer.from(JSON.stringify(voice), 'utf8')),
       tlv(15, msgId),
       tlv(13, msgType),
       tlv(11, this.imAccountId),
-      tlv(10, receiverId),
+      tlv(10, Number(receiverId)),
       tlv(12, this.registId),
     ]);
     const resp = await this._request(CMD.SINGLE_MESSAGE, body, rid, 10000);
@@ -607,12 +608,13 @@ class ImClient extends EventEmitter {
     if (vd) log.debug('im', `语音载荷(群) ${vd}`);
     const body = Buffer.concat([
       tlv(1, rid),
+      tlv(2, 0),
       tlv(18, 4),
       tlv(14, Buffer.from(JSON.stringify(voice), 'utf8')),
       tlv(15, msgId),
       tlv(13, msgType),
-      tlv(11, imAccountId),
-      tlv(10, dialogId),
+      tlv(11, Number(imAccountId)),
+      tlv(10, Number(dialogId)),
       tlv(12, this.registId),
     ]);
     const resp = await this._request(CMD.MESSAGE, body, rid, 10000);

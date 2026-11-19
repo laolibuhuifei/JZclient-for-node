@@ -95,21 +95,39 @@ test('OneBot HTTP 和 WS 畸形 URL 不影响服务与鉴权', async t => {
   status(await raw(wp, request('/?access_token=ws-token', 'localhost', upgrade)), 101);
 });
 
-test('OneBot 手表名称在标题文本和属性中安全转义', async () => {
-  const html = fs.readFileSync(path.join(__dirname, '../src/webui.html'), 'utf8');
-  const escStart = html.indexOf('  function esc(v){');
-  const escEnd = html.indexOf('\n  }', escStart) + 4;
-  const start = html.indexOf('  async function loadOneBotCard(){');
-  const marker = '    box.innerHTML = html;';
-  const end = html.indexOf(marker, start) + marker.length;
-  assert.ok(escStart >= 0 && start >= 0 && end >= marker.length);
-  const box = { innerHTML: '' };
-  const name = '<img src=x onerror="alert(1)">&\'测试';
-  const context = { box, state: { id: '1' }, currentWatch: () => ({}), $: () => box, location: { hostname: 'localhost' }, api: async () => ({ watches: [{ watchId: '1', name, http: {}, ws: {}, wsClient: {} }] }) };
-  vm.runInNewContext(html.slice(escStart, escEnd) + '\nvar obSecOpen = null;\n' + html.slice(start, end) + '\n}\nthis.run = loadOneBotCard;', context);
-  await context.run();
-  assert.doesNotMatch(box.innerHTML, /<img src=x/);
-  assert.match(box.innerHTML, /data-sec="本表设置 · &lt;img/);
-  assert.match(box.innerHTML, /<span>本表设置 · &lt;img/);
-  assert.match(box.innerHTML, /&quot;alert\(1\)&quot;/);
+test('前端渲染用户可控内容一律走 React 转义，不绕过', () => {
+  // 这条以前是「从 src/webui.html 里抠出 esc() 和 loadOneBotCard()，在沙箱里跑一遍，
+  // 断言手表名里的 <img onerror> 被转义」。PR #9 把界面换成了 React（源码在
+  // frontend/src，打包进 webui.html），那两段源码已经不存在了。
+  //
+  // React 的 JSX 本身就会转义文本和属性，风险点因此从「有没有调用 esc()」
+  // 变成「有没有主动绕过转义」。所以断言改成守这一点：整份前端源码里
+  // 不许出现 dangerouslySetInnerHTML —— 一旦有人为了图方便把用户可控的字符串
+  // 塞进去，手表名、会话名、好友备注这些东西立刻变成 XSS 入口。
+  const root = path.join(__dirname, '../frontend/src');
+  const hits = [];
+  (function walk(dir) {
+    for (const name of fs.readdirSync(dir)) {
+      const p = path.join(dir, name);
+      if (fs.statSync(p).isDirectory()) { walk(p); continue; }
+      if (!/\.(tsx?|jsx?)$/.test(name)) continue;
+      if (fs.readFileSync(p, 'utf8').includes('dangerouslySetInnerHTML')) {
+        hits.push(path.relative(root, p));
+      }
+    }
+  })(root);
+  assert.deepEqual(hits, [], '这些文件绕过了 React 的转义：' + hits.join(', '));
 });
+
+test('构建产物里的手表名走 React 文本节点，而不是拼 HTML', () => {
+  // 上一条守源码，这条守「打包后也没偷偷变成 innerHTML 拼接」。
+  // OneBot 面板渲染当前手表名的那段，编译后应该是 React.createElement(..., children: name)
+  // 这种形态；出现 innerHTML 赋值就说明有人绕过了组件。
+  const html = fs.readFileSync(path.join(__dirname, '../src/webui.html'), 'utf8');
+  const idx = html.indexOf('integration-onebot-panel');
+  assert.ok(idx > 0, '打包产物里找不到 OneBot 面板，说明前端没构建或者类名改了');
+  // 取面板附近一段，确认这一段没有 innerHTML 直接赋值
+  const slice = html.slice(idx, idx + 20000);
+  assert.doesNotMatch(slice, /\.innerHTML\s*=/, 'OneBot 面板附近出现了 innerHTML 赋值');
+});
+

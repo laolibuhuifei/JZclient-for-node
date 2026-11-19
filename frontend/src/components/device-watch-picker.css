@@ -1,0 +1,53 @@
+.page-heading-content { min-width: 0; flex: 1; }
+.page-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; }
+.page-title-group { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-width: 0; }
+.page-header .page-title-group h1 { margin: 0; white-space: nowrap; }
+.page-header-detail-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-top: 8px; }
+.page-header-detail-row > p { min-width: 0; flex: 1; }
+.page-header-detail-row > .action-row { flex: none; }
+.page-header-with-watch { flex-wrap: wrap; align-items: center; }
+.page-header-with-watch .page-heading-content { flex-basis: 100%; }
+.page-header-with-watch .page-header-actions { margin-left: auto; }
+.device-watch-picker { flex: 0 1 390px; width: 390px; min-width: 0; margin: 0 0 0 auto; }
+.device-watch-picker:has(.home-watch-primary > li:only-child) { flex-basis: 165px; width: 165px; }
+.device-watch-picker .home-watch-primary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.device-watch-picker .home-watch-primary:has(> li:only-child) { grid-template-columns: minmax(0, 1fr); }
+.device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-card { display: flex; height: 64px; min-height: 64px; padding: 5px 10px; gap: 4px; }
+.device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-copy { display: flex; gap: 1px; min-width: 0; }
+.device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-name { gap: 0; pointer-events: none; }
+.device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-name > strong { font-size: 16px; flex: 1; }
+.device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-name > svg { display: none; }
+.device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-info { width: 44px; height: 44px; min-height: 44px; margin: -7px -8px -7px -5px; }
+.device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-model { gap: 4px; padding-right: 30px; font-size: 12px; }
+.device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-model .badge { padding: 1px 4px; font-size: 11px; }
+.device-watch-picker .home-watch-picker-title .home-watch-primary .home-battery-ring { display: none; }
+.device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-battery-outline { display: block; }
+.device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-battery-outline > svg { display: none; }
+.device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-battery-number { top: auto; right: 9px; bottom: 8px; font-size: 12px; }
+.device-watch-picker .home-watch-picker-title .home-watch-more { height: 64px; min-height: 64px; font-size: 12px; gap: 0; }
+.device-watch-picker :focus-visible { outline: 3px solid var(--md-primary); outline-offset: 3px; }
+.device-watch-picker ::selection { background: var(--md-primary-container); color: var(--md-on-primary-container); }
+@media (max-width: 767px) {
+  .page-heading-row { gap: 10px; }
+  .page-header-with-watch .page-title-group { flex: 0 1 auto; }
+  .page-header-with-watch .page-title-group h1 { font-size: 26px; line-height: 1.35; }
+  .device-watch-picker { flex: 0 1 252px; width: min(252px, 70%); }
+  .device-watch-picker:has(.home-watch-primary > li:only-child) { flex-basis: 150px; width: 150px; }
+  .device-watch-picker .home-watch-row { gap: 6px; }
+  .device-watch-picker .home-watch-primary { gap: 6px; }
+  .device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-card { padding-inline: 7px; }
+  .device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-model > span:first-child { display: none; }
+  .device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-name > strong { font-size: 14px; }
+  .device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-card { position: relative; }
+  .device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-copy { display: contents; }
+  .device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-name { position: static; width: 100%; padding-bottom: 34px; }
+  .device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-info { position: absolute; right: 0; bottom: 0; margin: 0; }
+  .device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-model { position: absolute; left: 7px; bottom: 23px; padding-right: 0; }
+  .device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-model .badge { font-size: 10px; padding-inline: 3px; }
+  .device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-battery-number { left: 7px; right: auto; bottom: 6px; font-size: 11px; }
+}
+@media (max-width: 359px) {
+  .page-header-with-watch .page-title-group h1 { font-size: 23px; }
+  .device-watch-picker { width: 208px; flex-basis: 208px; }
+  .device-watch-picker .home-watch-picker-title .home-watch-primary .home-watch-name > strong { font-size: 13px; }
+}

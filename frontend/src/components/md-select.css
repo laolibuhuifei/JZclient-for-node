@@ -1,0 +1,17 @@
+.md-select { position: relative; min-width: 0; width: 100%; }
+.md-select .md-select-trigger { display: flex; align-items: center; justify-content: space-between; gap: 12px; text-align: left; padding-right: 14px; cursor: pointer; }
+.md-select-trigger > svg { color: var(--md-on-surface-variant); transition: transform 160ms ease-out; }
+.md-select-trigger[aria-expanded=true] > svg { transform: rotate(180deg); }
+.md-select-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.md-select-native { position: absolute; left: 0; bottom: 0; opacity: 0; width: 1px; height: 1px; border: 0; padding: 0; pointer-events: none; }
+.md-select-menu { position: fixed; inset: auto; margin: 0; padding: 8px; overflow-y: auto; overscroll-behavior: contain; border: 0; border-radius: 12px; background: var(--md-container-high); color: var(--md-on-surface); box-shadow: 0 8px 24px #10112030; scrollbar-width: thin; scrollbar-color: var(--md-outline) transparent; }
+.md-select-menu::backdrop { background: transparent; }
+.md-select-menu:popover-open { animation: md-select-enter 160ms cubic-bezier(0.22, 1, 0.36, 1); }
+.md-select-option { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 48px; padding: 10px 12px; border-radius: 8px; cursor: pointer; font-family: inherit; font-size: 16px; line-height: 1.5; }
+.md-select-option > span { min-width: 0; overflow-wrap: anywhere; }
+.md-select-option[data-active=true] { background: var(--md-container); outline: 2px solid var(--md-primary); outline-offset: -2px; }
+.md-select-option[aria-selected=true] { background: var(--md-primary-container); color: var(--md-on-primary-container); }
+.md-select-option[aria-disabled=true] { opacity: .45; cursor: not-allowed; }
+.md-select-group { padding: 10px 12px 6px; font-size: 13px; color: var(--md-on-surface-variant); }
+@keyframes md-select-enter { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) { .md-select-trigger > svg { transition: none; } .md-select-menu:popover-open { animation: none; } }

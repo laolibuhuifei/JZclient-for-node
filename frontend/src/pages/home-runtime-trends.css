@@ -1,0 +1,18 @@
+.home-runtime-trends { display: flex; flex-direction: column; gap: 18px; min-width: 0; padding-top: 8px; }
+.home-runtime-trend { margin: 0; min-width: 0; --runtime-trend-color: var(--md-primary, var(--primary)); }
+.home-runtime-trend[data-series=memory] { --runtime-trend-color: var(--md-on-secondary-container, var(--primary)); }
+.home-runtime-trend figcaption { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-width: 0; margin-bottom: 6px; }
+.home-runtime-trend figcaption h3 { margin: 0; color: var(--md-on-surface-variant, var(--muted-foreground)); font-size: 15px; font-weight: 400; line-height: 1.5; }
+.home-runtime-trend-current { color: var(--md-on-surface, var(--foreground)); font-size: 23px; font-weight: 400; line-height: 1.3; font-variant-numeric: tabular-nums; }
+.home-runtime-trend-plot { display: grid; grid-template-columns: 27px minmax(0, 1fr); gap: 6px; min-width: 0; }
+.home-runtime-trend-axis { display: flex; flex-direction: column; justify-content: space-between; height: 112px; padding-block: 0; color: var(--md-on-surface-variant, var(--muted-foreground)); font-size: 11px; line-height: 16px; text-align: right; font-variant-numeric: tabular-nums; }
+.home-runtime-trend-plot svg { display: block; width: 100%; height: 112px; min-width: 0; overflow: visible; }
+.home-runtime-trend-grid { stroke: var(--md-outline, var(--border)); stroke-width: 1; }
+.home-runtime-trend-line { fill: none; stroke: var(--runtime-trend-color); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.home-runtime-trend-time { display: flex; justify-content: space-between; gap: 12px; margin: 4px 0 0 33px; color: var(--md-on-surface-variant, var(--muted-foreground)); font-size: 11px; line-height: 1.5; }
+.home-runtime-trends-note { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; margin: 0; color: var(--md-on-surface-variant, var(--muted-foreground)); font-size: 13px; line-height: 1.5; }
+.home-runtime-trends-note > span { margin-left: auto; }
+@media (max-width: 767px) {
+  .home-runtime-trends { gap: 16px; }
+  .home-runtime-trend-current { font-size: 22px; }
+}

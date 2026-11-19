@@ -1,0 +1,27 @@
+{
+  "name": "jzclient-webui",
+  "version": "1.3.8",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test checks/react-checks.mjs checks/home-checks.mjs checks/ui-checks.mjs checks/runtime-motion-checks.mjs checks/guard-place-picker-checks.mjs checks/map-motion-checks.mjs checks/display-scale-checks.mjs",
+    "preview:test": "node tools/preview-server.mjs"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.9.0",
+    "vite": "^6.4.6"
+  }
+}

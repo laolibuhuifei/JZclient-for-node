@@ -15,7 +15,10 @@ const ROOT = path.join(__dirname, '..');
 test('全新配置：ensureIdentity 会生成并持久化 ssoMac', () => {
   const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'jzid-'));
   const old = process.env.HOME;
+  const oldProfile = process.env.USERPROFILE;
   process.env.HOME = HOME;
+  // Windows 上 os.homedir() 优先读取 USERPROFILE；只改 HOME 会读写真实配置。
+  process.env.USERPROFILE = HOME;
   try {
     // USER_DIR / CONFIG_FILE 在 require 时就算好了，所以必须在改 HOME 之后加载
     delete require.cache[require.resolve('../src/device')];
@@ -31,6 +34,8 @@ test('全新配置：ensureIdentity 会生成并持久化 ssoMac', () => {
     assert.equal(again.ssoMac, cfg.ssoMac, '必须写进配置文件，否则每次启动都会变');
   } finally {
     if (old === undefined) delete process.env.HOME; else process.env.HOME = old;
+    if (oldProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = oldProfile;
     delete require.cache[require.resolve('../src/device')];
   }
 });

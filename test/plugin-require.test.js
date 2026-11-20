@@ -10,7 +10,10 @@ const path = require('path');
 
 // USER_DIR 在模块加载时就算好了，所以必须先改 HOME 再 require
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'jzplug-'));
+// Windows 的 os.homedir() 优先读取 USERPROFILE，不接受仅在进程里改 HOME。
+// 两个入口都切到临时目录，避免扫描/污染开发者真实安装的插件。
 process.env.HOME = HOME;
+process.env.USERPROFILE = HOME;
 const PLUGINS = path.join(HOME, '.watch-parent-cli', 'plugins');
 
 function write(rel, content) {

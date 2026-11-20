@@ -1,0 +1,21 @@
+# Docker 构建上下文只用于 JZClient 实例镜像。
+.git
+.gitignore
+.impeccable
+.research
+.taste-skill
+docs
+frontend
+test
+tmp
+okii_src
+zxi2233
+xposed-wechat-bridge
+extensions
+jz-server/data
+jz-server/test
+**/node_modules
+*.log
+*.local.*
+plugins/*/data
+plugins/jz-betterxhs

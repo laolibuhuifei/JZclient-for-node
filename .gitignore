@@ -22,6 +22,9 @@ plugins/*/data/
 .taste-skill/
 plugins/jz-betterxhs/
 /zxi2233/
+/okii_src/
+/docs/
+/jz-server/
 
 # 临时文件与产物
 tmp/

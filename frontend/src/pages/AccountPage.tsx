@@ -1,10 +1,11 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
-import { ArrowRight, Check, Eye, EyeOff, FileJson, KeyRound, LogIn, LogOut, MapPin, MessageCircle, RefreshCw, ShieldCheck, UserRound, Watch } from 'lucide-react';
+import { ArrowRight, Check, Eye, EyeOff, FileJson, KeyRound, LogIn, LogOut, MapPin, MessageCircle, RefreshCw, ShieldCheck, Smartphone, UserRound, Watch } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { api, post } from '../lib/api';
 import { useResource } from '../lib/hooks';
 import { Badge, Button, Card, ErrorState, Field, Input, LoadingState, Modal, PageHeader, Select, toast } from '../components/ui';
 import { formatTime } from './HomePageParts';
+import { getPendingWechatAuthorization, requestWechatAuthorization, type WechatAuthorizationStatus } from '../lib/wechatBridge';
 import './account-md3.css';
 
 const VERIFY_MODES: Record<string, string> = { 1: '旧设备验证', 2: '家庭成员验证', 3: '短信验证码', 4: '密保问题', 6: '其它方式' };
@@ -18,6 +19,9 @@ export default function AccountPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState('');
   const [loginError, setLoginError] = useState('');
+  const [initialPendingWechat] = useState(() => getPendingWechatAuthorization());
+  const [wechatStatus, setWechatStatus] = useState<WechatAuthorizationStatus | ''>(initialPendingWechat?.status || '');
+  const [bridgeHandedOff, setBridgeHandedOff] = useState(false);
   const [challenge, setChallenge] = useState<any>(null);
   const [questions, setQuestions] = useState<any[]>([]);
   const [questionId, setQuestionId] = useState('');
@@ -34,7 +38,27 @@ export default function AccountPage() {
   const verificationRequest = useRef(0);
   const mounted = useRef(true);
 
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; verificationCredentials.current = { account: '', password: '' }; }; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    if (initialPendingWechat) {
+      setBusy('wechat');
+      void requestWechatAuthorization({
+        resumeOnly: true,
+        onStatus: setWechatStatus,
+        onOpenBridge: state => {
+          const opened = openLoginBridge(state);
+          setBridgeHandedOff(opened);
+        },
+      })
+        .then(({ session }) => post('/api/account/login/wechat', { session }))
+        .then(() => mounted.current ? loginComplete() : undefined)
+        .catch((error: any) => {
+          if (mounted.current && error?.code !== 'aborted') setLoginError(error?.message || '微信登录失败。');
+        })
+        .finally(() => { if (mounted.current) setBusy(''); });
+    }
+    return () => { mounted.current = false; verificationCredentials.current = { account: '', password: '' }; };
+  }, []);
   useEffect(() => { if (account.userName) setUserName(account.userName); }, [account.userName]);
 
   function clearChallenge() {
@@ -51,6 +75,20 @@ export default function AccountPage() {
     try { await refreshAll(); } catch { toast('已登录，手表列表暂未刷新，请稍后重试。', 'warning'); }
   }
 
+  async function loginWithWechat() {
+    setBusy('wechat'); setLoginError(''); setWechatStatus(''); setBridgeHandedOff(false);
+    try {
+      const { session } = await requestWechatAuthorization({
+        onStatus: setWechatStatus,
+        onOpenBridge: state => setBridgeHandedOff(openLoginBridge(state)),
+      });
+      setWechatStatus('authorizing' as WechatAuthorizationStatus);
+      await post('/api/account/login/wechat', { session });
+      if (mounted.current) await loginComplete();
+    } catch (error: any) {
+      if (mounted.current && error?.code !== 'aborted') setLoginError(error?.message || '微信登录失败。');
+    } finally { if (mounted.current) setBusy(''); }
+  }
   async function loadQuestions(nextChallenge: any, name: string) {
     const requestId = ++verificationRequest.current;
     setBusy('questions'); setVerifyError('');
@@ -153,6 +191,14 @@ export default function AccountPage() {
           </ul>}
       </Card>
       <Card className="account-login-card" title={account.loggedIn ? '切换账号' : '账号登录'} description={account.loggedIn ? '登录另一个账号后，将同步该账号的手表。' : '请输入手机号或家长账号。'}>
+        <div className="wechat-login-panel">
+          <div className="wechat-login-copy"><span aria-hidden="true"><Smartphone size={22} /></span><div><strong>微信快捷登录</strong><p>在这台手机上由小天才完成官方微信登录，再把账号会话交给 JZ。</p></div></div>
+          <Button type="button" variant="secondary" className="wechat-login-button" onClick={loginWithWechat} loading={busy === 'wechat'} disabled={!!busy}>
+            {busy !== 'wechat' && <MessageCircle size={20} aria-hidden="true" />}{busy === 'wechat' ? (wechatText(wechatStatus) || '正在发起授权…') : '使用微信登录'}
+          </Button>
+          {busy === 'wechat' && <p className="wechat-login-privacy" role="status">{bridgeHandedOff ? '已打开 JzLoginBridge。授权完成后请返回此网页。' : '正在打开 JzLoginBridge。'}</p>}
+        </div>
+        <div className="account-login-divider" aria-hidden="true"><span>或使用账号密码</span></div>
         <form className="account-login-form" onSubmit={login}>
           <Field label="手机号 / 账号"><Input value={userName} onChange={event => setUserName(event.target.value)} autoComplete="username" placeholder="输入你的家长账号" required disabled={!!busy} aria-invalid={!!loginError} aria-describedby={loginError ? loginErrorId : undefined} /></Field>
           <div className="field"><label className="field-label" htmlFor={passwordId}>密码</label><div className="account-password"><Input id={passwordId} value={password} type={showPassword ? 'text' : 'password'} onChange={event => setPassword(event.target.value)} autoComplete="current-password" placeholder="输入账号密码" required disabled={!!busy} aria-invalid={!!loginError} aria-describedby={loginError ? loginErrorId : undefined} /><button type="button" className="account-password-visibility" onClick={() => setShowPassword(value => !value)} aria-label={showPassword ? '隐藏密码' : '显示密码'}>{showPassword ? <EyeOff size={21} aria-hidden="true" /> : <Eye size={21} aria-hidden="true" />}</button></div></div>
@@ -186,4 +232,31 @@ export default function AccountPage() {
       {busy === 'config' ? <LoadingState text="正在读取配置…" /> : configError ? <ErrorState error={configError} onRetry={showConfig} /> : <pre className="mono account-config-snapshot" tabIndex={0} aria-label="当前服务配置 JSON">{JSON.stringify(configuration, null, 2)}</pre>}
     </Modal>
   </div>;
+}
+
+function openLoginBridge(state: string) {
+  const params = new URLSearchParams({ state });
+  const url = `jzloginbridge://authorize?${params.toString()}`;
+  try {
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function wechatText(status: WechatAuthorizationStatus | '') {
+  return ({
+    waiting_for_host: '正在连接登录桥…',
+    awaiting_confirmation: '请在小天才确认授权',
+    launching_wechat: '正在打开微信…',
+    waiting_for_wechat: '请在微信中确认…',
+    logging_in: '小天才正在登录并同步账号…',
+    authorized: '正在完成登录…',
+  } as Partial<Record<WechatAuthorizationStatus, string>>)[status] || '';
 }

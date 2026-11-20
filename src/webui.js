@@ -304,11 +304,6 @@ function matchChatKey(targets, m) {
   const s = targets.find((t) => t.type === 'single'
     && (String(t.receiverId) === String(m.imAccountId) || String(t.receiverId) === did));
   if (s) return s.key;
-  // 账号重登或服务端轮换 IM 会话 ID 后，tag10/tag11 可能与缓存列表都不相等。
-  // 新版手表账号通常只有一个手表单聊；此时可安全归到唯一单聊。存在多个单聊
-  // 时仍返回 null，避免把消息显示到别人的会话里。
-  const singles = targets.filter((t) => t.type === 'single');
-  if (singles.length === 1) return singles[0].key;
   return null;
 }
 
@@ -2117,7 +2112,6 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     if (im && m.syncKey > im.syncKey) {
       im.syncKey = m.syncKey;
       cfg.imSyncKey = m.syncKey;
-      device.rememberImSyncKey(cfg, im.imAccountId, m.syncKey);
       device.save(cfg);
     }
   }
@@ -2180,14 +2174,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       try {
         await c.connect();
         if (!c.connected || (c.alive && !c.alive())) throw new Error('握手完成后连接已断开');
-        cfg.imSyncKeys = cfg.imSyncKeys && typeof cfg.imSyncKeys === 'object' ? cfg.imSyncKeys : {};
-        if (prevImId && String(prevImId) !== String(c.imAccountId)
-          && cfg.imSyncKeys[String(prevImId)] == null && Number(cfg.imSyncKey) > 0) {
-          cfg.imSyncKeys[String(prevImId)] = Number(cfg.imSyncKey);
-        }
         cfg.imAccountId = c.imAccountId;
-        cfg.imSyncKey = c.syncKey;
-        device.rememberImSyncKey(cfg, c.imAccountId, c.syncKey);
         device.save(cfg);
       // 反向 WS 握手头里的 X-Self-ID 是"连接那一刻"的快照, 而 AstrBot 回消息时会拿
       // 事件里的 self_id 去匹配这条连接。换账号后 self_id 变了, 不重连就会出现
@@ -2214,8 +2201,6 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   // IM 连接状态快照(聊天页展示 + 排查用)
   function imStatus() {
     const last = im && im.lastRecvAt ? im.lastRecvAt : 0;
-    const lastMessage = im && im.lastMessageAt ? im.lastMessageAt : 0;
-    if (im && im.connected) device.rememberImSyncKey(cfg, im.imAccountId, im.syncKey);
     return {
       connected: !!(im && im.connected),
       alive: !!(im && im.connected && (!im.alive || im.alive())),
@@ -2224,12 +2209,6 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
       frames: (im && im.frames) || 0,
       lastRecvAt: last,
       lastRecvAgo: last ? Math.round((Date.now() - last) / 1000) : null,
-      lastMessageAt: lastMessage,
-      lastMessageAgo: lastMessage ? Math.round((Date.now() - lastMessage) / 1000) : null,
-      lastSyncTriggerAt: (im && im.lastSyncTriggerAt) || 0,
-      lastSyncTriggerResult: (im && im.lastSyncTriggerResult) || null,
-      lastSyncAt: (im && im.lastSyncAt) || 0,
-      lastSyncResult: (im && im.lastSyncResult) || null,
       reconnects: imReconnects,
       lastError: imLastError,
     };
@@ -2239,7 +2218,6 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
   // 作用是把手表上报的电量/位置等业务消息实时落到 cfg.watchStatus
   let imTimer = null;
   let imLastState = '';
-  let imSyncPending = null;
   function startImBackground() {
     if (imTimer) return;
     const logState = (s) => {
@@ -2250,22 +2228,11 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
     const tick = () => {
       if (!cfg.token) return;
       ensureIM()
-        .then(async (c) => {
-          logState('后台监听在线 imAccountId=' + c.imAccountId);
-          // 有些链路的心跳和业务响应一直正常，但 PUSH 已经不再送达。
-          // 15 秒没有收到任何聊天帧时主动 sync 一次，既补回漏消息，也避免等上
-          // 两分钟才由 alive() 判死。sync() 失败不重连：下一次 tick 还会再试。
-          const quietFor = Date.now() - (Number(c.lastMessageAt) || Number(c.lastRecvAt) || Date.now());
-          if (quietFor < 15000 || imSyncPending) return;
-          imSyncPending = Promise.resolve(c.sync())
-            .catch((error) => log.warn('im', '后台补同步失败: ' + (error && error.message ? error.message : error)))
-            .finally(() => { imSyncPending = null; });
-          await imSyncPending;
-        })
+        .then((c) => logState('后台监听在线 imAccountId=' + c.imAccountId))
         .catch((e) => logState('后台监听连接失败: ' + (e && e.message ? e.message : e)));
     };
     tick();
-    imTimer = setInterval(tick, 15000);
+    imTimer = setInterval(tick, 60000);
     if (imTimer.unref) imTimer.unref();
   }
 
@@ -2612,12 +2579,12 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
   // 登录/验证成功后统一写入会话
   async function finishLogin(account, data, rsaKey) {
-    const previousUser = String(cfg.userName || '');
-    const previousMobileId = String(cfg.mobileId || '');
     cfg.token = typeof data === 'string' ? data : JSON.stringify(data);
     cfg.userName = account;
     cfg.ssoRsaKey = rsaKey;
     try { cfg.authId = JSON.parse(cfg.token).accountId; } catch (e) { /* ignore */ }
+    // Clear an expiry marker for the previous token before probing the new one.
+    api._expiredToken = null;
     device.save(cfg);
 
     cache.at = 0;
@@ -2630,15 +2597,6 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
     const init = await safe(() => api.getMobileInit());
     const acc = (init && init.mobileAccount) || {};
-    if ((previousUser || previousMobileId) && ((previousUser && previousUser !== String(account))
-      || (previousMobileId && acc.id && previousMobileId !== String(acc.id)))) {
-      // 换 SSO 账号后，旧 IM 设备身份/账号/游标都属于另一套上下文。
-      // 服务端可能把新连接当成旧设备的重连，表现为首条消息到达后长期不再推送。
-      cfg.imDeviceId = null;
-      cfg.imAccountId = null;
-      cfg.imSyncKey = 0;
-      device.ensureIdentity(cfg);
-    }
     if (acc.id) cfg.mobileId = acc.id;
     if (acc.authId) cfg.authId = acc.authId;
     device.save(cfg);
@@ -3671,7 +3629,7 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
 
     // ===== 账号 / 配置 =====
     if (parts[1] === 'account') {
-      if (parts[2] === 'login' && req.method === 'POST') {
+      if (parts[2] === 'login' && !parts[3] && req.method === 'POST') {
         const b = await readBody(req);
         const account = String(b.account || '').trim();
         const password = String(b.password || '');
@@ -3697,6 +3655,121 @@ async function startWebUI({ cfg, port = 8787, host = '0.0.0.0', token, ticketSec
         }
         await finishLogin(account, r.json.data, r.rsaKey);
         return ok(res, { userName: cfg.userName, loggedIn: true });
+      }
+
+      if (parts[2] === 'login' && parts[3] === 'wechat' && req.method === 'POST') {
+        const b = await readBody(req);
+        let session;
+        try {
+          session = typeof b.session === 'string' ? JSON.parse(b.session) : b.session;
+        } catch (e) {
+          throw new Error('微信登录会话格式无效，请重新授权');
+        }
+        if (!session || typeof session !== 'object') {
+          throw new Error('缺少小天才账号会话，请重新授权');
+        }
+        const ticket = String(session.ticket || '').trim();
+        if (!ticket) throw new Error('小天才没有返回登录票据，请重新授权');
+
+        // The host's MobileAccount.token is the official SSO login payload.
+        // Keep it byte-for-byte: downstream requests parse this exact string.
+        let loginData = ticket;
+        let account = String(
+          session.userName
+          || session.mobileNumber
+          || session.mobileId
+          || session.authId
+          || '微信账号'
+        ).trim();
+        let decodedTicket = null;
+        try { decodedTicket = JSON.parse(ticket); } catch (e) { /* host may issue an opaque token */ }
+        if (decodedTicket && typeof decodedTicket === 'object') {
+          delete decodedTicket.ticket;
+          if (!decodedTicket.accountId && session.ssoAccountId) {
+            decodedTicket.accountId = String(session.ssoAccountId);
+          }
+          loginData = JSON.stringify(decodedTicket);
+          account = String(
+            decodedTicket.userName
+            || decodedTicket.loginName
+            || decodedTicket.mobilePhone
+            || decodedTicket.mobileNumber
+            || account
+          ).trim();
+        } else if (session.ssoAccountId) {
+          try {
+            loginData = JSON.stringify({ accountId: String(session.ssoAccountId), ticket });
+          } catch (e) {
+            throw new Error('小天才返回的登录票据无法解析，请重新授权');
+          }
+        }
+        // Verify the host's official token before replacing a working WebUI
+        // account. A token can survive briefly in the host store after the
+        // user logs out there, but it is unusable for platform requests.
+        const previous = {
+          token: cfg.token,
+          userName: cfg.userName,
+          ssoRsaKey: cfg.ssoRsaKey,
+          authId: cfg.authId,
+          mobileId: cfg.mobileId,
+          bizRsaKey: cfg.bizRsaKey,
+          bizDeviceId: cfg.bizDeviceId,
+          bizMac: cfg.bizMac,
+          bizMachineId: cfg.bizMachineId,
+          nDeviceId: cfg.nDeviceId,
+          parentSessionExpired: api.sessionExpired,
+        };
+        cfg.token = loginData;
+        cfg.userName = account;
+        cfg.ssoRsaKey = undefined;
+        try { cfg.authId = JSON.parse(loginData).accountId; } catch (e) { /* host may return an opaque token */ }
+        if (session.bizDeviceId) cfg.bizDeviceId = String(session.bizDeviceId);
+        if (session.bizMac) cfg.bizMac = String(session.bizMac);
+        if (session.bizMachineId) cfg.bizMachineId = String(session.bizMachineId);
+        if (session.bizNDeviceId) cfg.nDeviceId = String(session.bizNDeviceId);
+        cfg.bizRsaKey = null;
+        api._expiredToken = null;
+        let probe, accountProbe, watchProbe;
+        try {
+          probe = ensure(await api.getMobileInit());
+          const hostAccount = probe?.mobileAccount || {};
+          const mobileId = String(hostAccount.id || session.mobileId || '').trim();
+          if (hostAccount.id) cfg.mobileId = String(hostAccount.id);
+          if (hostAccount.authId) cfg.authId = String(hostAccount.authId);
+          if (!mobileId) throw new Error('宿主没有返回家长账号 ID');
+          accountProbe = ensure(await api.getMobileAccount(mobileId));
+          const watches = Array.isArray(probe?.mobileWatchs) ? probe.mobileWatchs : [];
+          if (!watches.length) throw new Error('宿主账号没有可用的手表');
+          const watchId = String(watches[0]?.watchId || '').trim();
+          if (!watchId) throw new Error('宿主手表数据缺少设备 ID');
+          watchProbe = ensure(await api.getWatchAccount(watchId));
+          if (!watchProbe || typeof watchProbe !== 'object') {
+            throw new Error('宿主手表账号读取失败');
+          }
+        } catch (error) {
+          cfg.token = previous.token;
+          cfg.userName = previous.userName;
+          cfg.ssoRsaKey = previous.ssoRsaKey;
+          cfg.authId = previous.authId;
+          cfg.mobileId = previous.mobileId;
+          cfg.bizRsaKey = previous.bizRsaKey;
+          cfg.bizDeviceId = previous.bizDeviceId;
+          cfg.bizMac = previous.bizMac;
+          cfg.bizMachineId = previous.bizMachineId;
+          cfg.nDeviceId = previous.nDeviceId;
+          if (previous.parentSessionExpired) api._expiredToken = previous.token;
+          else api._expiredToken = null;
+          throw new Error(/000003/.test(error?.message || '')
+            ? '小天才宿主业务身份验证失败，请回到小天才重新登录后再从网页发起微信登录。'
+            : `宿主账号验证失败：${error?.message || '请重新登录'}`);
+        }
+        const hostAccount = probe?.mobileAccount || {};
+        const verifiedAccount = hostAccount.number || hostAccount.name || account;
+        await finishLogin(verifiedAccount, loginData);
+        if (hostAccount.id) cfg.mobileId = hostAccount.id;
+        if (hostAccount.authId) cfg.authId = hostAccount.authId;
+        device.save(cfg);
+        return ok(res, { userName: cfg.userName, loggedIn: true, via: 'wechat' });
       }
 
       // 新设备验证: 获取密保问题

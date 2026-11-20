@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --test checks/react-checks.mjs checks/home-checks.mjs checks/ui-checks.mjs checks/runtime-motion-checks.mjs checks/guard-place-picker-checks.mjs checks/map-motion-checks.mjs checks/display-scale-checks.mjs",
+    "test": "node --test checks/react-checks.mjs checks/home-checks.mjs checks/ui-checks.mjs checks/runtime-motion-checks.mjs checks/guard-place-picker-checks.mjs checks/map-motion-checks.mjs checks/display-scale-checks.mjs checks/wechat-bridge-checks.mjs",
     "preview:test": "node tools/preview-server.mjs"
   },
   "dependencies": {

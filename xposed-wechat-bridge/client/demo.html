@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JZ 微信授权桥联调</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #111318; color: #e4e2ea; }
+    body { max-width: 680px; margin: 0 auto; padding: 32px 20px; }
+    main { padding: 24px; border: 1px solid #3b3d46; border-radius: 20px; background: #1b1d24; }
+    h1 { margin-top: 0; font-size: 24px; } p { color: #b9b7c3; line-height: 1.65; }
+    button { min-height: 48px; padding: 0 22px; border: 0; border-radius: 999px; background: #9ecaff; color: #001d35; font-weight: 700; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+    #status { display: block; min-height: 28px; margin: 20px 0; overflow-wrap: anywhere; }
+    textarea { box-sizing: border-box; width: 100%; min-height: 112px; padding: 12px; border: 1px solid #555862; border-radius: 12px; background: #111318; color: #e4e2ea; resize: vertical; }
+    .error { color: #ffb4ab; } .success { color: #8fd6a3; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>微信授权桥联调</h1>
+    <p>请在安装了模块和小天才家长端的手机浏览器打开。点击后会进入小天才确认来源，再跳转微信；返回本页后读取结果。</p>
+    <p>当前来源：<span id="origin"></span><br>桥接地址：<span>http://127.0.0.1:38787</span></p>
+    <button id="authorize">发起真实微信登录</button>
+    <span id="status" role="status" aria-live="polite"></span>
+    <label for="session">宿主账号会话（摘要，仅供联调）</label>
+    <textarea id="session" readonly placeholder="宿主登录成功后在这里显示会话摘要"></textarea>
+  </main>
+  <script type="module">
+    import { getWechatBridgeStatus, requestWechatAuthorization } from './wechat-bridge.js';
+
+    const button = document.querySelector('#authorize');
+    const status = document.querySelector('#status');
+    const output = document.querySelector('#session');
+    const origin = document.querySelector('#origin');
+    origin.textContent = location.origin;
+    let controller;
+
+    const labels = {
+      waiting_for_host: '正在等待小天才家长端进入前台…',
+      awaiting_confirmation: '请在小天才家长端确认网页来源…',
+      launching_wechat: '正在打开微信…',
+      waiting_for_wechat: '请在微信中完成授权，然后返回本页…',
+      logging_in: '小天才正在登录并同步账号…',
+    };
+
+    button.addEventListener('click', async () => {
+      if (controller) { controller.abort(); return; }
+      controller = new AbortController();
+      button.textContent = '取消本次授权';
+      status.className = '';
+      output.value = '';
+      try {
+        const bridge = await getWechatBridgeStatus({ signal: controller.signal });
+        status.textContent = `模块已连接，小天才版本：${bridge.hostVersion}`;
+        const result = await requestWechatAuthorization({
+          signal: controller.signal,
+          onStatus(snapshot) { status.textContent = labels[snapshot.status] || snapshot.status; },
+        });
+        let session;
+        try { session = JSON.parse(result.session); } catch { session = {}; }
+        output.value = JSON.stringify({
+          authId: session.authId || '',
+          mobileId: session.mobileId || '',
+          userName: session.userName || '',
+          hasTicket: !!session.ticket,
+        }, null, 2);
+        status.textContent = '小天才官方登录成功。原始微信 code 没有离开宿主。';
+        status.className = 'success';
+      } catch (error) {
+        status.textContent = error.message || String(error);
+        status.className = 'error';
+      } finally {
+        controller = null;
+        button.textContent = '发起真实微信授权';
+      }
+    });
+  </script>
+</body>
+</html>

@@ -20,6 +20,15 @@
 .account-benefits strong { display: block; font-size: 17px; font-weight: 400; }
 .account-benefits p { margin: 4px 0 0; font-size: 15px; line-height: 1.65; color: var(--md-on-surface-variant); }
 .account-login-card .card-head { margin-bottom: 26px; }
+.wechat-login-panel { display: flex; flex-direction: column; gap: 16px; padding: 18px; border: 1px solid var(--md-outline); border-radius: 22px; background: var(--md-container-low); }
+.wechat-login-copy { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
+.wechat-login-copy > span { display: grid; place-items: center; width: 44px; height: 44px; flex: 0 0 44px; border-radius: 14px; color: var(--md-on-primary-container); background: var(--md-primary-container); }
+.wechat-login-copy strong { display: block; font-size: 17px; font-weight: 500; }
+.wechat-login-copy p { margin: 4px 0 0; color: var(--md-on-surface-variant); font-size: 15px; line-height: 1.65; }
+.wechat-login-button { width: 100%; min-height: 50px; }
+.wechat-login-privacy { margin: 0; color: var(--md-on-surface-variant); font-size: 14px; line-height: 1.6; }
+.account-login-divider { display: flex; align-items: center; gap: 12px; margin: 22px 0; color: var(--md-on-surface-variant); font-size: 14px; }
+.account-login-divider::before, .account-login-divider::after { content: ''; height: 1px; flex: 1; background: var(--md-outline); }
 .account-login-form, .account-verification-form { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
 .account-login-form .input { min-height: 56px; }
 .account-password { position: relative; min-width: 0; }

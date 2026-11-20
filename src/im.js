@@ -4,15 +4,17 @@
 //   帧: [0xA0][cmd][len varint][TLV body]; cmd<=0x1F 时头为单字节 0x20|cmd
 //   握手: cmd22 PublicKeyRequest -> cmd23 返回 RSA 公钥(tag10), cmd33 EncryptSet{tag1 RID, tag10=1, tag11=RSA(key)}
 //   启用加密后: 外层 cmd32, 载荷 tag10 = 内层帧 XOR 会话密钥(会话密钥为 32 字符串,循环复用)
-//   cmd1 Regist -> cmd2 (tag10=registId)
+//   cmd1 Regist -> cmd2 (tag10=registId，可选 tag11=registToken)，有 token 时登录带回
 //   cmd3 Login  -> cmd4
 //   cmd5 Account(status=2 上线) -> cmd6 (tag10=自己的 imAccountId)
 //   cmd40 单聊发消息 {tag10=receiverId, tag11=自己 imAccountId, tag12=registId, tag13=msgType, tag14=JSON, tag15=msgId, tag16=contentType}
 //   cmd9  群聊发消息 {tag10=dialogId, tag11=群 imAccountId, tag12=registId, tag13=msgType, tag14=JSON, tag15=msgId, tag18=contentType}
-//   cmd11 SyncInform -> cmd12 SyncRequest {tag11 imAccountId, tag12 registId, tag13 syncKey, tag14 pageSize, tag0 platformId}
+//   cmd11 SyncInform -> cmd12 SyncRequest {tag11 imAccountId, tag12 registId, tag13 syncKey, tag14 pageSize}
+//   cmd25 SyncTrigger {tag10 imAccountId, tag11 accountToken, tag12 registId}；官方客户端在 IM 登录成功后发送
 //   cmd13 SyncResponse / cmd35 PushResponse 携带收到的消息
 //   cmd15 SyncFinishAck: 一轮同步收完要回执, 否则服务端认为消息没被消费, 会一直重发(表现为同一条消息重复到达)
-//   cmd36 PushResponseAck: 下行推送的回执, 不带会让服务端超时重发
+//   cmd36 PushResponseAck {tag10 dialogId, tag11 imAccountId, tag12 registId, tag13 syncKey}
+//   下行推送的回执, 不带会让服务端超时重发
 const tls = require('tls');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
@@ -153,8 +155,11 @@ class ImClient extends EventEmitter {
     this.rid = 100000;
     this.pending = new Map();
     this.registId = 0;
+    this.registToken = '';
     this.imAccountId = Number(cfg.imAccountId) || 0;
-    this.syncKey = Number(cfg.imSyncKey) || 0;
+    this._configuredImAccountId = this.imAccountId;
+    this.syncKey = this._syncKeyForAccount(this.imAccountId);
+    this.accountToken = '';
     this.imDeviceId = cfg.imDeviceId || crypto.randomUUID().replace(/-/g, '').toUpperCase();
     this.connected = false;
     this._heartbeat = null;
@@ -164,10 +169,15 @@ class ImClient extends EventEmitter {
     // 云端实例一挂好几天, NAT/中间设备会把空闲连接悄悄掐掉, 而 TCP 层可能很久都不报错。
     // 以前只看 connected 标志, 结果就是「界面显示已连接, 但一条新消息都收不到」。
     this.lastRecvAt = 0;      // 最近一次收到任意帧的时间
+    this.lastMessageAt = 0;   // 最近一次收到真实聊天帧的时间；心跳不能刷新它
     this.frames = 0;          // 收到的帧数(诊断用)
     this._hbFail = 0;         // 连续心跳失败次数
     this._closed = false;     // 保证 close 事件只抛一次
     this._ackTimer = null;    // 同步完成回执的合并定时器
+    this.lastSyncTriggerAt = 0;
+    this.lastSyncTriggerResult = null;
+    this.lastSyncAt = 0;
+    this.lastSyncResult = null;
   }
 
   nextRid() { this.rid = (this.rid + 1) & 0x7fffffff; return this.rid; }
@@ -184,6 +194,7 @@ class ImClient extends EventEmitter {
     this._closed = false;
     this._hbFail = 0;
     this.lastRecvAt = Date.now();
+    this.lastMessageAt = Date.now();
     await this._open();
     log.debug('im', 'TLS 已建立, 开始协议握手');
     await this._handshake();
@@ -192,8 +203,25 @@ class ImClient extends EventEmitter {
     await this._online();
     this.connected = true;
     this._startHeartbeat();
+    // 官方 ImStatusMananger 在登录成功时发送 cmd25；少了它，服务端可能只接受首个同步，
+    // 后续即使 TCP 心跳正常也不再向这个设备推送聊天。必须等 trigger 完成后再做首次
+    // sync，否则两个请求会并发进入新会话，服务端可能把后一个当成重复触发而不再补发。
+    await this.syncTrigger({ timeout: 5000 });
     log.debug('im', `上线完成 imAccountId=${this.imAccountId} registId=${this.registId}`);
     return this;
+  }
+
+  _syncKeyForAccount(accountId) {
+    const id = Number(accountId) || 0;
+    if (!id) return 0;
+    const keys = this.cfg && this.cfg.imSyncKeys;
+    if (keys && Object.prototype.hasOwnProperty.call(keys, String(id))) {
+      return Number(keys[String(id)]) || 0;
+    }
+    // 旧配置只有全局 imSyncKey；只有确认它属于当前 IM 账号时才能复用。
+    return String(id) === String(this._configuredImAccountId)
+      ? (Number(this.cfg && this.cfg.imSyncKey) || 0)
+      : 0;
   }
 
   _open() {
@@ -271,7 +299,7 @@ class ImClient extends EventEmitter {
       }
       // 回执: 不回的话服务端认为消息没被消费, 会重复下发同一条(线上实测图片会成对出现),
       // 堆积到一定量之后新消息就不再推过来了 —— 用户侧看到的就是「收不到手表消息」
-      if (cmd === CMD.PUSH) this._pushAck(map.has(16) ? map.get(16).toString('utf8') : '');
+      if (cmd === CMD.PUSH) this._pushAck(map.has(10) ? toInt(map.get(10)) : 0);
       this._ackSoon();
     } else if (cmd === CMD.SYNC_INFORM) {
       this.sync().catch(() => {});
@@ -292,6 +320,9 @@ class ImClient extends EventEmitter {
 
   _emitMessage(cmd, map) {
     const msgRaw = map.get(14) || Buffer.alloc(0);
+    // 只有真正的聊天帧才刷新这个时间。心跳和同步空响应也会刷新 lastRecvAt，
+    // 因此不能用那一个值判断「还能不能收到聊天消息」。
+    if (msgRaw.length) this.lastMessageAt = Date.now();
     const msgId = map.has(16) ? map.get(16).toString('utf8') : '';
     const dialogId = map.has(10) ? toInt(map.get(10)) : 0;
     const imAccountId = map.has(11) ? toInt(map.get(11)) : 0;
@@ -365,7 +396,7 @@ class ImClient extends EventEmitter {
         tlv(1, rid),
         tlv(11, this.imAccountId),
         tlv(12, this.registId),
-        tlv(13, this.syncKey || 1),
+        tlv(13, this.syncKey),
       ]), rid, 4000)
         .then((r) => {
           if (this._ackLogged) return;
@@ -383,14 +414,20 @@ class ImClient extends EventEmitter {
   }
 
   // cmd36 下行推送回执
-  _pushAck(msgId) {
+  _pushAck(dialogId) {
     if (!this.imAccountId) return;
     try {
       const rid = this.nextRid();
-      const parts = [tlv(1, rid), tlv(11, this.imAccountId), tlv(12, this.registId)];
-      if (msgId) parts.push(tlv(15, msgId));
-      parts.push(tlv(13, this.syncKey || 1));
-      this._send(CMD.PUSH_ACK, Buffer.concat(parts));
+      // 官方 PushResponseAckRequestEntity 只有 RID/dialogId/imAccountId/registId/syncKey；
+      // tag15 是下行消息的 syncKey 字段，从来不是 msgId（msgId 在 tag16）。
+      // 旧实现把 msgId 放进 tag15，服务端无法反序列化成 long，回执因而没有生效。
+      this._send(CMD.PUSH_ACK, Buffer.concat([
+        tlv(1, rid),
+        tlv(10, Number(dialogId) || 0),
+        tlv(11, this.imAccountId),
+        tlv(12, this.registId),
+        tlv(13, this.syncKey),
+      ]));
       if (!this._pushAckLogged) {
         this._pushAckLogged = true;
         log.debug('im', '已开始对下行推送回执 cmd36');
@@ -461,6 +498,8 @@ class ImClient extends EventEmitter {
       throw new Error(`IM 注册失败(${code}): ${desc}`);
     }
     this.registId = toInt(resp.tags.get(10) || Buffer.alloc(0));
+    this.registToken = resp.tags.has(11) ? resp.tags.get(11).toString('utf8') : '';
+    if (!this.registToken) log.debug('im', '注册响应未返回 registToken，使用兼容登录参数');
     log.debug('im', `注册成功 registId=${this.registId}`);
   }
 
@@ -489,7 +528,7 @@ class ImClient extends EventEmitter {
       tlv(18, APP_VERSION_NAME),
       tlv(20, 1),
       tlv(10, this.registId),
-      tlv(11, 'null'),
+      tlv(11, this.registToken || 'null'),
       tlv(12, APP_VERSION_CODE),
       tlv(21, Buffer.from(Date.now().toString(16).padStart(16, '0'), 'hex')),
     ]);
@@ -514,8 +553,55 @@ class ImClient extends EventEmitter {
       tlv(14, 2),
     ]);
     const resp = await this._request(CMD.ACCOUNT, body, rid);
+    const code = resp.tags.has(2) ? toInt(resp.tags.get(2)) : 0;
+    if (code !== 200) {
+      const desc = resp.tags.has(3) ? resp.tags.get(3).toString('utf8') : '未知错误';
+      throw new Error(`IM 上线失败(${code}): ${desc}`);
+    }
+    const previousImAccountId = this.imAccountId;
     if (resp.tags.has(10)) this.imAccountId = toInt(resp.tags.get(10));
+    // accountToken 是 IM 自己发的专用 token，不能用 SSO 的 cfg.token 代替。
+    // cmd25 必须携带它；旧实现收到后直接扔掉，导致 trigger 无法正确构造。
+    this.accountToken = resp.tags.has(11) ? resp.tags.get(11).toString('utf8') : '';
+    this.syncKey = this._syncKeyForAccount(this.imAccountId);
+    if (previousImAccountId && String(previousImAccountId) !== String(this.imAccountId)) {
+      log.info('im', `IM 账号已切换(${previousImAccountId} → ${this.imAccountId})，改用该账号的同步游标 ${this.syncKey}`);
+    }
+    if (!this.accountToken) log.warn('im', 'IM 上线响应未返回 accountToken，同步触发可能被服务端拒绝');
     return this.imAccountId;
+  }
+
+  async syncTrigger(options = {}) {
+    if (!this.connected || !this.imAccountId) return null;
+    if (this._syncTriggering) return this._syncTriggering;
+    const rid = this.nextRid();
+    const timeout = Number(options.timeout) || 5000;
+    this.lastSyncTriggerAt = Date.now();
+    this.lastSyncTriggerResult = 'pending';
+    const parts = [
+      tlv(1, rid),
+      tlv(10, this.imAccountId),
+      tlv(12, this.registId),
+    ];
+    if (this.accountToken) parts.push(tlv(11, this.accountToken));
+    const shared = this._request(CMD.SYNC_TRIGGER, Buffer.concat(parts), rid, timeout)
+      .then((resp) => {
+        const code = resp.tags.has(2) ? toInt(resp.tags.get(2)) : 0;
+        const desc = resp.tags.has(3) ? resp.tags.get(3).toString('utf8') : '';
+        this.lastSyncTriggerResult = code || 'ok';
+        log.debug('im', `同步触发 cmd25 → ${code || 'ok'}${desc ? ' ' + desc : ''}`);
+        return { ok: code === 200, code, desc };
+      })
+      .catch((e) => {
+        this.lastSyncTriggerResult = 'timeout';
+        log.debug('im', '同步触发 cmd25 无响应: ' + (e && e.message ? e.message : e));
+        return null;
+      });
+    const active = shared.finally(() => {
+      if (this._syncTriggering === active) this._syncTriggering = null;
+    });
+    this._syncTriggering = active;
+    return active;
   }
 
   _startHeartbeat() {
@@ -552,17 +638,39 @@ class ImClient extends EventEmitter {
   }
 
   // 同步离线消息(服务端会按 cmd13 逐条推送)
-  async sync() {
+  async sync(options = {}) {
+    if (!this.connected || !this.imAccountId) return null;
+    // cmd11 可能在 cmd25 还没回包时到达。等 trigger 完成后再读，保证首次同步只有一个起点。
+    if (this._syncTriggering) await this._syncTriggering;
+    if (this._syncing) return this._syncing;
     const rid = this.nextRid();
+    const timeout = Number(options.timeout) || 8000;
+    this.lastSyncAt = Date.now();
+    this.lastSyncResult = 'pending';
     const body = Buffer.concat([
       tlv(1, rid),
       tlv(11, this.imAccountId),
       tlv(12, this.registId),
-      tlv(13, this.syncKey || 1),
-      tlv(14, 15),
-      tlv(0, 1),
+      tlv(13, this.syncKey),
+      tlv(14, 20),
     ]);
-    try { return await this._request(CMD.SYNC, body, rid, 8000); } catch (e) { return null; }
+    // 同一时刻只允许一个 sync。服务端偶尔不返回请求回执，若每轮巡检都叠加
+    // 一个 pending 请求，最终会把长连接的请求表拖满；超时后复用同一结果即可。
+    const shared = this._request(CMD.SYNC, body, rid, timeout)
+      .then((resp) => {
+        const code = resp && resp.tags && resp.tags.has(2) ? toInt(resp.tags.get(2)) : 0;
+        this.lastSyncResult = code || 'ok';
+        return resp;
+      })
+      .catch(() => {
+        this.lastSyncResult = 'timeout';
+        return null;
+      });
+    const active = shared.finally(() => {
+      if (this._syncing === active) this._syncing = null;
+    });
+    this._syncing = active;
+    return active;
   }
 
   _textBody(text) {

@@ -6,7 +6,7 @@
 
 ## 安装与启用
 
-1. 安装 `app-debug.apk`。APK 在桌面显示为 **JzLoginBridge**，可查看登录流程和最近一次结果。
+1. 安装 `apk/JZWechatBridge-v1.4.2-debug.apk`。APK 在桌面显示为 **JzLoginBridge**，可查看登录流程和最近一次结果。
 2. 打开 LSPosed，进入“模块”，选择 **JzLoginBridge** 并启用。
 3. 作用域只勾选 **小天才家长端**（`com.xtc.watch`）。
 4. 彻底关闭并重新打开小天才家长端，让模块注入新进程。

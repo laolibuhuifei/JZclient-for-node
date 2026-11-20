@@ -6,6 +6,7 @@
 //   请求 body          = base64(AES-128-ECB(gzip(body明文)))
 //   响应 encrypted 头存在时: 去掉外层引号 -> base64 -> AES-128-ECB -> 可能再 gzip
 const https = require('https');
+const socks = require('./socks');
 const zlib = require('zlib');
 const crypto = require('crypto');
 const { md5, aesEcbEncrypt, rsaPkcs1Encrypt, derToPem, genAesKey } = require('./crypto');
@@ -174,7 +175,7 @@ class ApiClient {
     let resp;
     try {
       resp = await new Promise((resolve, reject) => {
-        const req = https.request(url, { method, headers, timeout: 15000 }, (res) => {
+        const req = socks.request(url, { method, headers, timeout: 15000 }, (res) => {
           const chunks = [];
           res.on('data', (c) => chunks.push(c));
           res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, raw: Buffer.concat(chunks) }));

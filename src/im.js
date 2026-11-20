@@ -20,6 +20,7 @@ const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const site = require('./site');
 const log = require('./logger');
+const socks = require('./socks');
 
 const IM_HOST = site.im.host;
 const IM_PORT = site.im.port;
@@ -226,23 +227,43 @@ class ImClient extends EventEmitter {
 
   _open() {
     return new Promise((resolve, reject) => {
-      this.sock = tls.connect({
-        host: this.host, port: this.port, servername: this.host, rejectUnauthorized: false,
-      });
       const onErr = (e) => reject(e);
-      this.sock.once('error', onErr);
-      this.sock.once('secureConnect', () => {
-        this.sock.removeListener('error', onErr);
-        this.sock.on('error', (e) => this.emit('error', e));
-        this.sock.on('close', () => {
-          this.connected = false;
-          this.stopHeartbeat();
-          // _die() 主动销毁时也会走到这里, 用 _closed 保证只通知一次, 否则上层会重连两遍
-          if (!this._closed) { this._closed = true; this.emit('close'); }
-        });
-        resolve();
-      });
-      this.sock.on('data', (d) => { this.rbuf = Buffer.concat([this.rbuf, d]); this._pump(); });
+      const attach = (sock, alreadySecure) => {
+        this.sock = sock;
+        this.sock.once('error', onErr);
+        const ready = () => {
+          this.sock.removeListener('error', onErr);
+          this.sock.on('error', (e) => this.emit('error', e));
+          this.sock.on('close', () => {
+            this.connected = false;
+            this.stopHeartbeat();
+            // _die() 主动销毁时也会走到这里, 用 _closed 保证只通知一次, 否则上层会重连两遍
+            if (!this._closed) { this._closed = true; this.emit('close'); }
+          });
+          resolve();
+        };
+        // socks.connectTls() resolves only after secureConnect. Registering a
+        // second secureConnect listener here would leave the IM client waiting
+        // forever, so adopt the already-secure socket directly.
+        if (alreadySecure) ready();
+        else this.sock.once('secureConnect', ready);
+        this.sock.on('data', (d) => { this.rbuf = Buffer.concat([this.rbuf, d]); this._pump(); });
+      };
+      if (socks.enabled()) {
+        if (socks.shouldBypass(`https://${this.host}:${this.port}/`)) {
+          attach(tls.connect({
+            host: this.host, port: this.port, servername: this.host, rejectUnauthorized: false,
+          }), false);
+        } else {
+          socks.connectTls({
+            host: this.host, port: this.port, servername: this.host, rejectUnauthorized: false,
+          }, 20000).then((sock) => attach(sock, true)).catch((e) => reject(e));
+        }
+      } else {
+        attach(tls.connect({
+          host: this.host, port: this.port, servername: this.host, rejectUnauthorized: false,
+        }), false);
+      }
     });
   }
 
